@@ -4,6 +4,41 @@ Completed work, extracted from the roadmap on 2026-07-28. Organized by area.
 
 ---
 
+## 2026-08-14
+
+### Test isolation — stop suite from writing to real state (no production changes)
+
+**Root cause:** `auth.write_token()` calls `_keychain_write()` first and only
+falls back to `TOKEN_FILE` if the keychain is unavailable. Tests were patching
+`auth.TOKEN_FILE` — which only redirected the branch that never ran. The
+keychain write always succeeded, so every `write_token("c" * 64)` in
+`test_api.py` was landing in the real `com.vidanov.quarterdeck / remote-token`
+keychain item. One test run was enough to replace the live token with
+`cccc…cccc`, which rotated it out of sync with phone sessions.
+
+The same missing boundary left `audit-test-key` and `audit-body-probe` in
+`~/.osa-kiro/settings.json`, a test-UUID stack file in `~/.osa-kiro/stacks/`,
+and live exchange codes in `~/.osa-kiro/codes/`.
+
+**Fix (tests only):**
+- `tests/conftest.py`: session-scoped `isolate_state` autouse fixture redirects
+  every Path constant in `backend.{config,auth,tmux_manager,audit,devices,api}`
+  to a `tmp_path_factory` temp directory, and replaces `auth._keychain_read` /
+  `auth._keychain_write` with in-memory dict stubs. No production module touched.
+- `tests/test_isolation.py`: guard test that fails immediately if any backend
+  Path still resolves under `~/.osa-kiro` while tests run, or if the keychain
+  stubs are not in place. Acts as a tripwire for new constants.
+- `tests/test_api.py`: four `TestQRLogin` tests now assert `auth.read_token()`
+  returns the written value (via the stub), and `auth.TOKEN_FILE` does not exist
+  (keychain path succeeded). Removed the now-misleading `TOKEN_FILE` patches.
+- Live state cleaned: token rotated to a random hex value, `audit-test-key` and
+  `audit-body-probe` removed from `settings.json`, test stack file deleted.
+
+**Proof:** SHA-256 of `~/.osa-kiro/settings.json` and the keychain item are
+identical before and after `pytest tests/ -q` (361 passed, 1 skipped).
+
+---
+
 ## 2026-07-28 → 2026-08-14
 
 ### Features shipped
