@@ -424,6 +424,7 @@ async def health_build():
             changed_files = ["frontend/src/"]
 
     stale = bool(stale_reason)
+    dev_mode = bool(os.environ.get("DECK_DEV"))
     return {
         "built_at":      stamp.get("built_at"),
         "git_sha":       stamp.get("git_sha"),
@@ -435,7 +436,81 @@ async def health_build():
         "stale_reason":  stale_reason,
         "changed_files": changed_files,
         "uptime_s":      int(time.time() - _start_time),
+        "dev_mode":      dev_mode,
+        "bundle_mode":   getattr(sys, "frozen", False),
     }
+
+
+@app.post("/api/build/rebuild")
+def build_rebuild():
+    """Rebuild the frontend (and restart) to clear a stale-build banner.
+
+    Repo mode (not frozen): runs ``npm run build`` then restarts via
+    ``os.execv`` so the new frontend/dist is served immediately.
+
+    Bundle mode (frozen .app): launches ``./build-app.sh --install`` in a
+    detached subprocess (it quits the running app itself) and returns
+    immediately.
+
+    Streams progress lines terminated by ``__DONE__`` or ``__ERROR__``.
+    """
+    bundled = getattr(sys, "frozen", False)
+
+    def _stream():
+        def _run_step(label, *args, cwd=None):
+            yield f"▶ {label}\n"
+            proc = subprocess.Popen(
+                list(args),
+                cwd=str(cwd or _REPO_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for line in proc.stdout:
+                yield line
+            proc.wait()
+            if proc.returncode != 0:
+                yield f"✗ {label} failed (exit {proc.returncode})\n"
+                raise RuntimeError(label)
+            yield f"✓ {label}\n"
+
+        try:
+            if bundled:
+                # The build script quits the app, so just fire it detached.
+                build_sh = _REPO_ROOT / "build-app.sh"
+                if not build_sh.exists():
+                    yield "✗ build-app.sh not found\n__ERROR__\n"
+                    return
+                subprocess.Popen(
+                    ["bash", str(build_sh), "--install"],
+                    cwd=str(_REPO_ROOT),
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                yield "▶ build-app.sh --install launched (app will restart)\n"
+                yield "__DONE__\n"
+            else:
+                # Repo mode: rebuild frontend then restart in-place.
+                yield from _run_step(
+                    "npm run build",
+                    "npm", "run", "build",
+                    cwd=_REPO_ROOT / "frontend",
+                )
+                yield "✓ Rebuild complete. Restarting…\n"
+                yield "__DONE__\n"
+
+                def _restart():
+                    import time as _time
+                    _time.sleep(1.0)
+                    import os as _os
+                    _os.execv(sys.executable, [sys.executable] + sys.argv)
+                threading.Thread(target=_restart, daemon=True).start()
+
+        except RuntimeError:
+            yield "__ERROR__\n"
+
+    return StreamingResponse(_stream(), media_type="text/plain")
 
 
 def _atomic_write_json(path: Path, data) -> None:
