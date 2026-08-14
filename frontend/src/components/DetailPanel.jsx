@@ -343,7 +343,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   // Declared here — before any effect — so every effect can reference them.
   const control = detail?.control || session.control
   const status = detail?.status || session.status
-  const canSend = control === 'managed'
+  const canSend = control === 'managed' || control === 'acp'
 
   // One view, two renderings. A working agent gets the tmux pane; a stopped one
   // gets the transcript (where turns can be forked). The pin overrides both.
@@ -1101,6 +1101,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           )}
           {control === 'archived' && (
             <button className="detail-switch" onClick={() => onResume(session)}>▶ Resume</button>
+          )}
+          {control === 'acp' && (
+            <span className="detail-acp-badge" title="Input routed via ACP — no tmux pane needed">◉ ACP</span>
           )}
           {canSend && (
             <button className="detail-switch" onClick={() => handoff(handoffTerminal)}

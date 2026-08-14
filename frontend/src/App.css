@@ -1719,6 +1719,18 @@ body.resizing .detail-resize::after { background: var(--accent); }
   font-weight: 600;
 }
 .detail-switch:hover { background: #15803d; }
+.detail-acp-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
 .detail-gate {
   padding: 3px 8px;
   background: none;

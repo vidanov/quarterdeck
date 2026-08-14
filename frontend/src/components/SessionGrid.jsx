@@ -10,6 +10,7 @@ const CONTROL_LABEL = {
   foreign: { text: '◇ foreign', title: 'Started outside the app — read-only until taken over' },
   archived: { text: '· archived', title: 'Not running' },
   crew: { text: '⬡ crew', title: 'KiroCrew ACP session — read-only' },
+  acp: { text: '◉ ACP', title: 'V3 session — input routed via ACP' },
 }
 
 function CardReply({ session, held, onRespondApproval, onRespondPrompt, onSendText }) {
