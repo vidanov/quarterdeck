@@ -1052,9 +1052,11 @@ class TestQRExchangeCode:
 
     def test_the_qr_url_does_not_contain_the_token(self, tmp_path):
         token = "a" * 64
-        with patch.object(auth, "TOKEN_FILE", tmp_path / "token"), \
-             patch.object(api, "_tailscale_ip", lambda: "100.64.0.1"):
+        with patch.object(api, "_tailscale_ip", lambda: "100.64.0.1"):
             auth.write_token(token)
+            # Token stored in stub keychain (not real macOS keychain).
+            assert auth.read_token() == token
+            assert not auth.TOKEN_FILE.exists()  # keychain path succeeded, no file
             body = client.get("/api/remote/token").json()
         assert token not in body["login_url"]
         assert token not in body["qr_svg"]
@@ -1062,11 +1064,11 @@ class TestQRExchangeCode:
 
     def test_no_remote_url_means_no_qr_and_no_exchange_code(self, tmp_path):
         token = "a" * 64
-        with patch.object(auth, "TOKEN_FILE", tmp_path / "token"), \
-             patch.object(api, "_tailscale_ip", return_value=None), \
+        with patch.object(api, "_tailscale_ip", return_value=None), \
              patch.object(auth, "mint_exchange_code") as mint, \
              patch.object(api, "_make_qr_svg") as make_qr:
             auth.write_token(token)
+            assert auth.read_token() == token
             body = client.get("/api/remote/token").json()
         assert body["login_url"] == ""
         assert body["qr_svg"] == ""
@@ -1075,27 +1077,27 @@ class TestQRExchangeCode:
 
     def test_login_accepts_the_code_and_sets_the_cookie(self, tmp_path):
         token = "b" * 64
-        with patch.object(auth, "TOKEN_FILE", tmp_path / "token"):
-            auth.write_token(token)
-            code = auth.mint_exchange_code()
-            r = client.get(f"/login?c={code}&next=/app/", follow_redirects=False)
-            assert r.status_code == 303
-            assert auth.COOKIE_NAME in r.cookies
-            # Burned: the same scan cannot be replayed off someone's history.
-            # Cookies cleared first, or the replay would be waved through as an
-            # already-logged-in client and prove nothing about the code.
-            client.cookies.clear()
-            again = client.get(f"/login?c={code}&next=/app/", follow_redirects=False)
-            assert again.status_code == 200  # the login form, not a redirect
+        auth.write_token(token)
+        assert auth.read_token() == token
+        code = auth.mint_exchange_code()
+        r = client.get(f"/login?c={code}&next=/app/", follow_redirects=False)
+        assert r.status_code == 303
+        assert auth.COOKIE_NAME in r.cookies
+        # Burned: the same scan cannot be replayed off someone's history.
+        # Cookies cleared first, or the replay would be waved through as an
+        # already-logged-in client and prove nothing about the code.
+        client.cookies.clear()
+        again = client.get(f"/login?c={code}&next=/app/", follow_redirects=False)
+        assert again.status_code == 200  # the login form, not a redirect
         client.cookies.clear()
 
     def test_the_raw_token_is_no_longer_a_login_url(self, tmp_path):
         # The whole point: ?t=<token> used to work, which is what put the secret
         # into logs and history in the first place.
         token = "c" * 64
-        with patch.object(auth, "TOKEN_FILE", tmp_path / "token"):
-            auth.write_token(token)
-            r = client.get(f"/login?t={token}&next=/app/", follow_redirects=False)
+        auth.write_token(token)
+        assert auth.read_token() == token
+        r = client.get(f"/login?t={token}&next=/app/", follow_redirects=False)
         assert r.status_code == 200  # form, not a 303
 
 
