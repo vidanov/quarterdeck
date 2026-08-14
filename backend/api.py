@@ -5407,27 +5407,29 @@ def remote_stop(request: Request):
         return {"error": "local only"}
     stopped = False
     with _remote_lock:
-        # Stop thread-based server (packaged app)
+        # Stop thread-based proxy (packaged app).
+        # Signal the loop via the thread attribute it polls, then release our
+        # reference. The loop exits within 1 second (its socket timeout).
+        if _remote_thread and _remote_thread.is_alive():
+            _remote_thread._stop_proxy = True  # type: ignore[attr-defined]
+            _remote_thread = None
+            stopped = True
+        # Stop thread-based uvicorn server (legacy path).
         if _remote_server:
             _remote_server.should_exit = True
             _remote_server = None
             _remote_thread = None
             stopped = True
-        # Kill subprocess (dev/repo)
+        # Kill subprocess (dev/repo caffeinate+uvicorn).
         if _remote_process:
             _remote_process.terminate()
             _remote_process = None
             stopped = True
-    # Also kill any uvicorn bound to the Tailscale address on our port,
-    # regardless of how it was started (manual remote.sh, earlier app start, etc.)
-    #
-    # Scoped to the address, not just the port. `TCP:<port>` matches every
-    # listener on that number, which includes this app's own loopback backend —
-    # and stopping remote access is not licence to kill the app serving the
-    # button you just pressed. The old guard tried to filter afterwards by
-    # looking for the Tailscale IP anywhere in the process's open files, which
-    # is a substring match over unrelated sockets. `TCP@<addr>:<port>` asks lsof
-    # the question directly, the way _remote_running() already does.
+    # Also kill any *other* process bound to the Tailscale address on our port
+    # (e.g. a leftover remote.sh from a previous session). Explicitly exclude
+    # our own PID — the proxy socket is owned by this process and lsof would
+    # otherwise return our own PID, causing a self-SIGTERM.
+    our_pid = os.getpid()
     ts_ip = _tailscale_ip()
     if ts_ip:
         try:
@@ -5437,19 +5439,15 @@ def remote_stop(request: Request):
             )
             for pid_str in r.stdout.strip().split():
                 try:
-                    os.kill(int(pid_str), 15)  # SIGTERM
+                    pid = int(pid_str)
+                    if pid == our_pid:
+                        continue  # never kill ourselves
+                    os.kill(pid, 15)  # SIGTERM
                     stopped = True
                 except (ValueError, OSError):
                     pass
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-    # Fallback: pkill any caffeinate+uvicorn combo on the tailscale address
-    if ts_ip and not stopped:
-        subprocess.run(
-            ["pkill", "-f", f"uvicorn.*{ts_ip}"],
-            capture_output=True,
-        )
-        stopped = True
     s = _load_settings(); s["remote-autostart"] = False; _save_settings(s)
     return {"ok": True, "stopped": stopped}
 
