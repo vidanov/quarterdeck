@@ -1800,8 +1800,14 @@ export default function App() {
                           onClick={() => setLauncherOpen(true)}>+ <span className="wall-new-label">New session</span></button>
                   <button className="wall-settings" title="Settings"
                           onClick={() => { changeSessionViewMode('cards'); changeView('settings') }}>⚙</button>
-                  <button className="wall-exit" title="Exit wall view"
-                          onClick={() => changeSessionViewMode('cards')}>⊞ Grid</button>
+                  <div className="view-mode-btns wall-view-mode-btns">
+                    <button className={`view-mode-btn ${sessionViewMode === 'cards' ? 'active' : ''}`}
+                            title="Card view" onClick={() => changeSessionViewMode('cards')}>⊞</button>
+                    <button className={`view-mode-btn ${sessionViewMode === 'list' ? 'active' : ''}`}
+                            title="List view" onClick={() => changeSessionViewMode('list')}>☰</button>
+                    <button className={`view-mode-btn ${sessionViewMode === 'wall' ? 'active' : ''}`}
+                            title="Wall view" onClick={() => changeSessionViewMode('wall')}>⬚</button>
+                  </div>
                 </div>
               </div>
               {launcherOpen && (
