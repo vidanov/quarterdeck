@@ -339,7 +339,33 @@ export default function App() {
   }
   const changeControlFilter = (v) => { setControlFilter(v); localStorage.setItem('control-filter', v) }
   const changeStatusFilter = (v) => { setStatusFilter(v); if (v) localStorage.setItem('status-filter', v); else localStorage.removeItem('status-filter') }
-  const changeSessionViewMode = (v) => { setSessionViewMode(v); localStorage.setItem('session-view-mode', v) }
+  const changeSessionViewMode = (v) => {
+    // Remember the last non-wall mode so wall exit restores it
+    if (v !== 'wall') localStorage.setItem('session-view-mode-flat', v)
+    setSessionViewMode(v)
+    localStorage.setItem('session-view-mode', v)
+  }
+  const toggleWall = () => {
+    if (sessionViewMode === 'wall') {
+      const flat = localStorage.getItem('session-view-mode-flat') || 'cards'
+      changeSessionViewMode(flat)
+    } else {
+      changeSessionViewMode('wall')
+    }
+  }
+  // Icon names the *destination*, not the current mode
+  const WallToggleBtn = () => {
+    if (sessionViewMode === 'wall') {
+      const flat = localStorage.getItem('session-view-mode-flat') || 'cards'
+      const icon = flat === 'list' ? '☰' : '⊞'
+      return (
+        <button className="wall-toggle-btn active" title="Exit wall view" onClick={toggleWall}>{icon}</button>
+      )
+    }
+    return (
+      <button className="wall-toggle-btn" title="Wall / ambient view" onClick={toggleWall}>⬚</button>
+    )
+  }
 
   const [showHidden, setShowHidden] = useState(() => localStorage.getItem('show-hidden') === '1')
   const changeShowHidden = (v) => { setShowHidden(v); if (v) localStorage.setItem('show-hidden', '1'); else localStorage.removeItem('show-hidden') }
@@ -1176,6 +1202,7 @@ export default function App() {
           <ProfilePill visibleSessionIds={visibleSessionIds}
                        onProfileSwitch={() => settingsApi.getOptions().then(setOptions).catch(() => {})}
                        onCurrentProfile={setActiveProfileName} />
+          {view === 'active' && !focusMode && <WallToggleBtn />}
           <button className={`gear-btn ${view === 'settings' ? 'active' : ''}`}
                   onClick={() => changeView(view === 'settings' ? 'active' : 'settings')}
                   title="Settings">⚙</button>
@@ -1353,14 +1380,12 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                {/* View mode switcher */}
+                {/* View mode switcher — cards/list only; wall toggle lives in the header */}
                 <div className="view-mode-btns">
                   <button className={`view-mode-btn ${sessionViewMode === 'cards' ? 'active' : ''}`}
                           title="Card view" onClick={() => changeSessionViewMode('cards')}>⊞</button>
                   <button className={`view-mode-btn ${sessionViewMode === 'list' ? 'active' : ''}`}
                           title="List view" onClick={() => changeSessionViewMode('list')}>☰</button>
-                  <button className={`view-mode-btn ${sessionViewMode === 'wall' ? 'active' : ''}`}
-                          title="Wall / ambient view — read-only, second monitor" onClick={() => changeSessionViewMode('wall')}>⬚</button>
                 </div>
               </div>
               {/* One prompt box at a time. The launcher is the quick line with
@@ -1800,14 +1825,7 @@ export default function App() {
                           onClick={() => setLauncherOpen(true)}>+ <span className="wall-new-label">New session</span></button>
                   <button className="wall-settings" title="Settings"
                           onClick={() => { changeSessionViewMode('cards'); changeView('settings') }}>⚙</button>
-                  <div className="view-mode-btns wall-view-mode-btns">
-                    <button className={`view-mode-btn ${sessionViewMode === 'cards' ? 'active' : ''}`}
-                            title="Card view" onClick={() => changeSessionViewMode('cards')}>⊞</button>
-                    <button className={`view-mode-btn ${sessionViewMode === 'list' ? 'active' : ''}`}
-                            title="List view" onClick={() => changeSessionViewMode('list')}>☰</button>
-                    <button className={`view-mode-btn ${sessionViewMode === 'wall' ? 'active' : ''}`}
-                            title="Wall view" onClick={() => changeSessionViewMode('wall')}>⬚</button>
-                  </div>
+                  <WallToggleBtn />
                 </div>
               </div>
               {launcherOpen && (
