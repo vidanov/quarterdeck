@@ -4375,6 +4375,11 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .view-mode-btn:hover { background: var(--surface); color: var(--text); }
 .view-mode-btn.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
 
+/* Wall view: view-mode switcher sits on a dark header — invert colours */
+.wall-view-mode-btns .view-mode-btn { color: rgba(255,255,255,0.5); }
+.wall-view-mode-btns .view-mode-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+.wall-view-mode-btns .view-mode-btn.active { background: rgba(255,255,255,0.2); color: #fff; box-shadow: none; }
+
 /* ── List View ────────────────────────────────────────────────────────────── */
 .list-view {
   margin: 0 0 16px;
