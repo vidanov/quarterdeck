@@ -1455,9 +1455,6 @@ def list_sessions():
     seen_ids = set()
     now = time.time()
 
-    if not SESSIONS_DIR.exists():
-        return {"sessions": []}
-
     managed = tmux.managed_sessions()
 
     # Pendings whose owning backend died leave a card nothing can remove, so
@@ -1483,8 +1480,8 @@ def list_sessions():
     concierge_session_id = concierge._session_id
     if not concierge_session_id and concierge.is_alive():
         concierge_session_id = concierge._find_session_id()
-    
-    for lock_file in SESSIONS_DIR.glob("*.lock"):
+
+    for lock_file in (SESSIONS_DIR.glob("*.lock") if SESSIONS_DIR.exists() else []):
         session_id = lock_file.stem
         
         # Skip the concierge session — it's internal to Quarterdeck
