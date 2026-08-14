@@ -1755,7 +1755,7 @@ def list_sessions():
             "cwd_display": shorten_path(raw_cwd),
             "status": status,
             "last_message": last_msg,
-            "control": "archived",
+            "control": "acp" if acp_observer.is_attached(v3_id) else "archived",
             "attach": "",
             "agent": meta.get("agent_mode") or "",
             "model": meta.get("model") or "",
@@ -1972,7 +1972,7 @@ def get_session_detail(session_id: str):
             "cwd": raw_cwd,
             "cwd_display": shorten_path(raw_cwd),
             "status": status,
-            "control": "archived",
+            "control": "acp" if acp_observer.is_attached(session_id) else "archived",
             "attach": "",
             "agent": meta.get("agent_mode") or "",
             "model": meta.get("model") or "",
@@ -2789,18 +2789,24 @@ def send_input(session_id: str, payload: dict):
     text = payload.get("text", payload.get("task", ""))
     if not text.strip():
         return {"error": "No text provided"}
-    if not tmux.is_managed(session_id):
-        return {"error": "Session is not managed — take it over first"}
     # Newlines would submit early, so collapse them into one prompt.
     flat = " ".join(text.split())
 
-    # Task 5: route via ACP for observed sessions.
+    # ACP-observed sessions (V3 foreign) bypass the tmux is_managed gate —
+    # they communicate directly via the ACP session/prompt channel.
     if acp_observer.is_attached(session_id):
         try:
-            acp_observer.send_prompt(session_id, flat)
-            return {"ok": True, "sent": flat[:200], "via": "acp"}
+            if text.startswith("/"):
+                if acp_observer.execute_command(session_id, flat):
+                    return {"ok": True, "sent": flat[:200], "via": "acp-cmd"}
+            else:
+                acp_observer.send_prompt(session_id, flat)
+                return {"ok": True, "sent": flat[:200], "via": "acp"}
         except Exception:
-            pass  # fall back to tmux below
+            pass  # fall through to tmux
+
+    if not tmux.is_managed(session_id):
+        return {"error": "Session is not managed — take it over first"}
 
     result = tmux.send_text(session_id, flat)
     if not result.get("ok"):
@@ -2833,7 +2839,10 @@ def respond_to_prompt(session_id: str, payload: dict):
     Accepts a named choice (allow / trust / deny / dismiss) which expands to the
     menu navigation kiro-cli expects, or raw `keys` for anything else.
     """
-    if not tmux.is_managed(session_id):
+    # ACP-observed V3 sessions bypass the tmux gate — approval keys sent via tmux
+    # if the session also has a pane, otherwise returns an error noting ACP-only.
+    is_acp = acp_observer.is_attached(session_id)
+    if not is_acp and not tmux.is_managed(session_id):
         return {"error": "Session is not managed — take it over first"}
 
     choice = str(payload.get("choice", "")).strip()
@@ -2849,6 +2858,9 @@ def respond_to_prompt(session_id: str, payload: dict):
         return {"error": f"unsupported keys: {bad}"}
 
     for key in keys:
+        if not tmux.is_managed(session_id):
+            # ACP-only session: no tmux pane to send keys to
+            return {"error": "No tmux pane for this session — approval keys require a managed pane"}
         result = tmux.send_key(session_id, key)
         if not result.get("ok"):
             return {"error": result.get("error", "send failed")}
