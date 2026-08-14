@@ -102,9 +102,13 @@ def isolate_state(tmp_path_factory):
         _fake_keychain[account] = value
         return True
 
+    def _fake_delete(account: str) -> None:
+        _fake_keychain.pop(account, None)
+
     from backend import auth as _auth
     patches.append(patch.object(_auth, "_keychain_read", _fake_read))
     patches.append(patch.object(_auth, "_keychain_write", _fake_write))
+    patches.append(patch.object(_auth, "_keychain_delete", _fake_delete))
 
     for p in patches:
         p.start()

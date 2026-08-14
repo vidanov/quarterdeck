@@ -476,20 +476,31 @@ def build_rebuild():
 
         try:
             if bundled:
-                # The build script quits the app, so just fire it detached.
+                # Bundle mode: run build-app.sh --install and stream its output.
+                # The script calls `quit app "Quarterdeck"` which terminates this
+                # process, so we stream output until the pipe closes (process exits
+                # or kills us). Only emit __DONE__ if the script exits 0 first.
                 build_sh = _REPO_ROOT / "build-app.sh"
                 if not build_sh.exists():
                     yield "✗ build-app.sh not found\n__ERROR__\n"
                     return
-                subprocess.Popen(
+                proc = subprocess.Popen(
                     ["bash", str(build_sh), "--install"],
                     cwd=str(_REPO_ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
                     start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
                 )
-                yield "▶ build-app.sh --install launched (app will restart)\n"
-                yield "__DONE__\n"
+                for line in proc.stdout:
+                    yield line
+                proc.wait()
+                if proc.returncode == 0:
+                    yield "✓ Build complete. App will relaunch shortly.\n"
+                    yield "__DONE__\n"
+                else:
+                    yield f"✗ build-app.sh --install failed (exit {proc.returncode})\n"
+                    yield "__ERROR__\n"
             else:
                 # Repo mode: rebuild frontend then restart in-place.
                 yield from _run_step(
@@ -5281,7 +5292,10 @@ def _remote_running() -> bool:
             return True
         if _remote_process and _remote_process.poll() is None:
             return True
-    # Detect any uvicorn bound to the Tailscale address on our port
+    # Detect any listener actually bound to the Tailscale address on our port.
+    # This is the authoritative check — a process is running only if the socket
+    # exists. _launchagent_loaded() alone is not sufficient: the agent may be
+    # installed but the socket not yet bound (e.g. after a Stop that unloaded it).
     ts_ip = _tailscale_ip()
     if ts_ip:
         try:
@@ -5293,7 +5307,7 @@ def _remote_running() -> bool:
                 return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-    return _launchagent_loaded()
+    return False
 
 
 def _launchagent_loaded() -> bool:
@@ -5405,11 +5419,26 @@ def remote_stop(request: Request):
     global _remote_process, _remote_server, _remote_thread
     if not require_local(request):
         return {"error": "local only"}
+
+    # Persist intent BEFORE any kill so a crash mid-stop cannot leave
+    # remote-autostart=True and have the lifespan hook restart the listener.
+    s = _load_settings(); s["remote-autostart"] = False; _save_settings(s)
+
     stopped = False
+
+    # Unload the LaunchAgent first so launchd does not respawn the listener
+    # the moment we kill it. Silent if not installed.
+    if _launchagent_loaded():
+        try:
+            subprocess.run(
+                ["launchctl", "unload", str(LAUNCHAGENT_PLIST)],
+                capture_output=True, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
     with _remote_lock:
         # Stop thread-based proxy (packaged app).
-        # Signal the loop via the thread attribute it polls, then release our
-        # reference. The loop exits within 1 second (its socket timeout).
         if _remote_thread and _remote_thread.is_alive():
             _remote_thread._stop_proxy = True  # type: ignore[attr-defined]
             _remote_thread = None
@@ -5425,10 +5454,10 @@ def remote_stop(request: Request):
             _remote_process.terminate()
             _remote_process = None
             stopped = True
-    # Also kill any *other* process bound to the Tailscale address on our port
-    # (e.g. a leftover remote.sh from a previous session). Explicitly exclude
-    # our own PID — the proxy socket is owned by this process and lsof would
-    # otherwise return our own PID, causing a self-SIGTERM.
+
+    # Kill any *other* process bound to the Tailscale address on our port.
+    # Exclude our own PID — the proxy socket is owned by this process and
+    # lsof would otherwise return our own PID, causing a self-SIGTERM.
     our_pid = os.getpid()
     ts_ip = _tailscale_ip()
     if ts_ip:
@@ -5441,14 +5470,14 @@ def remote_stop(request: Request):
                 try:
                     pid = int(pid_str)
                     if pid == our_pid:
-                        continue  # never kill ourselves
+                        continue
                     os.kill(pid, 15)  # SIGTERM
                     stopped = True
                 except (ValueError, OSError):
                     pass
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-    s = _load_settings(); s["remote-autostart"] = False; _save_settings(s)
+
     return {"ok": True, "stopped": stopped}
 
 

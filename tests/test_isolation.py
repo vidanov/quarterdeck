@@ -63,8 +63,6 @@ class TestStateIsolation:
         """auth._keychain_write must be a stub, not the real security subprocess."""
         from backend import auth
 
-        # The real implementation calls subprocess.run with ["security", ...]
-        # A stub will not do that. We detect the real one by source inspection.
         import inspect as _inspect
         src = _inspect.getsource(auth._keychain_write)
         assert "security" not in src, (
@@ -79,5 +77,15 @@ class TestStateIsolation:
         src = _inspect.getsource(auth._keychain_read)
         assert "security" not in src, (
             "auth._keychain_read still calls the real macOS keychain.\n"
+            "The isolation fixture must replace it with an in-memory stub."
+        )
+
+    def test_keychain_delete_is_stubbed(self):
+        """auth._keychain_delete must be a stub, not the real security subprocess."""
+        from backend import auth
+        import inspect as _inspect
+        src = _inspect.getsource(auth._keychain_delete)
+        assert "security" not in src, (
+            "auth._keychain_delete still calls the real macOS keychain.\n"
             "The isolation fixture must replace it with an in-memory stub."
         )

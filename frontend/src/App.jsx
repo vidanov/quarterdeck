@@ -1219,6 +1219,11 @@ export default function App() {
               setRebuildDone(false)
               fetch('/api/build/rebuild', { method: 'POST' })
                 .then(r => {
+                  if (!r.ok) {
+                    r.text().then(t => setRebuildLog([`✗ Request failed (${r.status}): ${t}`]))
+                    setRebuilding(false)
+                    return
+                  }
                   const reader = r.body.getReader()
                   const decoder = new TextDecoder()
                   const pump = () => reader.read().then(({ done, value }) => {
@@ -1237,7 +1242,7 @@ export default function App() {
                   })
                   pump()
                 })
-                .catch(() => setRebuilding(false))
+                .catch(e => { setRebuildLog([`✗ ${e.message}`]); setRebuilding(false) })
             }}
           >
             {rebuilding ? 'Building…' : 'Rebuild →'}
@@ -1253,7 +1258,7 @@ export default function App() {
       {(rebuilding || rebuildLog.length > 0) && (
         <div className="rebuild-modal">
           <div className="rebuild-modal-header">
-            <span>{rebuildDone ? '✓ Rebuild complete' : rebuilding ? 'Rebuilding…' : 'Build output'}</span>
+            <span>{rebuildDone ? '✓ Rebuild complete' : rebuilding ? 'Rebuilding…' : rebuildLog.some(l => l.includes('__ERROR__') || l.startsWith('✗')) ? '✗ Build failed' : 'Build output'}</span>
             {!rebuilding && (
               <button className="rebuild-modal-close" onClick={() => { setRebuildLog([]); setRebuildDone(false) }}>✕</button>
             )}
