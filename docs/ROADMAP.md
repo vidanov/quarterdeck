@@ -578,6 +578,32 @@ path for V3 sessions.
   due to auth token refresh returning empty. Cannot confirm or deny yet.
   The step-boundary gate question remains open pending a full auth flow.
 
+**Probe results (2026-08-14, kiro-cli 2.16.2 — session/load conflict test):**
+
+`session/load` against a tmux-owned V3 session **hangs without response**. Tested
+three times with throwaway sessions. The ACP process initializes cleanly
+(`--agent-engine v3`, no `--trust-all-tools` which is incompatible with v3),
+`initialize` returns normally, but `session/load` with the live session id
+produces no reply within 20 seconds. The tmux session survives and the transcript
+stays parseable. The messages.jsonl line growth observed was from the tmux session
+completing its own turn, not from the ACP process writing.
+
+| Question | Result |
+|---|---|
+| `session/load` against tmux-owned session | **hangs — no response** |
+| ACP process writes to messages.jsonl | no |
+| tmux session survives the probe | yes |
+| Events arrive for tmux-driven turns | not reached (load never returned) |
+| Transcript parseable after probe | yes |
+
+**Conclusion:** ACP is not a viable side-channel for sessions it did not spawn.
+The wrapper (Task 2) uses `session/new` only and owns its sessions from spawn.
+**12g falls back to `tmux send-keys`** for V3 sessions Quarterdeck manages via tmux.
+Tasks 3–7 follow the fallback branch of the flowchart.
+
+Prerequisite for section 14 (constraint loop): ACP can drive sessions it spawns
+itself. The `session/load` path for externally-owned sessions is closed.
+
 ### Work
 
 - [x] **Probe ACP engine flag.** Run the two open questions above and
