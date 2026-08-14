@@ -318,7 +318,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   // Transcript with seq numbers for branch-at-turn
   const [messages, setMessages] = useState(null)
   const [loadingMessages, setLoadingMessages] = useState(false)
+  const [messagesError, setMessagesError] = useState(null)
   const transcriptMaxSeq = useRef(-1)
+  // Guard ref: tracks which session id we've already triggered a load for,
+  // so the effect fires exactly once per session rather than on every render
+  // that finds messages===null (which caused an infinite retry storm on error).
+  const transcriptLoadedFor = useRef(null)
 
   // Side chat state
   const [sideChatOpen, setSideChatOpen] = useState(false)
@@ -351,7 +356,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   useEffect(() => {
     setMessages(null)
     setLoadingMessages(false)
+    setMessagesError(null)
     transcriptMaxSeq.current = -1
+    transcriptLoadedFor.current = null
     setViewOverride(null)  // clear any manual pin when switching sessions
     setCorrections([])     // clear stale corrections before the fetch for the new session
     // Close side chat when switching sessions
@@ -619,10 +626,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   // The transcript is the resting view now, so it loads whenever we land on it
   // rather than only on an explicit tab click.
+  // Guard: only fire once per session id to avoid a retry storm when a fetch
+  // fails (messages===null + loadingMessages===false re-triggers indefinitely).
   useEffect(() => {
     if (effectiveView !== 'transcript') return
-    if (messages !== null || loadingMessages) return
+    if (transcriptLoadedFor.current === session.id) return
+    transcriptLoadedFor.current = session.id
     setLoadingMessages(true)
+    setMessagesError(null)
     api.getMessages(session.id, -1, 2000)
       .then(d => {
         const msgs = d.messages || []
@@ -634,9 +645,13 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight
         }, 50)
       })
-      .catch(() => {})
+      .catch(err => {
+        setMessagesError(err?.message || 'Failed to load transcript')
+        // Reset the guard so an explicit Retry can re-trigger the load.
+        transcriptLoadedFor.current = null
+      })
       .finally(() => setLoadingMessages(false))
-  }, [effectiveView, session.id, messages, loadingMessages])
+  }, [effectiveView, session.id])
 
 
   // The jsonl only gains entries once a turn completes, so it lags badly while
@@ -1319,8 +1334,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       )}
       {effectiveView === 'transcript' && (
         <div className={`chat-transcript pane-${paneTheme}`} ref={termRef} onScroll={onTranscriptScroll}>
-          <TranscriptErrorBoundary onRetry={() => { setMessages(null); setLoadingMessages(false) }}>
-          {(loadingMessages || messages === null) && (() => {
+          <TranscriptErrorBoundary onRetry={() => { setMessages(null); setLoadingMessages(false); setMessagesError(null); transcriptLoadedFor.current = null }}>
+          {messagesError && !loadingMessages && (
+            <div className="transcript-load-error">
+              <span>Failed to load transcript: {messagesError}</span>
+              <button onClick={() => { setMessagesError(null); transcriptLoadedFor.current = null }}>Retry</button>
+            </div>
+          )}
+          {(loadingMessages || messages === null) && !messagesError && (() => {
             // Use session prop fields — always available without waiting for detail fetch.
             // last_message is the last assistant text; title is the first user prompt.
             // Show the last user entry from detail.output if available, otherwise title.
@@ -1458,8 +1479,22 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 const unique = [...new Set(allTools)]
                 const totalResults = toolCalls.reduce((n, tc) => n + (tc.toolResult?.results || 0), 0)
                 const label = `${allTools.length} tool call${allTools.length !== 1 ? 's' : ''}: ${unique.join(', ')} · ${totalResults} result${totalResults !== 1 ? 's' : ''}`
+                // Collect prose that precedes tools within each assistantMsg entry.
+                // This is the reasoning/narration the model emits before calling a tool —
+                // it lives in assistantMsg.text and was never rendered before this fix.
+                const leadingProse = toolCalls
+                  .map(tc => tc.assistantMsg.text)
+                  .filter(Boolean)
                 return (
                   <div key={block.key} className="chat-row chat-row-assistant">
+                    {leadingProse.map((prose, idx) => (
+                      <div key={idx} className="chat-assistant-text">
+                        <Markdown text={prose.slice(0, 16000)} />
+                        {toolCalls[idx]?.assistantMsg?.truncated && (
+                          <span className="chat-truncated-marker">…truncated</span>
+                        )}
+                      </div>
+                    ))}
                     <details className="chat-tools">
                       <summary className="chat-tools-summary">▶ {label}</summary>
                       <div className="chat-tools-list">
@@ -1472,7 +1507,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     </details>
                     {finalMsg?.text && (
                       <div className="chat-assistant-text">
-                        <Markdown text={finalMsg.text.slice(0, 8000)} />
+                        <Markdown text={finalMsg.text.slice(0, 16000)} />
+                        {finalMsg.truncated && (
+                          <span className="chat-truncated-marker">…truncated</span>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1485,7 +1523,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   <div key={block.key} className="chat-row chat-row-assistant">
                     {msg.text && (
                       <div className="chat-assistant-text">
-                        <Markdown text={msg.text.slice(0, 8000)} />
+                        <Markdown text={msg.text.slice(0, 16000)} />
+                        {msg.truncated && (
+                          <span className="chat-truncated-marker">…truncated</span>
+                        )}
                       </div>
                     )}
                   </div>
