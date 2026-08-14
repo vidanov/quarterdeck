@@ -654,7 +654,7 @@ def get_last_output(session_id: str) -> str:
 
 # Per-message caps. Generous enough to read, small enough that a 400-turn
 # session does not become a megabyte of JSON on the wire.
-MESSAGE_TEXT_MAX = 4000
+MESSAGE_TEXT_MAX = 16000
 MESSAGE_LIMIT_DEFAULT = 200
 MESSAGE_LIMIT_MAX = 2000
 # A single jsonl line above this is not parsed. Tool results are one line each

@@ -84,8 +84,13 @@ class TestTranscript:
     SID = "11111111-2222-3333-4444-555555555555"
 
     @staticmethod
-    def _entry(kind, text="", *, message_id=""):
-        content = [{"kind": "text", "data": text}] if text else []
+    def _entry(kind, text="", *, message_id="", tools=()):
+        """Build a minimal JSONL entry. Pass tools=["tool_name"] for tool-use entries."""
+        content = []
+        if text:
+            content.append({"kind": "text", "data": text})
+        for tool_name in tools:
+            content.append({"kind": "toolUse", "data": {"name": tool_name, "input": {}}})
         return {
             "kind": kind,
             "data": {
@@ -146,6 +151,35 @@ class TestTranscript:
                     self._entry("AssistantMessage", "new answer")
                 ) + "\n")
             assert api.last_message(self.SID) == "new answer"
+
+    def test_entry_with_text_and_tools_returns_both(self, tmp_path):
+        """An AssistantMessage that has prose AND tool calls must expose both.
+
+        This is the regression test for the transcript truncation bug: the text
+        field (the leading prose) was present in the JSONL but dropped on the
+        way out because _block_text() was not extracting it alongside toolUse
+        blocks. The fix is in _block_text / _block_tools; this test pins it.
+        """
+        entry = self._entry("AssistantMessage", "Let me check that for you.",
+                            tools=["fs_read"])
+        self._write(tmp_path, [entry])
+        with patch.object(api, "SESSIONS_DIR", tmp_path):
+            data = client.get(f"/api/sessions/{self.SID}/messages").json()
+        msg = data["messages"][0]
+        assert msg["text"] == "Let me check that for you.", (
+            "prose preceding a tool call must be returned in the text field")
+        assert any(t.get("name") == "fs_read" for t in msg["tools"]), (
+            "tool names must be returned alongside the text")
+
+    def test_entry_text_is_capped_at_MESSAGE_TEXT_MAX(self, tmp_path):
+        """Text longer than MESSAGE_TEXT_MAX is truncated and flagged."""
+        long_text = "x" * (api.MESSAGE_TEXT_MAX + 1)
+        self._write(tmp_path, [self._entry("AssistantMessage", long_text)])
+        with patch.object(api, "SESSIONS_DIR", tmp_path):
+            data = client.get(f"/api/sessions/{self.SID}/messages").json()
+        msg = data["messages"][0]
+        assert len(msg["text"]) == api.MESSAGE_TEXT_MAX
+        assert msg["truncated"] is True
 
 
 class TestControlState:
