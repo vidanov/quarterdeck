@@ -55,7 +55,7 @@ What you get:
 > **For phone and remote access:** [Tailscale](https://tailscale.com/download) installed and running on both the Mac and the mobile device. The remote serving feature binds to the Mac's Tailscale IP — it does not work over regular LAN or the public internet.
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/vidanov/quarterdeck.git
 cd quarterdeck
 
 python3 -m venv venv

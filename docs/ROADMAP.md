@@ -432,66 +432,66 @@ stay fully visible.
 
 **12a. Session discovery**
 
-- [ ] Scan `~/.kiro/sessions/` for workspace-hash dirs (8–16 hex chars) in
+- [x] Scan `~/.kiro/sessions/` for workspace-hash dirs (8–16 hex chars) in
       addition to `cli/`. Add a `V3_SESSIONS_BASE` constant and a discovery
       function that returns `(store, path)` tuples for all sessions.
-- [ ] Detect session format from file layout: presence of `sess_*/session.json`
+- [x] Detect session format from file layout: presence of `sess_*/session.json`
       = V3, `{uuid}.json` in `cli/` = V1. Tag each session with
       `format: "v1" | "v3"` in the listing response.
-- [ ] V3 has no `.lock` file. Process-alive check must use `session.json`
+- [x] V3 has no `.lock` file. Process-alive check must use `session.json`
       `status` field and tmux pane presence instead.
-- [ ] `SESSIONS_DIR` constant is used in ~20 places — replace with a
+- [x] `SESSIONS_DIR` constant is used in ~20 places — replace with a
       `session_paths(session_id)` helper that resolves the right paths for
       either format.
 
 **12b. Status detection**
 
-- [ ] `tail_jsonl()` / `detect_status()`: add a V3 path that reads
+- [x] `tail_jsonl()` / `detect_status()`: add a V3 path that reads
       `payload.type` instead of `kind`. The `last_kind in ("ToolResults",
       "Prompt")` heuristic maps to `payload.type in ("tool_result", "user")`.
-- [ ] V3 `pending_interaction` entries provide structural approval detection
+- [x] V3 `pending_interaction` entries provide structural approval detection
       without TUI scraping — more reliable than the current pane heuristic.
       Prefer it when present.
-- [ ] V3 `turn_end` entries provide an exact idle signal, replacing the
+- [x] V3 `turn_end` entries provide an exact idle signal, replacing the
       `stop` hook's turn-mark files for V3 sessions.
 
 **12c. Transcript reading**
 
-- [ ] `_ROLE_OF_KIND` map, `_block_text()`, `_block_tools()`,
+- [x] `_ROLE_OF_KIND` map, `_block_text()`, `_block_tools()`,
       `_result_count()`, `_transcript_entry()`: add V3 variants that handle
       the flat `payload.content` string, separate `tool_call`/`tool_result`
       lines, and the `pending_interaction` / `interaction_resolved` pair.
-- [ ] `get_last_output()` and `last_message()`: V3 assistant content is
+- [x] `get_last_output()` and `last_message()`: V3 assistant content is
       `payload.content` (string), not nested blocks.
-- [ ] `read_transcript()`: detect format per-file and dispatch to the right
+- [x] `read_transcript()`: detect format per-file and dispatch to the right
       parser. Keep `seq` continuous across both formats.
 
 **12d. Session metadata**
 
-- [ ] `read_metadata()`: for V3 read `sess_{id}/session.json`. Map
+- [x] `read_metadata()`: for V3 read `sess_{id}/session.json`. Map
       `workspacePaths[0]` → `cwd`, `lastModifiedAt` → `updated_at`,
       `modelId` → `model`, `status` → pass through.
-- [ ] `clean_title()` / `get_full_prompt()`: for V3 the first user message is
+- [x] `clean_title()` / `get_full_prompt()`: for V3 the first user message is
       the `user` payload entry, not a `Prompt` kind block.
 
 **12e. Dispatch**
 
-- [ ] `tmux_manager.py` spawn: add `engine` parameter (`"v1"` | `"v3"`).
-      Append `--v3` to the `kiro-cli chat` command when `engine == "v3"`.
-- [ ] Store `engine` in the managed session record so resume and handoff use
+- [x] `tmux_manager.py` spawn: add `engine` parameter (`"v1"` | `"v3"`).
+      Append `--agent-engine v3` to the `kiro-cli chat` command when `engine == "v3"`.
+- [x] Store `engine` in the managed session record so resume and handoff use
       the same flag.
-- [ ] Correlation: V3 writes into a workspace-hash subdir with `sess_`-prefixed
+- [x] Correlation: V3 writes into a workspace-hash subdir with `sess_`-prefixed
       IDs. Update the `.lock`-based walk to also check the new layout; use
       `session.json` `id` field instead of lock file for session ID discovery.
-- [ ] `/api/dispatch` and `/api/options`: expose `engine` as a selectable
+- [x] `/api/dispatch` and `/api/options`: expose `engine` as a selectable
       parameter alongside `model` and `effort`. Settings UI: default engine
       (V1 / V3).
 
 **12f. Archive and cleanup**
 
-- [ ] `GET /api/archive`: include V3 sessions (workspace-hash dirs). Return
+- [x] `GET /api/archive`: include V3 sessions (workspace-hash dirs). Return
       `format` field so the UI can badge V3 sessions.
-- [ ] `GET /api/cleanup/preview` / `POST /api/cleanup/apply`: handle V3 paths
+- [x] `GET /api/cleanup/preview` / `POST /api/cleanup/apply`: handle V3 paths
       (delete `sess_{id}/` directory, not three flat files).
 
 **12g. Hooks**
@@ -500,7 +500,7 @@ stay fully visible.
       JSONL are the ACP equivalent of the `preToolUse` hook. Evaluate whether
       the existing file-based approval gate (`APPROVALS_DIR`) can be replaced
       or supplemented by reading these entries directly.
-- [ ] `agentSpawn` / `stop` hooks: verify they fire for V3 sessions and that
+- [x] `agentSpawn` / `stop` hooks: verify they fire for V3 sessions and that
       the `KIRO_SESSION_ID` env var carries the `sess_`-prefixed form.
 
 ### What stays the same
