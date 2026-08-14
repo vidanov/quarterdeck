@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "osa-kiro",
+      "comment": "Port comes from $PORT so two sessions can preview at once. Nothing here needs a fixed one: no OAuth callback, no webhook, and the UI is served by the backend itself at /app, so CORS never applies. uvicorn reads UVICORN_PORT rather than PORT, hence the shell bridge.",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "exec venv/bin/uvicorn backend.api:app --port \"${PORT:-19421}\""],
+      "port": 19421,
+      "autoPort": true
+    }
+  ]
+}

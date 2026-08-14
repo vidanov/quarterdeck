@@ -1,0 +1,36 @@
+venv/
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+.DS_Store
+icon.iconset/
+
+# Runtime preferences and user-created working sets
+settings.json
+snapshots.json
+favourites.json
+
+# Temp files left behind if an atomic state write dies between write and replace
+.*.tmp
+
+# Internal / dev-only docs — not for public repo
+docs/handover-constraint-accumulator-v2.md
+docs/handover-verified-agent-loop.md
+docs/nothing-stays-settled-pitch.md
+docs/folder-shell-design.md
+docs/experiment-gtfs-gate-accumulation.md
+docs/task-analyze-session-logs.md
+docs/task-rule-delivery-and-driver-v3.md
+docs/repeat_position.py
+docs/documentation-is-not-delivery.md
+docs/delivery-audit.md
+docs/PHASE2-PLAN.md
+
+# Dev artifacts
+docs/.DS_Store
+.kiro/todo.md
+crew-sessions.oracle.md
+build-stamp.json
+backend/build-stamp.json

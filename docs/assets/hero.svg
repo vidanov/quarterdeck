@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 220" role="img" aria-label="Quarterdeck — agent control surface for Kiro CLI">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="rgba(0,0,0,0.10)"/>
+    </filter>
+  </defs>
+
+  <!-- App window background -->
+  <rect width="900" height="220" rx="14" fill="#f5f5f5"/>
+
+  <!-- Title bar -->
+  <rect width="900" height="42" rx="14" fill="#ebebeb"/>
+  <rect y="28" width="900" height="14" fill="#ebebeb"/>
+  <!-- Traffic lights -->
+  <circle cx="22" cy="21" r="6.5" fill="#ff5f57"/>
+  <circle cx="42" cy="21" r="6.5" fill="#febc2e"/>
+  <circle cx="62" cy="21" r="6.5" fill="#28c840"/>
+  <!-- Window title -->
+  <text x="450" y="25" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif" font-size="13" fill="#3c3c3c" text-anchor="middle" font-weight="500">Quarterdeck</text>
+
+  <!-- Header bar -->
+  <rect x="0" y="42" width="900" height="54" fill="white"/>
+  <!-- Logo icon -->
+  <rect x="20" y="55" width="28" height="28" rx="7" fill="#1a1a1a"/>
+  <text x="34" y="73" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="14" fill="white" text-anchor="middle" font-weight="700">Q</text>
+  <!-- Wordmark -->
+  <text x="56" y="74" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif" font-size="19" fill="#1a1a1a" font-weight="700">Quarterdeck</text>
+  <!-- Status -->
+  <text x="188" y="74" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="14" fill="#16a34a" font-weight="600">1 thinking</text>
+
+  <!-- Profile pill -->
+  <rect x="560" y="56" width="130" height="28" rx="14" fill="white" stroke="#e5e5e5" stroke-width="1.5"/>
+  <circle cx="578" cy="70" r="5" fill="#9ca3af"/>
+  <text x="590" y="74" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#374151">StormDE_Free</text>
+
+  <!-- New session button -->
+  <rect x="702" y="56" width="130" height="28" rx="7" fill="#1a1a1a"/>
+  <text x="767" y="74" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="white" text-anchor="middle" font-weight="600">+ New session</text>
+
+  <!-- Grid button -->
+  <rect x="840" y="56" width="44" height="28" rx="7" fill="white" stroke="#e5e5e5" stroke-width="1.5"/>
+  <text x="862" y="74" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#374151" text-anchor="middle">⊞</text>
+
+  <!-- Divider -->
+  <rect x="0" y="96" width="900" height="1" fill="#f0f0f0"/>
+
+  <!-- Session card 1 — THINKING (green border) -->
+  <rect x="20" y="108" width="260" height="96" rx="10" fill="white" stroke="#22c55e" stroke-width="2" filter="url(#shadow)"/>
+  <!-- Thinking label -->
+  <circle cx="38" cy="127" r="5" fill="#22c55e"/>
+  <text x="48" y="131" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#16a34a" font-weight="700" letter-spacing="0.5">THINKING</text>
+  <!-- Session name -->
+  <text x="30" y="156" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif" font-size="20" fill="#111827" font-weight="800">Quarterdeck</text>
+  <!-- Path -->
+  <text x="30" y="174" font-family="-apple-system,BlinkMacSystemFont,monospace" font-size="11" fill="#9ca3af">~/.../PERSONAL/osa-kiro</text>
+  <!-- Summary -->
+  <text x="30" y="192" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#0d9488" font-style="italic">Fixed session summary generation…</text>
+
+  <!-- Session card 2 — IDLE -->
+  <rect x="296" y="108" width="260" height="96" rx="10" fill="white" stroke="#e5e7eb" stroke-width="1.5" filter="url(#shadow)"/>
+  <circle cx="314" cy="127" r="5" fill="none" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="324" y="131" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#9ca3af" font-weight="700" letter-spacing="0.5">IDLE</text>
+  <text x="306" y="156" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif" font-size="20" fill="#6b7280" font-weight="800">INT</text>
+  <text x="306" y="174" font-family="-apple-system,BlinkMacSystemFont,monospace" font-size="11" fill="#d1d5db">~/.../PORSCHE/ACTUAL/Di...</text>
+  <text x="306" y="192" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#0d9488" font-style="italic">Diagnosed stuck CDK stack…</text>
+
+  <!-- Session card 3 — detail panel preview -->
+  <rect x="572" y="108" width="308" height="96" rx="10" fill="white" stroke="#e5e7eb" stroke-width="1.5" filter="url(#shadow)"/>
+  <!-- Detail panel header -->
+  <rect x="572" y="108" width="308" height="32" rx="10" fill="#f9fafb"/>
+  <rect x="572" y="126" width="308" height="14" fill="#f9fafb"/>
+  <circle cx="592" cy="124" r="4" fill="#22c55e"/>
+  <text x="602" y="128" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#16a34a" font-weight="600">Thinking</text>
+  <text x="650" y="128" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#374151" font-weight="600">Quarterdeck</text>
+  <!-- Hand off button -->
+  <rect x="730" y="113" width="72" height="20" rx="5" fill="#16a34a"/>
+  <text x="766" y="126" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="10" fill="white" text-anchor="middle" font-weight="600">Hand off</text>
+  <!-- Side button -->
+  <rect x="808" y="113" width="40" height="20" rx="5" fill="#16a34a"/>
+  <text x="828" y="126" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="10" fill="white" text-anchor="middle" font-weight="600">Side</text>
+  <!-- Pane content -->
+  <text x="584" y="158" font-family="-apple-system,BlinkMacSystemFont,monospace" font-size="9.5" fill="#6b7280">cmux · claude-sonnet-4.6 · 19%</text>
+  <text x="584" y="172" font-family="-apple-system,BlinkMacSystemFont,monospace" font-size="9.5" fill="#9ca3af">Kiro is working · Type to steer</text>
+  <!-- Composer -->
+  <rect x="580" y="180" width="200" height="18" rx="4" fill="white" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="587" y="192" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="9" fill="#d1d5db">Reply to this session…</text>
+  <rect x="788" y="180" width="36" height="18" rx="4" fill="#1a1a1a"/>
+  <text x="806" y="192" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="9" fill="white" text-anchor="middle" font-weight="600">Send</text>
+  <!-- Path footer -->
+  <text x="584" y="214" font-family="-apple-system,BlinkMacSystemFont,monospace" font-size="9" fill="#22c55e">~/.../PERSONAL/osa-kiro</text>
+</svg>

@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 540" role="img" aria-label="Quarterdeck detail panel showing pane view, screenshot chip, and composer">
+  <style>
+    @media (prefers-reduced-motion: reduce) {
+      .pulse { animation: none !important; }
+    }
+    .pulse { animation: pulse 2.5s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+  </style>
+
+  <!-- Window chrome -->
+  <rect width="760" height="540" rx="12" fill="white" stroke="#e5e7eb" stroke-width="1"/>
+  <!-- Traffic lights -->
+  <circle cx="22" cy="22" r="6.5" fill="#ff5f57"/>
+  <circle cx="42" cy="22" r="6.5" fill="#febc2e"/>
+  <circle cx="62" cy="22" r="6.5" fill="#28c840"/>
+  <text x="380" y="26" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif" font-size="13" fill="#3c3c3c" text-anchor="middle" font-weight="500">Quarterdeck</text>
+
+  <!-- Detail panel header -->
+  <rect x="0" y="42" width="760" height="50" fill="#fafafa" stroke="#f0f0f0" stroke-width="0"/>
+  <rect x="0" y="91" width="760" height="1" fill="#e5e7eb"/>
+
+  <!-- Status indicator + session name -->
+  <circle cx="22" cy="67" r="5" fill="#22c55e" class="pulse"/>
+  <text x="33" y="71" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="13" fill="#16a34a" font-weight="600">Thinking</text>
+  <text x="100" y="71" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="13" fill="#111827" font-weight="600">Quarterdeck</text>
+  <!-- Attach chip -->
+  <rect x="185" y="57" width="66" height="22" rx="5" fill="#f3f4f6" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="218" y="71" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#6b7280" text-anchor="middle">attach</text>
+
+  <!-- Right action buttons -->
+  <rect x="530" y="55" width="86" height="26" rx="7" fill="#16a34a"/>
+  <text x="573" y="72" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="white" text-anchor="middle" font-weight="600">Hand off</text>
+  <rect x="622" y="55" width="26" height="26" rx="7" fill="#f3f4f6" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="635" y="72" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#374151" text-anchor="middle">+</text>
+  <rect x="654" y="55" width="80" height="26" rx="7" fill="#f3f4f6" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="694" y="72" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#374151" text-anchor="middle">Correction</text>
+  <rect x="740" y="55" width="8" height="26" rx="0" fill="white"/>
+  <!-- Side button (active) -->
+  <rect x="622" y="55" width="0" height="0" rx="0" fill="none"/>
+
+  <!-- Session tabs -->
+  <rect x="0" y="92" width="760" height="40" fill="white"/>
+  <rect x="16" y="103" width="100" height="26" rx="14" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="66" y="120" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#16a34a" text-anchor="middle" font-weight="600">Quarterdeck</text>
+  <text x="134" y="120" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#9ca3af">INT</text>
+  <!-- View mode toggles -->
+  <text x="540" y="120" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#9ca3af">Live</text>
+  <circle cx="568" cy="116" r="5" fill="#22c55e" class="pulse"/>
+  <text x="582" y="120" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#9ca3af">auto</text>
+  <text x="616" y="120" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#9ca3af">live</text>
+  <text x="648" y="120" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#9ca3af">transcript</text>
+  <text x="720" y="120" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#9ca3af">19%</text>
+  <rect x="0" y="132" width="760" height="1" fill="#f0f0f0"/>
+
+  <!-- Pane content area -->
+  <rect x="16" y="144" width="728" height="260" rx="8" fill="white" stroke="#e5e7eb" stroke-width="1"/>
+
+  <!-- Task list content (monospace pane) -->
+  <text x="34" y="172" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="12.5" fill="#6b7280">|-- o 2. Fix the failing tests</text>
+  <text x="34" y="192" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="12.5" fill="#6b7280">|-- o 3. Wire wall board toggle to fetch</text>
+  <text x="34" y="208" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="10" fill="#c4b5a0">         and group by real collections</text>
+  <text x="34" y="228" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="12.5" fill="#6b7280">L-- o 4. Build, install, commit, push</text>
+  <text x="34" y="248" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="12.5" fill="#9ca3af">ctrl+x collapse</text>
+
+  <!-- Divider line in pane -->
+  <rect x="34" y="260" width="692" height="1" fill="#e5e7eb"/>
+
+  <!-- Status bar in pane -->
+  <text x="34" y="280" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="12" fill="#374151">cmux · claude-sonnet-4.6 · max · </text>
+  <text x="284" y="280" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="12" fill="#374151">19%  ~/Documents/PROJECTS/PERSONAL/osa-kiro</text>
+  <text x="34" y="300" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="12" fill="#374151">  (pty-api)</text>
+
+  <text x="34" y="330" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="12" fill="#9ca3af">Kiro is working · Type to steer · Ctrl+S to queue</text>
+
+  <!-- Screenshot chip -->
+  <rect x="16" y="416" width="192" height="28" rx="6" fill="#f9fafb" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="34" y="433" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" fill="#6b7280">Screenshot 2026-08-13 ...</text>
+  <text x="195" y="433" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#9ca3af">×</text>
+
+  <!-- Collapse toggle -->
+  <rect x="16" y="452" width="28" height="28" rx="6" fill="#f3f4f6" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="30" y="469" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">^</text>
+
+  <!-- Composer textarea -->
+  <rect x="52" y="452" width="590" height="68" rx="7" fill="white" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="66" y="474" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" fill="#d1d5db">Reply to this session...  (Enter to send, Shift+Enter for a new line)</text>
+
+  <!-- Send button -->
+  <text x="660" y="488" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="13" fill="#374151" font-weight="500">Send</text>
+  <!-- Queue button -->
+  <text x="706" y="488" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="13" fill="#9ca3af">+ Queue</text>
+
+  <!-- Footer path -->
+  <rect x="0" y="528" width="760" height="12" fill="#fafafa" rx="0"/>
+  <text x="16" y="538" font-family="'SF Mono',Monaco,Consolas,monospace" font-size="10" fill="#22c55e">~/.../PERSONAL/osa-kiro</text>
+</svg>
