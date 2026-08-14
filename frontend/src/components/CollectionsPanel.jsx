@@ -6,7 +6,7 @@
  *  - Archive tab: favourites + all sessions (legacy, kept for search)
  *  - Projects tab: project grouping (slow scan, cached)
  */
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import * as collectionsApi from '../api/collections'
 import { useToast } from '../state/ToastContext'
 import { useConfirm } from '../state/ConfirmContext'
@@ -26,6 +26,78 @@ const AVAIL_LABELS = {
 function AvailBadge({ availability }) {
   const { icon, label } = AVAIL_LABELS[availability] || { icon: '?', label: availability }
   return <span className="coll-avail-badge" title={label}>{icon}</span>
+}
+
+// ---------------------------------------------------------------------------
+// Add-to-collection button — self-contained, fetches collections on first open
+// ---------------------------------------------------------------------------
+
+function AddToCollectionBtn({ session }) {
+  const notify = useToast()
+  const [open, setOpen] = useState(false)
+  const [cols, setCols] = useState(null)  // null = not loaded yet
+  const [adding, setAdding] = useState(false)
+  const ref = useRef(null)
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const handleOpen = (e) => {
+    e.stopPropagation()
+    if (!open && cols === null) {
+      collectionsApi.listCollectionsEnriched()
+        .then(d => setCols((d.collections || []).filter(c => c.source === 'manual')))
+        .catch(() => setCols([]))
+    }
+    setOpen(v => !v)
+  }
+
+  const handleAdd = async (e, collId) => {
+    e.stopPropagation()
+    setAdding(true)
+    try {
+      await collectionsApi.addMember(collId, { session_id: session.id, cwd: session.cwd })
+      notify('Added to collection')
+      setOpen(false)
+    } catch {
+      notify('Failed to add to collection', 'error')
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  return (
+    <div className="add-to-coll-wrap" ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        className="add-to-coll-btn"
+        title="Add to collection"
+        onClick={handleOpen}
+      >📁+</button>
+      {open && (
+        <div className="add-to-coll-picker" onClick={e => e.stopPropagation()}>
+          {cols === null && <div className="add-to-coll-loading">Loading…</div>}
+          {cols !== null && cols.length === 0 && (
+            <div className="add-to-coll-empty">No collections yet.<br/>Create one in the Collections tab.</div>
+          )}
+          {cols !== null && cols.map(c => (
+            <button
+              key={c.id}
+              className="add-to-coll-item"
+              disabled={adding}
+              onClick={(e) => handleAdd(e, c.id)}
+            >
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +463,7 @@ export default function CollectionsPanel({
                     {s.updated_at ? new Date(s.updated_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}
                   </span>
                   <button className="archive-rename" onClick={e => { e.stopPropagation(); onRenameArchive(s) }} title="Rename">✎</button>
+                  <AddToCollectionBtn session={s} />
                   <button className="archive-launch" onClick={e => { e.stopPropagation(); onLaunchFavourite(s) }} title="Resume in new tab">▶</button>
                   <button className="archive-delete" onClick={e => { e.stopPropagation(); onDeleteArchive(s.id) }} title="Delete session">×</button>
                 </div>
@@ -486,6 +559,7 @@ export default function CollectionsPanel({
                               <span className="session-title">{s.title}</span>
                               <span className="session-meta">{s.turns} turns</span>
                               <span className="session-time">{s.updated_at ? timeAgo(s.updated_at) : ''}</span>
+                              <AddToCollectionBtn session={s} />
                               <button className="archive-launch" onClick={e => { e.stopPropagation(); onLaunchFavourite(s) }} title="Resume">▶</button>
                             </div>
                           ))}
