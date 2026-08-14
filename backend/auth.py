@@ -165,17 +165,27 @@ def write_token(value: str) -> Path:
     (first-run permission prompt timing out, sandboxing, CI). Both sources are
     checked on read so the file fallback is always honoured even when keychain
     later becomes available.
+
+    Verifies the write by reading back: if the keychain round-trip fails or
+    returns the wrong value, falls through to the file so "Rotate token" is
+    never a silent no-op.
     """
+    keychain_ok = False
     if _keychain_write(_KC_REMOTE_ACCOUNT, value):
-        # Keychain succeeded — remove legacy file to avoid divergence.
+        # Verify the write took — a silent failure here would leave the old
+        # token authoritative and make token rotation a no-op.
+        readback = _keychain_read(_KC_REMOTE_ACCOUNT)
+        keychain_ok = (readback == value)
+
+    if keychain_ok:
+        # Keychain confirmed — remove legacy file to avoid divergence.
         try:
             if TOKEN_FILE.exists():
                 TOKEN_FILE.unlink()
         except OSError:
             pass
     else:
-        # Keychain unavailable (permission prompt timed out, sandbox, etc.)
-        # Fall back to file so the token is not silently lost.
+        # Keychain unavailable or readback mismatch: fall back to file.
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         TOKEN_FILE.write_text(value + "\n")
         TOKEN_FILE.chmod(0o600)
