@@ -1798,6 +1798,8 @@ export default function App() {
                   </button>
                   <button className="wall-new" title="New session (⌘↩)"
                           onClick={() => setLauncherOpen(true)}>+ <span className="wall-new-label">New session</span></button>
+                  <button className="wall-settings" title="Settings"
+                          onClick={() => { changeSessionViewMode('cards'); changeView('settings') }}>⚙</button>
                   <button className="wall-exit" title="Exit wall view"
                           onClick={() => changeSessionViewMode('cards')}>⊞ Grid</button>
                 </div>
