@@ -19,8 +19,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 @pytest.fixture(autouse=True)
 def clear_local_token_for_api_tests(request):
-    """For test_api: stub read_local_token to return '' so the gate fails-open."""
-    if "test_api" not in request.fspath.basename:
+    """For API tests: stub read_local_token to return '' so the gate fails-open.
+
+    test_auth manages its own token state via monkeypatch and must not be
+    affected. All other test modules need the gate open so they can reach
+    endpoints without setting up a token.
+    """
+    if "test_auth" in request.fspath.basename:
         yield
         return
     from backend import auth
