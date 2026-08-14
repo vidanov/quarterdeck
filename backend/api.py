@@ -173,8 +173,18 @@ def _sq_send_delayed(session_id: str, text: str, delay: float = 3.5) -> None:
 
     kiro-cli needs a moment to redraw the TUI after finishing a turn before it
     can accept a new command. Sending immediately drops the input silently.
+
+    For V3 sessions with an ACP observer, slash commands are routed through
+    _kiro.dev/commands/execute (no timing dependency). Falls back to tmux.
     """
     def _do():
+        # Task 5: ACP path for slash commands on observed sessions.
+        if text.startswith("/") and acp_observer.is_attached(session_id):
+            try:
+                if acp_observer.execute_command(session_id, text):
+                    return
+            except Exception:
+                pass  # fall back to tmux below
         time.sleep(delay)
         tmux.send_text(session_id, text)
     threading.Thread(target=_do, daemon=True).start()
@@ -1201,8 +1211,20 @@ def detect_status(session_id: str, lock_data: dict | None, pane: str = "") -> st
 
     The pane is authoritative when it is conclusive; file mtimes and jsonl kinds
     are the fallback for sessions we do not own.
+
+    For V3 sessions with an ACP observer attached, ACP session/update events
+    take precedence over pane-scraping — they arrive within milliseconds of the
+    state change and do not depend on TUI rendering.
     """
-    # V3 sessions: no lock file, use messages.jsonl payload.type
+    # ACP observer path (Task 4): if we have a live side-channel, derive status
+    # from the most recent session/update notification. Fall through if the
+    # observer has no relevant event yet (returns None).
+    if acp_observer.is_attached(session_id):
+        from_acp = acp_observer.detect_status(session_id)
+        if from_acp is not None:
+            return from_acp
+
+    # V3 sessions without ACP: use messages.jsonl payload.type
     if v3mod.is_v3_session(session_id):
         return v3mod.detect_status(session_id)
 
@@ -2346,6 +2368,8 @@ def get_acp_events(session_id: str):
     return {
         "attached": acp_observer.is_attached(session_id),
         "events": acp_observer.get_events(session_id),
+        "capabilities": acp_observer.get_capabilities(session_id),
+        "status": acp_observer.detect_status(session_id),
     }
 
 
@@ -2757,7 +2781,11 @@ def corrections_summary():
 
 @app.post("/api/sessions/{session_id}/input")
 def send_input(session_id: str, payload: dict):
-    """Type text into a managed session and submit it."""
+    """Type text into a managed session and submit it.
+
+    For V3 sessions with an ACP observer, routes via ACP session/prompt
+    (more reliable than tmux send-keys). Falls back to tmux on any error.
+    """
     text = payload.get("text", payload.get("task", ""))
     if not text.strip():
         return {"error": "No text provided"}
@@ -2765,6 +2793,15 @@ def send_input(session_id: str, payload: dict):
         return {"error": "Session is not managed — take it over first"}
     # Newlines would submit early, so collapse them into one prompt.
     flat = " ".join(text.split())
+
+    # Task 5: route via ACP for observed sessions.
+    if acp_observer.is_attached(session_id):
+        try:
+            acp_observer.send_prompt(session_id, flat)
+            return {"ok": True, "sent": flat[:200], "via": "acp"}
+        except Exception:
+            pass  # fall back to tmux below
+
     result = tmux.send_text(session_id, flat)
     if not result.get("ok"):
         return {"error": result.get("error", "send failed")}

@@ -4134,6 +4134,55 @@ body.resizing .detail-resize::after { background: var(--accent); }
   padding: 4px 0;
 }
 
+/* Add-to-collection button and picker */
+.add-to-coll-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 3px;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+.add-to-coll-btn:hover { opacity: 1; color: var(--text); }
+.add-to-coll-picker {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 200;
+  background: #1e1e1e;
+  border: 1px solid #444;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  min-width: 160px;
+  max-width: 240px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.add-to-coll-item {
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.add-to-coll-item:hover { background: #2a2a2a; }
+.add-to-coll-item:disabled { opacity: 0.5; cursor: default; }
+.add-to-coll-loading, .add-to-coll-empty {
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 6px 8px;
+}
+
 /* Individual member row */
 .coll-member {
   display: flex;

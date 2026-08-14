@@ -608,25 +608,30 @@ itself. The `session/load` path for externally-owned sessions is closed.
 
 - [x] **Probe ACP engine flag.** Run the two open questions above and
       record results in this section.
-- [ ] **ACP session wrapper.** A thin Python class that manages one
-      `kiro-cli acp` subprocess, speaks JSON-RPC 2.0 over stdio, and
-      surfaces `ToolCall`/`ToolCallUpdate`/`stop` as Python callbacks.
-      Wire it into `tmux_manager.py` as an optional side-channel for V3
-      sessions (tmux still owns the process; ACP just reads events).
-      **Auth note:** wrapper must implement `_kiro/auth/getAccessToken`
-      callback — read token from `~/.kiro/auth.json` or equivalent.
-- [ ] **Replace pane-scraping for V3.** Once the wrapper exists, route
-      V3 `detect_status()` through ACP notifications instead of
-      `pane_status()`. Keep the pane path as fallback for V1 and for
-      sessions with no ACP channel open.
-- [ ] **Slash command dispatch via ACP.** Replace the current `tmux
-      send-keys` path for `/respond`, `/compact`, `/goal`, etc. on V3
-      sessions with `_kiro.dev/commands/execute`. More reliable, no
-      key-sequence timing dependency.
-- [ ] **Capability probe on spawn.** On V3 session creation, read the
-      `_kiro.dev/commands/available` notification and store the result.
-      Use it to gate UI affordances (e.g. only show the Rewind button if
-      `/rewind` is in the list).
+- [x] **ACP session wrapper.** `backend/acp_session.py` — ACPSession class,
+      JSON-RPC 2.0 over stdio, notification callbacks, `collect_response()`.
+      `backend/acp_query.py` refactored as thin wrapper. 15 unit tests,
+      fake-subprocess pattern, 0.68s. Committed 2026-08-14 (940efd9).
+- [x] **ACP observer side-channel.** `backend/acp_observer.py` — registry
+      of ACPSession per V3 dispatch. Auth via SQLite `kirocli:odic:token`.
+      `attach()` called in `dispatch_task` for `engine=v3`; `detach()` on
+      kill; `detach_all()` on shutdown. `GET /api/sessions/{id}/acp-events`
+      exposes events + capabilities + live status. Committed 2026-08-14
+      (4ea8ec2).
+- [x] **Replace pane-scraping for V3.** `detect_status()` in `api.py` now
+      checks `acp_observer.detect_status()` first for observed sessions.
+      Maps `session/update.sessionUpdate` values to standard status strings.
+      Falls through to V3 messages.jsonl path and pane-scraping for
+      unobserved sessions. Committed 2026-08-14.
+- [x] **Slash command dispatch via ACP.** `_sq_send_delayed()` routes slash
+      commands through `acp_observer.execute_command()` for observed sessions.
+      `send_input()` routes prompts through `acp_observer.send_prompt()`.
+      Both fall back to tmux on any error. Committed 2026-08-14.
+- [x] **Capability probe on spawn.** `attach()` registers a one-shot callback
+      for `_kiro.dev/commands/available`. Capabilities stored in the registry
+      entry; exposed via `get_capabilities()` and the acp-events endpoint.
+      `execute_command()` gates on capability list when known. Committed
+      2026-08-14.
 
 ---
 

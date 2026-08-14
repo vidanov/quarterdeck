@@ -7,23 +7,27 @@ listens for ``session/update`` and ``ToolCall`` notifications.
 
 Design constraints (from Task 1 probe 2026-08-14):
 - ``session/load`` hangs — this module never uses it.
-- ACP is a side-channel for observation only; the tmux session is the source
-  of truth.  The ACP session is detached the moment the tmux session ends.
+- ACP is a side-channel for observation and command dispatch only.
 
 Auth:
   ``kiro-cli acp`` sends a ``_kiro/auth/getAccessToken`` notification.
   We reply with the token read from the kiro-cli SQLite store.
 
-Usage::
+Public API::
 
-    # When a V3 session is spawned (engine="v3"):
-    acp_observer.attach(session_id, cwd="/path/to/project")
+    # Lifecycle
+    acp_observer.attach(session_id, cwd="/path")   # called on V3 dispatch
+    acp_observer.detach(session_id)                # called on kill
+    acp_observer.detach_all()                      # called on shutdown
 
-    # From the API endpoint:
-    events = acp_observer.get_events(session_id)
+    # Observation
+    events = acp_observer.get_events(session_id)   # list of {method, params}
+    status = acp_observer.detect_status(session_id) # or None if no observer
+    caps   = acp_observer.get_capabilities(session_id) # list of slash cmds
 
-    # When the session ends:
-    acp_observer.detach(session_id)
+    # Dispatch
+    acp_observer.send_prompt(session_id, "text")    # Task 5: user prompt via ACP
+    acp_observer.execute_command(session_id, "/cmd") # Task 5: slash cmd via ACP
 """
 import json
 import logging
@@ -65,9 +69,7 @@ def _read_access_token() -> str:
 
 # ── event store ───────────────────────────────────────────────────────────────
 
-# Per-session capped ring buffer of ACP notification events.
 MAX_EVENTS = 200
-
 _Event = dict[str, Any]
 
 
@@ -84,35 +86,49 @@ class _EventStore:
         with self._lock:
             return list(self._events)
 
+    def last_session_update(self) -> dict | None:
+        """Return the most recent session/update params, or None."""
+        with self._lock:
+            for ev in reversed(self._events):
+                if ev.get("method") == "session/update":
+                    return ev.get("params", {})
+        return None
 
-# ── registry ──────────────────────────────────────────────────────────────────
 
-# session_id → (ACPSession, _EventStore)
-_registry: dict[str, tuple[ACPSession, _EventStore]] = {}
+# ── registry entry ────────────────────────────────────────────────────────────
+
+class _Entry:
+    """Holds the ACPSession, its event store, the ACP session id, and capabilities."""
+    __slots__ = ("sess", "store", "acp_sid", "capabilities")
+
+    def __init__(self, sess: ACPSession, store: _EventStore, acp_sid: str) -> None:
+        self.sess = sess
+        self.store = store
+        self.acp_sid = acp_sid
+        self.capabilities: list[str] = []  # slash commands from _kiro.dev/commands/available
+
+
+# session_id → _Entry
+_registry: dict[str, _Entry] = {}
 _registry_lock = threading.Lock()
 
+
+# ── attach ────────────────────────────────────────────────────────────────────
 
 def attach(session_id: str, cwd: str | None = None) -> bool:
     """Start an ACP side-channel for *session_id*.
 
-    Spawns a ``kiro-cli acp`` subprocess (engine v2 — the only one that doesn't
-    hang on ``session/new``), calls ``initialize`` + ``session/new``, and
-    registers callbacks that stream notifications into an event store.
-
-    Returns True on success, False if the session is already attached or the
-    subprocess fails to start.
-
-    This function is called from a background thread (FastAPI dispatch path)
-    and must not block for more than a few seconds.
+    Returns True on success, False if already attached or the subprocess fails.
+    Called from a background thread in the dispatch path — must not block long.
     """
     with _registry_lock:
         if session_id in _registry:
-            return True  # already attached
+            return True
 
     sess = ACPSession(engine="v2", timeout=15.0)
     store = _EventStore()
 
-    # Auth handler — reply to getAccessToken requests.
+    # Auth handler.
     def _on_auth(method: str, params: dict) -> None:
         rid = params.get("id")
         token = _read_access_token()
@@ -121,7 +137,7 @@ def attach(session_id: str, cwd: str | None = None) -> bool:
                 sess.notify("_kiro/auth/getAccessToken/response",
                             {"id": rid, "accessToken": token})
             except Exception:
-                log.debug("ACP auth reply failed for %s", session_id)
+                pass
 
     # Generic notification → event store.
     def _on_any(method: str, params: dict) -> None:
@@ -133,7 +149,7 @@ def attach(session_id: str, cwd: str | None = None) -> bool:
     try:
         sess.start()
         sess.initialize(client_name="quarterdeck-observer")
-        sess.new_session(cwd=cwd)
+        acp_sid = sess.new_session(cwd=cwd)
     except (ACPError, TimeoutError, RuntimeError) as exc:
         log.warning("ACP attach failed for %s: %s", session_id, exc)
         try:
@@ -142,44 +158,38 @@ def attach(session_id: str, cwd: str | None = None) -> bool:
             pass
         return False
 
-    with _registry_lock:
-        _registry[session_id] = (sess, store)
+    entry = _Entry(sess=sess, store=store, acp_sid=acp_sid)
 
-    log.info("ACP observer attached for %s", session_id)
+    # Capability probe — register for _kiro.dev/commands/available.
+    # The notification arrives shortly after session/new; we capture it once.
+    def _on_caps(method: str, params: dict) -> None:
+        cmds = params.get("commands", [])
+        if isinstance(cmds, list):
+            entry.capabilities = [str(c) for c in cmds]
+            log.debug("ACP caps for %s: %s", session_id, entry.capabilities)
+        sess.off("_kiro.dev/commands/available", _on_caps)
+
+    sess.on("_kiro.dev/commands/available", _on_caps)
+
+    with _registry_lock:
+        _registry[session_id] = entry
+
+    log.info("ACP observer attached for %s (acp_sid=%s)", session_id, acp_sid)
     return True
 
+
+# ── detach ────────────────────────────────────────────────────────────────────
 
 def detach(session_id: str) -> None:
     """Stop the ACP side-channel for *session_id* if one is running."""
     with _registry_lock:
         entry = _registry.pop(session_id, None)
     if entry:
-        sess, _ = entry
         try:
-            sess.stop()
+            entry.sess.stop()
         except Exception:
             pass
         log.info("ACP observer detached for %s", session_id)
-
-
-def get_events(session_id: str) -> list[_Event]:
-    """Return accumulated ACP notifications for *session_id* (newest last)."""
-    with _registry_lock:
-        entry = _registry.get(session_id)
-    if not entry:
-        return []
-    _, store = entry
-    return store.snapshot()
-
-
-def is_attached(session_id: str) -> bool:
-    """True if there is a live ACP side-channel for *session_id*."""
-    with _registry_lock:
-        entry = _registry.get(session_id)
-    if not entry:
-        return False
-    sess, _ = entry
-    return sess.is_alive
 
 
 def detach_all() -> None:
@@ -188,3 +198,126 @@ def detach_all() -> None:
         ids = list(_registry.keys())
     for sid in ids:
         detach(sid)
+
+
+# ── observation ───────────────────────────────────────────────────────────────
+
+def get_events(session_id: str) -> list[_Event]:
+    """Return accumulated ACP notifications for *session_id* (oldest-first)."""
+    with _registry_lock:
+        entry = _registry.get(session_id)
+    if not entry:
+        return []
+    return entry.store.snapshot()
+
+
+def is_attached(session_id: str) -> bool:
+    """True if there is a live ACP side-channel for *session_id*."""
+    with _registry_lock:
+        entry = _registry.get(session_id)
+    if not entry:
+        return False
+    return entry.sess.is_alive
+
+
+def get_capabilities(session_id: str) -> list[str]:
+    """Return the slash commands reported by _kiro.dev/commands/available."""
+    with _registry_lock:
+        entry = _registry.get(session_id)
+    return list(entry.capabilities) if entry else []
+
+
+def detect_status(session_id: str) -> str | None:
+    """Derive session status from the most recent ACP session/update event.
+
+    Returns one of the standard status strings (thinking, running, idle,
+    awaiting-approval, error) or None if no observer is attached or no
+    relevant event has arrived yet.
+
+    The ACP stream is more reliable than pane-scraping for V3 sessions: the
+    notification arrives within milliseconds of the state change, whereas the
+    pane may not have redrawn yet.
+
+    Status mapping from session/update sessionUpdate values:
+      agent_message_chunk  → thinking  (model is generating)
+      tool_call            → running   (agent is executing a tool)
+      tool_result          → running   (tool returned, agent processing)
+      done / end_turn      → idle
+      error                → error
+      pending_interaction  → awaiting-approval
+    """
+    with _registry_lock:
+        entry = _registry.get(session_id)
+    if not entry or not entry.sess.is_alive:
+        return None
+
+    params = entry.store.last_session_update()
+    if not params:
+        return None
+
+    update = params.get("update", {})
+    su = update.get("sessionUpdate", "")
+
+    if su in ("done", "end_turn", "session_end"):
+        return "idle"
+    if su == "error":
+        return "error"
+    if su == "pending_interaction":
+        return "awaiting-approval"
+    if su == "tool_call":
+        return "running"
+    if su == "tool_result":
+        return "running"
+    if su == "agent_message_chunk":
+        return "thinking"
+    # agent_thinking, context_update, etc. — agent is active
+    if su:
+        return "thinking"
+
+    return None
+
+
+# ── dispatch (Task 5) ─────────────────────────────────────────────────────────
+
+def send_prompt(session_id: str, text: str, timeout: float = 30.0) -> bool:
+    """Send a user prompt via ACP to the observed session.
+
+    Returns True on success. Raises RuntimeError/ACPError/TimeoutError on
+    failure — caller should fall back to tmux send_text.
+    """
+    with _registry_lock:
+        entry = _registry.get(session_id)
+    if not entry or not entry.sess.is_alive:
+        raise RuntimeError(f"No live ACP observer for {session_id}")
+    entry.sess.prompt(entry.acp_sid, text, timeout=timeout)
+    return True
+
+
+def execute_command(session_id: str, command: str, timeout: float = 10.0) -> bool:
+    """Send a slash command via _kiro.dev/commands/execute.
+
+    Returns True on success, False if the command is not in the capability list
+    (gate so we don't fire into the void). Falls back gracefully if the
+    notification is not supported — caller handles.
+    """
+    with _registry_lock:
+        entry = _registry.get(session_id)
+    if not entry or not entry.sess.is_alive:
+        raise RuntimeError(f"No live ACP observer for {session_id}")
+
+    # Gate: only send if capabilities are known and command is listed.
+    # If caps are empty (notification not yet received / not supported),
+    # let the caller fall back to tmux rather than sending into the void.
+    if entry.capabilities and command not in entry.capabilities:
+        log.debug("ACP: %s not in capabilities for %s", command, session_id)
+        return False
+
+    try:
+        entry.sess.notify("_kiro.dev/commands/execute", {
+            "sessionId": entry.acp_sid,
+            "command": command,
+        })
+        return True
+    except (ACPError, RuntimeError) as exc:
+        log.warning("ACP execute_command failed for %s: %s", session_id, exc)
+        raise

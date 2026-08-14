@@ -4,6 +4,57 @@ Completed work, extracted from the roadmap on 2026-07-28. Organized by area.
 
 ---
 
+## 2026-08-14 (evening)
+
+### ACP control surface — Tasks 4, 5, 6 (section 13)
+
+**Task 4 — V3 status via ACP events** (`backend/api.py`, `backend/acp_observer.py`):
+`detect_status()` now checks `acp_observer.detect_status()` first for sessions
+with a live observer. Maps `session/update.sessionUpdate` → standard status
+strings (thinking/running/idle/awaiting-approval/error). Falls through to V3
+messages.jsonl and pane-scraping for unobserved sessions. More responsive
+than file-polling — event arrives within milliseconds of state change.
+
+**Task 5 — Slash command / prompt dispatch via ACP** (`backend/api.py`):
+`send_input()` routes user prompts through `acp_observer.send_prompt()` for
+observed sessions. `_sq_send_delayed()` routes slash commands through
+`acp_observer.execute_command()`, skipping the 3.5s timing delay that tmux
+send-keys requires. Both fall back to tmux on any error.
+
+**Task 6 — Capability probe on spawn** (`backend/acp_observer.py`):
+`attach()` registers a one-shot callback for `_kiro.dev/commands/available`.
+Capabilities stored per entry and exposed via `get_capabilities()` and
+`GET /api/sessions/{id}/acp-events` (now returns `{attached, events,
+capabilities, status}`). `execute_command()` gates on the capability list
+when known, preventing blind sends to unsupported commands.
+
+### Bug fix — Collections: no way to add sessions from Projects or Archive
+
+`frontend/src/components/CollectionsPanel.jsx`:
+Added `AddToCollectionBtn` component — a 📁+ button that appears on every
+session row in the Projects tab and Archive tab. On first click it fetches
+all `manual`-source collections and shows an inline picker. Selecting a
+collection calls `POST /api/collections/{id}/members`. Previously the only
+way to add members was via the ★ (Favourites) button, which only wrote to
+the Favourites collection, not user-created ones.
+
+### Earlier fixes from 2026-08-14
+
+- `fix: stale-build banner` (2128923) — real rebuild endpoint, dev-mode
+  suppression, dismiss-by-hash, CSS for banner and progress modal.
+- `fix: remote stop kills the app` (e9d4864) — set `_stop_proxy` flag on
+  proxy thread before releasing reference; exclude own PID from lsof kill.
+- `test: isolate suite from real state` (1127edb) — session-scoped fixture
+  redirects all backend Path constants to tmp dir, stubs all three keychain
+  functions. Guard test in `tests/test_isolation.py`.
+- `fix: rebuild button honest, token verify-after-write, remote stop
+  LaunchAgent` (006e8e8) — rebuild streams real output; write_token
+  verifies readback; remote_stop persists intent before killing and
+  unloads LaunchAgent; _remote_running no longer treats loaded LaunchAgent
+  as a running listener.
+
+---
+
 ## 2026-08-14
 
 ### Test isolation — stop suite from writing to real state (no production changes)
