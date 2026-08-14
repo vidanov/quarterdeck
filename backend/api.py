@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response as FastAPIResponse, StreamingResponse
 
+from . import acp_observer
 from . import audit
 from . import auth
 from . import concierge
@@ -133,6 +134,9 @@ async def lifespan(_app: FastAPI):
     threading.Thread(target=_warm_projects_cache, daemon=True, name="projects-warmup").start()
 
     yield
+
+    # Shutdown: stop all ACP observer subprocesses cleanly.
+    acp_observer.detach_all()
 
 
 def _auto_advance_loop():
@@ -2244,6 +2248,21 @@ def get_session_summary(session_id: str):
     return {"summary": s.get("text"), "generated_at": s.get("generated_at")}
 
 
+@app.get("/api/sessions/{session_id}/acp-events")
+def get_acp_events(session_id: str):
+    """Return ACP notification events accumulated by the observer side-channel.
+
+    Returns ``{"attached": bool, "events": [...]}`` where each event is
+    ``{"method": str, "params": dict}``.  Events are ordered oldest-first,
+    capped at the last 200.  Returns an empty list for sessions that have
+    no ACP observer attached (non-V3, unmanaged, or observer not yet started).
+    """
+    return {
+        "attached": acp_observer.is_attached(session_id),
+        "events": acp_observer.get_events(session_id),
+    }
+
+
 @app.post("/api/sessions/{session_id}/summarize")
 def trigger_summary(session_id: str, request: Request):
     """Kick off background summary generation (or return cached result)."""
@@ -3800,6 +3819,9 @@ def kill_session(session_id: str, force: bool = False):
     and the session stays resumable; pass force=true to skip straight to
     killing the tmux session. Foreign sessions are signalled by pid.
     """
+    # Detach any ACP observer side-channel regardless of session type.
+    acp_observer.detach(session_id)
+
     if tmux.is_managed(session_id):
         if force:
             result = tmux.kill(session_id, graceful=False)
@@ -4128,6 +4150,29 @@ def dispatch_task(payload: dict):
         threading.Thread(
             target=_tag_profile, args=(session_id, nonce, active_profile, managed_before),
             daemon=True,
+        ).start()
+
+    # For V3 sessions, start an ACP observation side-channel. Uses the same
+    # nonce→session_id wait pattern as _tag_profile above. A failed attach is
+    # non-fatal — tmux is still the source of truth; ACP is best-effort events.
+    engine = (payload.get("engine") or "").strip()
+    if engine == "v3":
+        def _attach_observer(sid: str, nonce_: str, cwd_: str) -> None:
+            if not sid:
+                deadline = time.time() + 30
+                while time.time() < deadline:
+                    state = tmux.load_state()
+                    if nonce_ not in state["pending"]:
+                        managed_ids = set(state["managed"])
+                        if managed_ids:
+                            sid = next(iter(managed_ids))
+                        break
+                    time.sleep(0.5)
+            if sid:
+                acp_observer.attach(sid, cwd=cwd_)
+        threading.Thread(
+            target=_attach_observer, args=(session_id, nonce, cwd),
+            daemon=True, name=f"acp-obs-{nonce or session_id[:8]}",
         ).start()
 
     return {
