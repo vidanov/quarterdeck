@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import time
 import uuid
@@ -1154,6 +1155,11 @@ def kill(session_id: str, graceful: bool = True, timeout: float = 8.0) -> dict:
     Prefers a clean shutdown: `/quit` lets kiro-cli flush its conversation, so
     the session stays resumable afterwards. Killing the tmux session outright
     skips that, so it is only the fallback when the session will not exit.
+
+    kiro-cli spawns a process tree (shell → kiro-cli-chat → bun tui.js) whose
+    members survive tmux kill-session because they run in their own process
+    groups. After killing the tmux session we therefore also SIGTERM the pane's
+    process group so nothing is left orphaned.
     """
     name = tmux_name(session_id)
     existed = session_exists(name)
@@ -1170,7 +1176,20 @@ def kill(session_id: str, graceful: bool = True, timeout: float = 8.0) -> dict:
                 time.sleep(0.2)
         if mode != "quit":
             mode = "kill"
+
+        # Grab the pane's root pid *before* killing the tmux session — after
+        # kill-session the pane is gone and pane_pid() returns 0.
+        root_pid = pane_pid(name)
         _tmux("kill-session", "-t", name, check=False)
+
+        # Kill the whole process group so kiro-cli sub-processes don't survive.
+        if root_pid:
+            try:
+                pgid = os.getpgid(root_pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                # Process already gone or in a group we can't signal — fine.
+                pass
 
     state = load_state()
     if state["managed"].pop(session_id, None) is not None or existed:
