@@ -4591,6 +4591,16 @@ body.resizing .detail-resize::after { background: var(--accent); }
   cursor: pointer;
 }
 .wall-exit:hover { background: var(--gray-bg, #f0f0f4); }
+.wall-settings {
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border, #ddd);
+  background: #fff;
+  color: var(--text, #111);
+  font-size: 14px;
+  cursor: pointer;
+}
+.wall-settings:hover { background: var(--gray-bg, #f0f0f4); }
 .wall-empty {
   color: var(--text-dim, #94a3b8);
   font-size: 20px;
