@@ -143,7 +143,12 @@ function CollectionCard({ collection, sessions, onRename, onDelete, onStart, onR
       {expanded && (
         <div className="coll-members">
           {collection.members.length === 0 && (
-            <div className="coll-empty-members">No members. Add sessions via the ★ button.</div>
+            <div className="coll-empty-members">
+              No members.
+              {isFavourites
+                ? ' Add sessions via the ★ button.'
+                : ' Use the 📁+ button on sessions in the Projects or Archive tab.'}
+            </div>
           )}
           {collection.members.map((m, i) => (
             <CollectionMember
