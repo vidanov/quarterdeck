@@ -4151,8 +4151,8 @@ body.resizing .detail-resize::after { background: var(--accent); }
   right: 0;
   top: 100%;
   z-index: 200;
-  background: #1e1e1e;
-  border: 1px solid #444;
+  background: #1e1e2e;
+  border: 1px solid #555;
   border-radius: 6px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
   min-width: 160px;
@@ -4166,7 +4166,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
   background: transparent;
   border: none;
   border-radius: 4px;
-  color: var(--text);
+  color: #e0e0e0;
   cursor: pointer;
   font-size: 12px;
   padding: 5px 8px;
@@ -4175,10 +4175,10 @@ body.resizing .detail-resize::after { background: var(--accent); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.add-to-coll-item:hover { background: #2a2a2a; }
+.add-to-coll-item:hover { background: #2e2e42; color: #fff; }
 .add-to-coll-item:disabled { opacity: 0.5; cursor: default; }
 .add-to-coll-loading, .add-to-coll-empty {
-  color: var(--text-dim);
+  color: #999;
   font-size: 11px;
   padding: 6px 8px;
 }
