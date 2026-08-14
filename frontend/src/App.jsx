@@ -538,6 +538,10 @@ export default function App() {
   // Build freshness — poll every 30s so a STALE BUILD banner appears when
   // source has changed without a rebuild. Prevents false "done" claims.
   const [buildHealth, setBuildHealth] = useState(null)
+  const [dismissedBuildHash, setDismissedBuildHash] = useState(null)
+  const [rebuilding, setRebuilding] = useState(false)
+  const [rebuildLog, setRebuildLog] = useState([])
+  const [rebuildDone, setRebuildDone] = useState(false)
   useEffect(() => {
     const check = () => fetch('/api/health/build')
       .then(r => r.json()).then(setBuildHealth).catch(() => {})
@@ -1195,7 +1199,7 @@ export default function App() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      {buildHealth?.stale && (
+      {buildHealth?.stale && !buildHealth?.dev_mode && buildHealth?.stale_reason !== dismissedBuildHash && (
         <div className="stale-build-banner">
           <span className="stale-build-icon">⚠</span>
           <span className="stale-build-msg">
@@ -1208,10 +1212,55 @@ export default function App() {
           </span>
           <button
             className="stale-build-action"
-            onClick={() => changeView('settings')}
+            disabled={rebuilding}
+            onClick={() => {
+              setRebuilding(true)
+              setRebuildLog([])
+              setRebuildDone(false)
+              fetch('/api/build/rebuild', { method: 'POST' })
+                .then(r => {
+                  const reader = r.body.getReader()
+                  const decoder = new TextDecoder()
+                  const pump = () => reader.read().then(({ done, value }) => {
+                    if (done) { setRebuilding(false); return }
+                    const text = decoder.decode(value)
+                    const lines = text.split('\n').filter(Boolean)
+                    setRebuildLog(prev => [...prev, ...lines])
+                    if (lines.some(l => l.includes('__DONE__'))) {
+                      setRebuildDone(true)
+                      setRebuilding(false)
+                    } else if (lines.some(l => l.includes('__ERROR__'))) {
+                      setRebuilding(false)
+                    } else {
+                      pump()
+                    }
+                  })
+                  pump()
+                })
+                .catch(() => setRebuilding(false))
+            }}
           >
-            Rebuild →
+            {rebuilding ? 'Building…' : 'Rebuild →'}
           </button>
+          <button
+            className="stale-build-dismiss"
+            title="Dismiss until next change"
+            onClick={() => setDismissedBuildHash(buildHealth.stale_reason)}
+          >✕</button>
+        </div>
+      )}
+
+      {(rebuilding || rebuildLog.length > 0) && (
+        <div className="rebuild-modal">
+          <div className="rebuild-modal-header">
+            <span>{rebuildDone ? '✓ Rebuild complete' : rebuilding ? 'Rebuilding…' : 'Build output'}</span>
+            {!rebuilding && (
+              <button className="rebuild-modal-close" onClick={() => { setRebuildLog([]); setRebuildDone(false) }}>✕</button>
+            )}
+          </div>
+          <pre className="rebuild-modal-log">
+            {rebuildLog.filter(l => l !== '__DONE__' && l !== '__ERROR__').join('\n')}
+          </pre>
         </div>
       )}
 
