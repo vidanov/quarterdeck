@@ -567,8 +567,14 @@ export default function App() {
   // Model / effort / command lists come from the backend so the UI never
   // offers a value kiro-cli would reject.
   useEffect(() => {
-    settingsApi.getOptions().then(setOptions).catch(() => {})
-    settingsApi.getCwdSuggestion().then(setCwdSuggestion).catch(() => {})
+    settingsApi.getCwdSuggestion()
+      .then(suggestion => {
+        setCwdSuggestion(suggestion)
+        const cwd = suggestion?.path || ''
+        return settingsApi.getOptions(cwd)
+      })
+      .then(setOptions)
+      .catch(() => settingsApi.getOptions().then(setOptions).catch(() => {}))
   }, [])
   // Build freshness — poll every 30s so a STALE BUILD banner appears when
   // source has changed without a rebuild. Prevents false "done" claims.

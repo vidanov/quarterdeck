@@ -71,6 +71,11 @@ Ordered by risk removed per unit of work:
 - [ ] **Reconsider the loopback bypass.** Gate non-GUI endpoints behind the token
       even on loopback, with pywebview holding a token of its own. Required
       before `tailscale serve` can be safe.
+      **Done 2026-08-15:** All loopback requests now require X-Local-Token.
+      Exemptions: OPTIONS preflight, /app/* static assets (webview bootstrap),
+      /login, /favicon.ico, proxied device tokens, dev/startup fail-open.
+      inject_local_token in app.py extended to all methods (was mutating only).
+      wait_for_backend() fixed to poll /app/ instead of /api/sessions.
 - [x] **Move token to macOS keychain.** Remote and local tokens stored under
       `com.vidanov.quarterdeck` in the login keychain via `security` CLI.
       Auto-migrates from `~/.osa-kiro/token` and `local-token` on first read.

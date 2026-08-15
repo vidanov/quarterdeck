@@ -74,11 +74,32 @@ def with_local_token(monkeypatch, tmp_path):
 
 
 class TestLoopbackBypass:
-    def test_local_get_needs_no_token(self, no_token, with_local_token):
-        assert local_client().get("/api/options").status_code == 200
+    def test_local_get_without_token_is_rejected(self, no_token, with_local_token):
+        """GET requests on loopback now require the local token too."""
+        r = local_client().get("/api/options")
+        assert r.status_code == 401
+        assert "local token required" in r.json().get("error", "")
+
+    def test_local_get_with_correct_local_token_is_allowed(self, no_token, with_local_token):
+        r = local_client().get(
+            "/api/options",
+            headers={"X-Local-Token": with_local_token},
+        )
+        assert r.status_code != 401
 
     def test_local_get_works_even_when_a_remote_token_exists(self, with_token, with_local_token):
-        assert local_client().get("/api/options").status_code == 200
+        r = local_client().get(
+            "/api/options",
+            headers={"X-Local-Token": with_local_token},
+        )
+        assert r.status_code != 401
+
+    def test_app_static_get_needs_no_token(self, no_token, with_local_token):
+        """/app/* is exempt so the webview can load before the token is injected."""
+        # The /app/ handler returns a 200 or 404 depending on build state,
+        # but it must not return 401.
+        r = local_client().get("/app/")
+        assert r.status_code != 401
 
     def test_local_post_without_local_token_is_rejected(self, no_token, with_local_token):
         r = local_client().post("/api/sessions/nonexistent/input",
@@ -136,12 +157,14 @@ class TestLoopbackBypass:
         monkeypatch.setattr(auth, "_local_token_cache", "")
         monkeypatch.setattr(auth, "_keychain_read", lambda account: "")
         monkeypatch.setattr(auth, "LOCAL_TOKEN_FILE", tmp_path / "absent")
-        # No token anywhere — POST with no header should pass through (fail-open)
-        r = local_client().post(
+        # No token anywhere — GET and POST with no header should pass through (fail-open)
+        r_get = local_client().get("/api/options")
+        assert r_get.status_code != 401
+        r_post = local_client().post(
             "/api/sessions/nonexistent/input",
             json={"text": "hi"},
         )
-        assert r.status_code != 401
+        assert r_post.status_code != 401
 
 
 class TestSourceBoundary:
