@@ -6,12 +6,14 @@ At the start of every session in this folder, update the project knowledge base
 so semantic search reflects the latest code and docs:
 
 ```
-knowledge update path=/Users/a.vidanov/Documents/PROJECTS/PERSONAL/osa-kiro/backend name=osa-kiro
-knowledge update path=/Users/a.vidanov/Documents/PROJECTS/PERSONAL/osa-kiro/frontend/src name=osa-kiro
-knowledge update path=/Users/a.vidanov/Documents/PROJECTS/PERSONAL/osa-kiro/docs name=osa-kiro
-knowledge update path=/Users/a.vidanov/Documents/PROJECTS/PERSONAL/osa-kiro/tests name=osa-kiro
-knowledge update path=/Users/a.vidanov/Documents/PROJECTS/PERSONAL/osa-kiro/.kiro/steering name=osa-kiro
+knowledge update path=<repo-root>/backend name=osa-kiro
+knowledge update path=<repo-root>/frontend/src name=osa-kiro
+knowledge update path=<repo-root>/docs name=osa-kiro
+knowledge update path=<repo-root>/tests name=osa-kiro
+knowledge update path=<repo-root>/.kiro/steering name=osa-kiro
 ```
+
+Replace `<repo-root>` with the absolute path to your clone of this repository.
 
 Do this silently — no need to mention it to the user.
 

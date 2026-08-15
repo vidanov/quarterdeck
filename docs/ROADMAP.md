@@ -824,7 +824,79 @@ Start Task 2. While it runs:
 
 ---
 
-## Design principles (from the original roadmap preamble)
+## 15. Ideas from Composio audit (2026-08-15)
+
+Source: https://composio.dev — tool execution infrastructure for AI agents.
+Composio's product is orthogonal to Quarterdeck (tool layer vs. session layer),
+but several of its design patterns map directly onto open problems here.
+
+### 15a. Approval gate rule sets (auto-allow by pattern)
+
+**The steal.** Composio offers action-level scoping: allow READ but block
+DELETE per agent role. Quarterdeck's gate is binary (allow / deny per call).
+
+- [ ] **Per-session rule file.** A JSON or YAML file per session (or per
+      project cwd) listing tool patterns that are auto-allowed, auto-denied,
+      or always gated. Format: `{pattern: "read_file", action: "allow"}`.
+- [ ] **Default deny list.** Seed from the 10b list (`rm -rf /`, force
+      pushes, DROP TABLE) plus safe-reads auto-allow category.
+- [ ] **Settings UI.** View and edit the active rule set for a session.
+      Toggle individual patterns. Inherits from project rule if no session
+      rule exists.
+- [ ] **Gate bypass indicator.** When a tool call is auto-allowed by rule,
+      show it in the audit trail with the rule that matched, not silently.
+
+This directly reduces approval fatigue for power users running many sessions
+while keeping explicit gates on high-risk operations. Pairs with 10a (TTL)
+and 10b (deny patterns) — those two become the starter rule set.
+
+### 15b. Intent-based session search in Concierge
+
+**The steal.** Composio resolves tools by semantic intent ("send email" →
+GMAIL_SEND_EMAIL), not keyword match. The Concierge command bar queries by
+title string today.
+
+- [ ] **Semantic session search.** Index session transcripts by content (not
+      just title/cwd). When a Concierge query returns zero title matches,
+      fall through to a content search across the last N turns of each
+      session. "find the session about the auth bug" should match a session
+      titled "osa-kiro refactor" if the transcript discusses auth.
+- [ ] **Intent-aware dispatch.** "Start fixing the CSS" → resolve cwd from
+      project name, pre-fill task field. Already partially done; the missing
+      piece is resolving ambiguous project names from transcript context.
+
+### 15c. Large tool output offload (context efficiency)
+
+**The steal.** Composio stores large tool responses on a remote filesystem
+the agent can browse rather than dumping them into context.
+
+- [ ] **Auto-offload oversized tool outputs.** When a tool result exceeds a
+      configurable threshold (default: 8 KB), write it to
+      `~/.osa-kiro/artifacts/{session_id}/{seq}.txt` and inject a compact
+      reference (`[artifact:seq]`) into the transcript instead.
+- [ ] **Artifact browser in detail panel.** List session artifacts alongside
+      the transcript. Click to view or download.
+- [ ] **Pair with "paste as document".** The existing feature collapses
+      large pastes into tiles. This extends the same idea to *outbound*
+      tool results, not just inbound pastes.
+
+### 15d. Just-in-time approval (lazy auth pattern)
+
+**The steal.** Composio triggers auth inline when the agent actually needs
+it, not at pre-configuration time.
+
+- [ ] **Deferred gate enrollment.** Today, approval gating must be enabled
+      before a session starts. Allow enabling the gate mid-session: the next
+      tool call after enrollment is the first gated one. No session restart
+      required.
+- [ ] **Approval prompt surfaced at use time.** When an ungated session
+      encounters a high-risk tool pattern (matching 15a's deny category),
+      surface a one-time "gate this?" prompt in the card rather than silently
+      allowing or silently blocking.
+
+---
+
+
 
 **The name is settled: Quarterdeck.** The deck an officer of the watch stands on
 and gives orders from.
@@ -847,3 +919,33 @@ Internal identifiers stay unchanged (`~/.osa-kiro/`, `DECK_NONCE`, `DECK_PORT`,
 - ~~**Ctrl+X shortcut**~~ — done: chip in composer bar + `Ctrl+X` key in textarea
 - ~~**Quick new session from focused/fullscreen mode**~~ — done: ＋ button in detail header, opens launcher without collapsing panel
 - ~~**Persist helpers menu (chips strip) state across restarts**~~ — done 2026-08-13: `chipsOpen` saved to backend settings (`dispatch-cwd-mode`), survives WKWebView localStorage clear
+
+## Pending UX requests (2026-08-15)
+
+- [ ] **Restore + Queue button in mobile Chat view.** `App.css` hides `.queue-btn`
+      on ≤700 px with `display: none` (line ~3636). The original rationale was
+      "use the stack chip instead", but the chip is not always visible and the
+      button is the primary queueing affordance in the Chat tab. Either restore
+      the button with a compact style (icon-only, min 44 px tap target) or keep
+      the chip but make it visually prominent enough to replace the button.
+
+- [ ] **Restore Managed filter on mobile.** `.control-filter-btn` is hidden
+      entirely on ≤700 px (line ~3624). The "Managed" filter is the most
+      useful one on a phone — it narrows to sessions Quarterdeck owns, where
+      approvals and dispatch are relevant. Restore at minimum the Managed
+      button; keep All/Crew/Idle hidden if space is tight. A compact two-button
+      strip (All | Managed) fits in one row at 44 px minimum height.
+
+- [ ] **Obsidian file browser and basic editor.** A new top-level view (tab in
+      the header alongside Sessions, Stats, etc.) that serves a user-configured
+      vault path (Settings → General → Obsidian vault) over a new backend endpoint set:
+      - `GET /api/obsidian/tree` — directory tree (depth-limited, excludes
+        `.obsidian/`, `node_modules/`).
+      - `GET /api/obsidian/file?path=...` — read a single markdown file.
+      - `PUT /api/obsidian/file?path=...` — write back (body: new content).
+      The UI is a two-pane layout: file tree on the left (collapsible on
+      mobile), markdown rendered on the right with an Edit toggle that swaps
+      in a plain textarea. Save writes back via PUT. No rich editor needed —
+      the goal is read access and light edits from the phone without leaving
+      Quarterdeck. Path is validated against the vault root (no directory
+      traversal). Write endpoint is POST-gated behind the existing auth token.
