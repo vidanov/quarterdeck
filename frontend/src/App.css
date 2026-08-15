@@ -1395,6 +1395,129 @@ body {
   padding: 7px 2px;
 }
 
+/* ── Paste attachment tiles ────────────────────────────────────────────── */
+.paste-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  margin-bottom: 4px;
+}
+.paste-tile {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface, #f8f9fa);
+  overflow: hidden;
+  font-size: 12px;
+}
+.paste-tile-uploading { opacity: 0.6; }
+.paste-tile-compact .paste-tile-text { -webkit-line-clamp: 2; }
+.paste-tile-preview {
+  cursor: pointer;
+  padding: 6px 8px 4px;
+}
+.paste-tile-text {
+  margin: 0;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-height: 1.4;
+}
+.paste-tile-footer {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 5px;
+  border-top: 1px solid var(--border);
+  background: var(--gray-bg, #f0f0f4);
+}
+.paste-tile-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent, #16a34a);
+  background: none;
+}
+.paste-tile-meta {
+  flex: 1;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.paste-tile-expand, .paste-tile-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.paste-tile-expand:hover, .paste-tile-remove:hover {
+  background: var(--border);
+  color: var(--text);
+}
+/* Paste expand modal */
+.paste-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: rgba(0,0,0,0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.paste-modal {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+  width: min(90vw, 700px);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.paste-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+}
+.paste-modal-meta {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.paste-modal-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-dim);
+  padding: 2px 5px;
+}
+.paste-modal-close:hover { color: var(--text); }
+.paste-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  margin: 0;
+  color: var(--text);
+}
+
 /* --- detail panel header actions + expand --- */
 .detail-icon {
   font-size: 13px;
@@ -5587,6 +5710,41 @@ body.resizing .detail-resize::after { background: var(--accent); }
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-dim);
+}
+/* Pasted document card in transcript — follows chat-steering pattern */
+.chat-doc-card {
+  width: 100%;
+  margin: 2px 0;
+}
+.chat-doc-summary {
+  cursor: pointer;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 11px;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+.chat-doc-summary::-webkit-details-marker { display: none; }
+.chat-doc-summary:hover { background: var(--gray-bg); color: var(--text); }
+.chat-doc-body {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  white-space: pre-wrap;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  max-height: 300px;
+  overflow-y: auto;
 }
 .chat-meta-user {
   display: flex;

@@ -47,6 +47,8 @@ import { CardReply, SessionCard, AttentionBar, ListView } from './components/Ses
 import StacksView from './components/StacksView'
 import { QuickCreate, CommandBar, NewSessionLauncher } from './components/Launcher'
 import Markdown from './components/Markdown'
+import { PasteAttachments, PasteTileCompact } from './components/PasteAttachments'
+import { usePasteAttachments } from './hooks/usePasteAttachments'
 import { timeAgo, showPath, STATUS_CONFIG } from './utils'
 
 function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
@@ -460,6 +462,13 @@ export default function App() {
   const [snapshots, setSnapshots] = useState([])
   const snapshotsLoaded = useRef(false)
   const wallInputRef = useRef(null)
+  // Wall tile paste attachments — hook at App level since the wall IIFE can't call hooks
+  const {
+    attachments: wallAttachments,
+    onPaste: onWallPaste,
+    removeAttachment: removeWallAttachment,
+    clearAttachments: clearWallAttachments,
+  } = usePasteAttachments({ sessionId: wallFocused?.id || null })
   // Archive state
   const [archiveQuery, setArchiveQuery] = useState('')
   const [archiveResults, setArchiveResults] = useState([])
@@ -707,8 +716,8 @@ export default function App() {
   // Answering and replying from the grid, without opening anything. The detail
   // panel is where a session gets driven; it is the wrong place to be forced
   // into for one line of text or one yes. See CardReply for the reasoning.
-  const sendToSession = (sessionId, text) =>
-    api.sendInput(sessionId, text)
+  const sendToSession = (sessionId, text, attachments = []) =>
+    api.sendInput(sessionId, text, attachments)
       .then(d => {
         if (d.error) { notify(`Send failed: ${d.error}`, 'error'); return false }
         // The card's status is derived from the pane, so nudge the list rather
@@ -1779,9 +1788,12 @@ export default function App() {
         {/* Wall / ambient view overlay — big tiles, interactive, full screen */}
         {sessionViewMode === 'wall' && (() => {
           const wallSendInput = () => {
-            if (!wallInput.trim() || !wallFocused) return
-            api.sendInput(wallFocused.id, wallInput.trim())
+            const readyAtts = wallAttachments.filter(a => !a.uploading)
+            if (!wallInput.trim() && readyAtts.length === 0) return
+            if (!wallFocused) return
+            api.sendInput(wallFocused.id, wallInput.trim(), readyAtts)
             setWallInput('')
+            clearWallAttachments()
             // Keep sheet open so user can see response arrive — don't close
           }
           const focusedLive = wallFocused
@@ -1960,6 +1972,9 @@ export default function App() {
                       <div className="wall-sheet-empty">Loading…</div>
                     )}
                     <div className="wall-sheet-input-row">
+                      {wallAttachments.length > 0 && (
+                        <PasteAttachments attachments={wallAttachments} onRemove={removeWallAttachment} />
+                      )}
                       <textarea
                         ref={wallInputRef}
                         className="wall-sheet-input"
@@ -1967,12 +1982,13 @@ export default function App() {
                         value={wallInput}
                         rows={2}
                         onChange={e => setWallInput(e.target.value)}
+                        onPaste={onWallPaste}
                         onKeyDown={e => {
                           if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); wallSendInput() }
                           if (e.key === 'Escape') { setWallFocused(null); setWallOutput('') }
                         }}
                       />
-                      <button className="wall-sheet-send" disabled={!wallInput.trim()} onClick={wallSendInput}>↵</button>
+                      <button className="wall-sheet-send" disabled={!wallInput.trim() && wallAttachments.length === 0} onClick={wallSendInput}>↵</button>
                     </div>
                   </div>
                 </div>

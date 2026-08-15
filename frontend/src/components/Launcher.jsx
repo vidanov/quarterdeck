@@ -5,6 +5,8 @@ import * as settingsApi from '../api/settings'
 import { useToast } from '../state/ToastContext'
 import { useSessions } from '../state/SessionsContext'
 import { timeAgo, showPath, STATUS_CONFIG } from '../utils'
+import { usePasteAttachments } from '../hooks/usePasteAttachments'
+import { PasteAttachments } from './PasteAttachments'
 
 const QC_HISTORY_KEY = 'quick-create-history'
 const QC_HISTORY_LIMIT = 50
@@ -28,6 +30,12 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
   const [historyIdx, setHistoryIdx] = useState(-1)
   const inputRef = useRef(null)
   const wrapRef = useRef(null)
+  const {
+    attachments: qcAttachments,
+    onPaste: onQcPaste,
+    removeAttachment: removeQcAttachment,
+    clearAttachments: clearQcAttachments,
+  } = usePasteAttachments({ sessionId: null })
   const [pinned, setPinned] = useState(() => {
     try { return JSON.parse(localStorage.getItem('pinned-folders') || '[]') }
     catch { return [] }
@@ -101,10 +109,13 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
 
   const doDispatch = (taskText, cwd) => {
     const t = taskText.trim()
-    if (!t) return
-    const updated = (t === qcHistory[0] ? qcHistory : [t, ...qcHistory]).slice(0, QC_HISTORY_LIMIT)
-    setQcHistory(updated)
-    localStorage.setItem(QC_HISTORY_KEY, JSON.stringify(updated))
+    const readyAtts = qcAttachments.filter(a => !a.uploading)
+    if (!t && readyAtts.length === 0) return
+    if (t) {
+      const updated = (t === qcHistory[0] ? qcHistory : [t, ...qcHistory]).slice(0, QC_HISTORY_LIMIT)
+      setQcHistory(updated)
+      localStorage.setItem(QC_HISTORY_KEY, JSON.stringify(updated))
+    }
     setQcHistIdx(-1)
     setHistoryOpen(false)
     setFolderOpen(false)
@@ -114,8 +125,10 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
       model: '',
       effort: '',
       agent: localStorage.getItem('launch-agent') || '',
+      attachments: readyAtts,
     })
     setTask('')
+    clearQcAttachments()
   }
 
   const handleKeyDown = (e) => {
@@ -159,6 +172,9 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
 
   return (
     <div className="qc-wrap" ref={wrapRef}>
+      {qcAttachments.length > 0 && (
+        <PasteAttachments attachments={qcAttachments} onRemove={removeQcAttachment} />
+      )}
       <form
         className="qc-bar"
         onSubmit={(e) => { e.preventDefault(); doDispatch(task) }}
@@ -182,6 +198,7 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
           onChange={(e) => { setTask(e.target.value); setQcHistIdx(-1); setHistoryIdx(-1) }}
           onFocus={() => { if (recentTasks.length) setHistoryOpen(true) }}
           onKeyDown={handleKeyDown}
+          onPaste={onQcPaste}
           placeholder="What should the agent do?"
           autoComplete="off"
           spellCheck="false"
@@ -468,6 +485,12 @@ function NewSessionLauncher({ options, onDispatch, onCancel }) {
   const [suggested, setSuggested] = useState(null)
   const recognitionRef = useRef(null)
   const inputRef = useRef(null)
+  const {
+    attachments: launchAttachments,
+    onPaste: onLaunchPaste,
+    removeAttachment: removeLaunchAttachment,
+    clearAttachments: clearLaunchAttachments,
+  } = usePasteAttachments({ sessionId: null })
 
   useEffect(() => { if (inputRef.current) inputRef.current.focus() }, [])
 
@@ -492,9 +515,11 @@ function NewSessionLauncher({ options, onDispatch, onCancel }) {
 
   const submit = (e) => {
     e.preventDefault()
-    if (!task.trim()) return
-    onDispatch({ task, cwd, model, effort, agent, pre_command: preCommand })
+    const readyAtts = launchAttachments.filter(a => !a.uploading)
+    if (!task.trim() && readyAtts.length === 0) return
+    onDispatch({ task, cwd, model, effort, agent, pre_command: preCommand, attachments: readyAtts })
     setTask('')
+    clearLaunchAttachments()
   }
 
   const chooseAgent = (name) => {
@@ -545,12 +570,16 @@ function NewSessionLauncher({ options, onDispatch, onCancel }) {
 
   return (
     <form className="launcher" onSubmit={submit}>
+      {launchAttachments.length > 0 && (
+        <PasteAttachments attachments={launchAttachments} onRemove={removeLaunchAttachment} />
+      )}
       <textarea
         ref={inputRef}
         className="launcher-input"
         value={task}
         rows={2}
         onChange={(e) => setTask(e.target.value)}
+        onPaste={onLaunchPaste}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) submit(e)
           if (e.key === 'Escape') onCancel()

@@ -8,7 +8,8 @@ export const getSession = (id) => getJSON(`/api/sessions/${id}`)
 // and reading back over it is most of the point of the Live view.
 export const getPane = (id, lines) => getJSON(`/api/sessions/${id}/pane?lines=${lines}`)
 
-export const sendInput = (id, text) => postJSON(`/api/sessions/${id}/input`, { text })
+export const sendInput = (id, text, attachments = []) =>
+  postJSON(`/api/sessions/${id}/input`, { text, attachments })
 
 // A choice is either a menu answer (allow / trust / deny / dismiss) or a raw
 // key to move around inside it (Up, Down, Enter, Escape, C-c).
@@ -73,3 +74,12 @@ export const addCorrection = (id, payload = {}) => postJSON(`/api/sessions/${id}
 export const updateCorrection = (correctionId, status, note = '') =>
   patchJSON(`/api/corrections/${correctionId}`, { status, note })
 export const getCorrections = (id) => getJSON(`/api/sessions/${id}/corrections`)
+
+// Paste store
+export const createPaste = (text, sessionId = null, name = null) =>
+  postJSON('/api/pastes', { text, session_id: sessionId, name })
+export const getPasteText = (sessionId, name) =>
+  getJSON(`/api/pastes/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`)
+export const deletePaste = (sessionId, name) =>
+  fetch(`/api/pastes/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`,
+    { method: 'DELETE' }).then(r => r.json())

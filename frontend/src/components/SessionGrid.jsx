@@ -2,6 +2,8 @@ import React, { useState, useRef, useMemo, useEffect } from 'react'
 import * as api from '../api/sessions'
 import { useToast } from '../state/ToastContext'
 import { timeAgo, showPath, STATUS_CONFIG, readHistory, writeHistory, historyKey, HISTORY_LIMIT, loadHistoryFromPrefs } from '../utils'
+import { usePasteAttachments } from '../hooks/usePasteAttachments'
+import { PasteAttachments } from './PasteAttachments'
 
 const CARD_DOUBLE_CLICK_MS = 180
 const CONTROL_LABEL = {
@@ -20,6 +22,12 @@ function CardReply({ session, held, onRespondApproval, onRespondPrompt, onSendTe
   // same localStorage key so ↑/↓ works consistently wherever you reply from.
   const [history, setHistory] = useState(() => readHistory(session.id))
   const [historyIndex, setHistoryIndex] = useState(-1)
+  const {
+    attachments: cardAttachments,
+    onPaste: onCardPaste,
+    removeAttachment: removeCardAttachment,
+    clearAttachments: clearCardAttachments,
+  } = usePasteAttachments({ sessionId: session.id })
   const stop = (e) => e.stopPropagation()
 
   // Keep history in sync if the session id somehow changes without remounting.
@@ -81,15 +89,19 @@ function CardReply({ session, held, onRespondApproval, onRespondPrompt, onSendTe
     const submit = (e) => {
       if (e) { e.preventDefault(); e.stopPropagation() }
       const body = text.trim()
-      if (!body || busy) return
+      const readyAtts = cardAttachments.filter(a => !a.uploading)
+      if ((!body && readyAtts.length === 0) || busy) return
       setBusy(true)
       // Save to history before clearing — same dedup logic as the composer.
-      const next = (history[0] === body ? history : [body, ...history]).slice(0, HISTORY_LIMIT)
-      setHistory(next)
-      writeHistory(session.id, next)  // write immediately — don't rely on effect timing
+      if (body) {
+        const next = (history[0] === body ? history : [body, ...history]).slice(0, HISTORY_LIMIT)
+        setHistory(next)
+        writeHistory(session.id, next)  // write immediately — don't rely on effect timing
+      }
       setHistoryIndex(-1)
       setText('')
-      Promise.resolve(onSendText(session.id, body))
+      clearCardAttachments()
+      Promise.resolve(onSendText(session.id, body, readyAtts))
         .then(ok => { if (!ok) setText(body) })
         .finally(() => setBusy(false))
     }
@@ -103,9 +115,13 @@ function CardReply({ session, held, onRespondApproval, onRespondPrompt, onSendTe
     }
     return (
       <form className="card-reply" onClick={stop} onSubmit={submit}>
+        {cardAttachments.length > 0 && (
+          <PasteAttachments attachments={cardAttachments} onRemove={removeCardAttachment} />
+        )}
         <input className="card-reply-input" value={text} disabled={busy}
                placeholder="Reply…" onClick={stop}
                onChange={(e) => { setText(e.target.value); setHistoryIndex(-1) }}
+               onPaste={onCardPaste}
                onKeyDown={(e) => {
                  if (e.key === 'Enter') { submit(e); return }
                  if (e.key === 'ArrowUp') recall(e, 1)

@@ -99,3 +99,67 @@ export async function loadHistoryFromPrefs(sessionId) {
   } catch {}
   return null
 }
+
+// ── Paste document parsing ────────────────────────────────────────────────
+
+// Matches the one-line wire format written by pastes.reference_line:
+//   [pasted document: /path/to/file.md — N lines, X KB]
+const PASTE_REF_RE = /\[pasted document: (.+?) — (\d+) lines, (.+?)\]/g
+
+const PASTE_MIN_CHARS = 1200
+const PASTE_MIN_LINES_DOC = 20
+
+/**
+ * parseUserMessage(text) → segments[]
+ *
+ * A segment is one of:
+ *   {type: 'text', content: string}
+ *   {type: 'doc', source: 'ref', path: string, lines: number, size: string,
+ *                session_id: string, name: string}
+ *   {type: 'doc', source: 'heuristic', content: string, lines: number}
+ *
+ * The 'ref' variant is used for messages that contain a [pasted document: …]
+ * marker. The 'heuristic' variant is used for long plain-text blocks that
+ * were pasted directly (no marker) — covers pre-existing history.
+ */
+export function parseUserMessage(text) {
+  if (!text) return [{ type: 'text', content: '' }]
+
+  const segments = []
+  let lastIndex = 0
+  let match
+
+  PASTE_REF_RE.lastIndex = 0
+  while ((match = PASTE_REF_RE.exec(text)) !== null) {
+    // Text before this match
+    if (match.index > lastIndex) {
+      const before = text.slice(lastIndex, match.index).trim()
+      if (before) segments.push({ type: 'text', content: before })
+    }
+    const filePath = match[1]
+    const lines = parseInt(match[2], 10)
+    const size = match[3]
+    // Extract session_id and name from the path
+    // Path shape: …/pastes/<session_id>/<name>
+    const pathParts = filePath.replace(/\\/g, '/').split('/')
+    const name = pathParts[pathParts.length - 1]
+    // session_id is the directory just before the filename
+    const session_id = pathParts[pathParts.length - 2] || '_unassigned'
+    segments.push({ type: 'doc', source: 'ref', path: filePath, lines, size, session_id, name })
+    lastIndex = match.index + match[0].length
+  }
+
+  // Remaining text after last match
+  const rest = text.slice(lastIndex)
+  if (rest.trim()) {
+    const restLines = rest.split('\n').length
+    if (rest.length >= PASTE_MIN_CHARS || restLines >= PASTE_MIN_LINES_DOC) {
+      // Long plain text — heuristic collapse
+      segments.push({ type: 'doc', source: 'heuristic', content: rest, lines: restLines })
+    } else {
+      segments.push({ type: 'text', content: rest })
+    }
+  }
+
+  return segments.length ? segments : [{ type: 'text', content: text }]
+}
