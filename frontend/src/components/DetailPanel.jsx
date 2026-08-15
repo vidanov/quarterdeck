@@ -3,6 +3,9 @@ import { createPortal } from 'react-dom'
 import { errorOf } from '../api/client'
 import * as api from '../api/sessions'
 import * as settingsApi from '../api/settings'
+import { usePasteAttachments } from '../hooks/usePasteAttachments'
+import { PasteAttachments } from './PasteAttachments'
+import { DocCard } from './DocCard'
 
 // Error boundary so a transcript rendering crash shows a recovery button
 // instead of a blank white screen with no way out.
@@ -33,6 +36,7 @@ import {
   STATUS_CONFIG, showPath, PANEL_MIN, PANEL_DEFAULT, CELL_SAMPLE,
   PANE_MIN_COLS, PANE_MIN_ROWS, PANE_SCROLLBACK, PANE_FOLLOW_SLACK,
   clampPanelWidth, HISTORY_LIMIT, readHistory, writeHistory, loadHistoryFromPrefs,
+  parseUserMessage,
 } from '../utils'
 
 function StackItem({ item, index, count, sessionId, setStack, onDelete, onMove }) {
@@ -222,6 +226,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     clampPanelWidth(Number(localStorage.getItem('detail-width')) || PANEL_DEFAULT))
   const widthRef = useRef(width)
   const [draft, setDraft] = useState(() => localStorage.getItem(`draft:${session?.id}`) || '')
+  // Paste attachment tiles — large pastes are stored as files, tiles replace the text wall
+  const { attachments, onPaste: onPasteAttachment, removeAttachment, clearAttachments, setAttachments } =
+    usePasteAttachments({ sessionId: session?.id })
   // Per-session composer history, survives closing the panel and a reload.
   const [history, setHistory] = useState(
     () => readHistory(session.id))
@@ -330,6 +337,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [sideChatLines, setSideChatLines] = useState([])
   const [sideChatThinking, setSideChatThinking] = useState(false)
   const [sideChatDraft, setSideChatDraft] = useState('')
+  // Side chat paste attachments — content is inlined (not file-referenced) since
+  // the side chat endpoint sends to an LLM, not to the agent's fs_read path.
+  const {
+    attachments: sideChatAttachments,
+    onPaste: onSideChatPaste,
+    removeAttachment: removeSideChatAttachment,
+    clearAttachments: clearSideChatAttachments,
+  } = usePasteAttachments({ sessionId: session?.id })
   const [sideChatOpening, setSideChatOpening] = useState(false)
   const [sideChatChipsOpen, setSideChatChipsOpen] = useState(false)
   const [sideChatHistory, setSideChatHistory] = useState(() => {
@@ -849,13 +864,18 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   }
 
   const sendText = (text) => {
-    if (!text.trim() || !canSend) return
+    if (!text.trim() && attachments.length === 0) return
+    if (!canSend) return
     setSending(true)
     // Echo immediately: the pane needs a moment to redraw, and silence right
     // after pressing send reads as a dropped message.
     setEcho(text)
-    api.sendInput(session.id, text)
-      .then(d => { if (d.error) { notify(`Send failed: ${d.error}`, 'error'); setEcho('') } })
+    const readyAttachments = attachments.filter(a => !a.uploading)
+    api.sendInput(session.id, text, readyAttachments)
+      .then(d => {
+        if (d.error) { notify(`Send failed: ${d.error}`, 'error'); setEcho('') }
+        else clearAttachments()
+      })
       .finally(() => {
         setSending(false)
         if (onRefresh) setTimeout(onRefresh, 1000)
@@ -896,10 +916,17 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   const sendSideChat = (e) => {
     e.preventDefault()
-    const text = sideChatDraft.trim()
-    if (!text) return
+    const typedText = sideChatDraft.trim()
+    const readyAtts = sideChatAttachments.filter(a => !a.uploading)
+    if (!typedText && readyAtts.length === 0) return
     setSideChatDraft('')
+    clearSideChatAttachments()
     setSideChatHistoryIdx(-1)
+    // Inline attachment content for side chat (goes to LLM, not agent fs_read)
+    const parts = readyAtts.map(a => a.preview ?? '').filter(Boolean)
+    if (typedText) parts.push(typedText)
+    const text = parts.join('\n\n')
+    if (!text.trim()) return
     // Prepend to history (newest first), cap at 50
     const newHistory = [text, ...sideChatHistory.filter(h => h !== text)].slice(0, 50)
     setSideChatHistory(newHistory)
@@ -954,12 +981,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   const submitDraft = (e) => {
     if (e) e.preventDefault()
-    if (!draft.trim()) return
+    if (!draft.trim() && attachments.length === 0) return
     sendText(draft)
     // Newest first, deduped against the immediately preceding entry
-    const next = (history[0] === draft ? history : [draft, ...history]).slice(0, HISTORY_LIMIT)
-    setHistory(next)
-    writeHistory(session.id, next)  // write immediately — don't rely on effect timing
+    if (draft.trim()) {
+      const next = (history[0] === draft ? history : [draft, ...history]).slice(0, HISTORY_LIMIT)
+      setHistory(next)
+      writeHistory(session.id, next)  // write immediately — don't rely on effect timing
+    }
     setHistoryIndex(-1)
     setDraft('')
   }
@@ -1463,7 +1492,11 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     ) : (
                       <>
                         <div className="chat-bubble-user">
-                          <div className="chat-bubble-text">{msg.text?.slice(0, 2000)}</div>
+                          {parseUserMessage(msg.text).map((seg, si) =>
+                            seg.type === 'doc'
+                              ? <DocCard key={si} segment={seg} />
+                              : <div key={si} className="chat-bubble-text">{seg.content?.slice(0, 2000)}</div>
+                          )}
                         </div>
                         <div className="chat-meta-user">
                           {ts && <span className="chat-ts">{ts}</span>}
@@ -1650,6 +1683,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               document.body
             )}
             <form className="composer-row" onSubmit={submitDraft}>
+              {attachments.length > 0 && (
+                <PasteAttachments attachments={attachments} onRemove={removeAttachment} />
+              )}
               <button type="button" className="composer-chips-toggle"
                       title={chipsOpen ? 'Hide controls' : 'Show controls (keys, model, effort)'}
                       onClick={() => setChipsOpen(v => { const next = !v; localStorage.setItem('detail-chips-open', next ? '1' : '0'); settingsApi.saveSettings({ 'detail-chips-open': next }).catch(() => {}); return next })}>
@@ -1661,6 +1697,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 rows={expanded ? 3 : 2}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
+                onPaste={onPasteAttachment}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) submitDraft(e)
                   if (e.key === 'ArrowUp') recallHistory(e, 1)
@@ -1886,6 +1923,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </div>
             )}
             <form className="side-chat-compose" onSubmit={sendSideChat}>
+              {sideChatAttachments.length > 0 && (
+                <PasteAttachments attachments={sideChatAttachments} onRemove={removeSideChatAttachment} />
+              )}
               <button type="button" className={`side-chat-chips-toggle${sideChatChipsOpen ? ' active' : ''}`}
                       title={sideChatChipsOpen ? 'Hide controls' : 'Show controls & commands'}
                       onClick={() => setSideChatChipsOpen(v => !v)}>⌃</button>
@@ -1893,6 +1933,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 className="side-chat-input"
                 value={sideChatDraft}
                 onChange={e => { setSideChatDraft(e.target.value); setSideChatHistoryIdx(-1) }}
+                onPaste={onSideChatPaste}
                 onKeyDown={e => {
                   if (e.key === 'ArrowUp') {
                     if (!sideChatHistory.length) return
