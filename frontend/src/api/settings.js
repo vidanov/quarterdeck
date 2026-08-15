@@ -8,7 +8,7 @@ export const saveSettings = (patch) => postJSON('/api/settings', patch)
 
 // Model / effort / command lists the backend will actually accept, so the UI
 // never offers a value kiro-cli would reject.
-export const getOptions = () => getJSON('/api/options')
+export const getOptions = (cwd = '') => getJSON(`/api/options${cwd ? '?cwd=' + encodeURIComponent(cwd) : ''}`)
 export const getCwdSuggestion = () => getJSON('/api/cwd-suggestion')
 
 // A directory can carry its own agents in .kiro/agents, and one of those

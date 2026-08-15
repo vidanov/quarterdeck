@@ -520,22 +520,30 @@ def install(app) -> None:
             )
 
         if is_loopback(request):
-            # GET requests stay open — safe for dev tools and curl debugging.
-            # Mutating methods require the local token so that any process on
-            # this machine (compromised dependency, rogue script) cannot write
-            # to sessions or dispatch new ones without the key.
-            # If no local token file exists yet (first run before app.py has
-            # called ensure_local_token), fall through — fail-open preserves
-            # backward compatibility for dev mode and tests.
+            # All loopback requests now require the local token so that any
+            # process on this machine (compromised dependency, rogue script)
+            # cannot read sessions, transcripts, or settings without the key —
+            # not just mutate them.  The pywebview app injects the token at
+            # page load via window.fetch / XMLHttpRequest patches in app.py.
             #
-            # Exception: the TCP proxy forwards mobile connections through
-            # loopback, so they arrive here as loopback requests but carry a
-            # valid device token. Accept those — they already authenticated
-            # before reaching the proxy.
-            if request.method in ("GET", "HEAD", "OPTIONS"):
+            # Exemptions (checked in order):
+            #   1. OPTIONS preflight — no credentials by spec, no side effects.
+            #   2. /login and /favicon.ico (PUBLIC_PATHS) — handled below.
+            #   3. /app/* static assets — the webview loads these before the
+            #      inject_local_token script has run, so they cannot carry a
+            #      token.  They contain no sensitive data.
+            #   4. If no local token exists yet (first run / dev mode) —
+            #      fail-open preserves backward compatibility.
+            #   5. A valid device token in the Authorization header means this
+            #      is a proxied mobile request through the TCP proxy — bypass
+            #      the local-token check.
+            if request.method == "OPTIONS":
                 return await call_next(request)
-            # If a valid device token is present, this is a proxied mobile
-            # request — bypass the local-token check.
+            if request.url.path.startswith("/app/") or request.url.path == "/app":
+                return await call_next(request)
+            if request.url.path in PUBLIC_PATHS:
+                return await call_next(request)
+            # Proxied mobile request — device token already authenticated.
             if _authenticate_token(request):
                 limited = _rate_limit(request)
                 if limited:
@@ -557,7 +565,7 @@ def install(app) -> None:
                 return await call_next(request)
             return JSONResponse(
                 {"error": "local token required",
-                 "detail": "Mutating requests from loopback must carry X-Local-Token."},
+                 "detail": "All loopback requests must carry X-Local-Token."},
                 status_code=401,
             )
 

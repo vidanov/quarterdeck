@@ -3233,8 +3233,17 @@ def cwd_suggestion():
     }
 
 
-def default_agent_name() -> str:
-    """The agent kiro-cli would use if `--agent` were not passed."""
+def default_agent_name(cwd: str = "") -> str:
+    """The agent kiro-cli would use if `--agent` were not passed.
+
+    kiro-cli checks the workspace for a local kiro_default before falling back
+    to the global settings default — mirror that resolution here so the
+    Launcher's dropdown shows the right label.
+    """
+    if cwd:
+        local_default = Path(cwd).expanduser() / WORKSPACE_AGENTS_SUBDIR / "kiro_default.json"
+        if local_default.exists():
+            return "kiro_default"
     try:
         settings = json.loads(KIRO_CLI_SETTINGS.read_text())
     except (json.JSONDecodeError, OSError):
@@ -3306,7 +3315,7 @@ def list_agents(cwd: str = "") -> list[dict]:
             }
 
     agents = sorted(found.values(), key=lambda a: (a["source"] == "builtin", a["name"].lower()))
-    default = default_agent_name()
+    default = default_agent_name(cwd)
     for agent in agents:
         agent["is_default"] = agent["name"] == default
     return agents
@@ -3315,7 +3324,7 @@ def list_agents(cwd: str = "") -> list[dict]:
 @app.get("/api/agents")
 def get_agents(cwd: str = ""):
     """Selectable agents, and which one a spawn without `--agent` would use."""
-    return {"agents": list_agents(cwd), "default": default_agent_name()}
+    return {"agents": list_agents(cwd), "default": default_agent_name(cwd)}
 
 
 # --- the agentSpawn hook, installed into the user's agent configs ---
@@ -3968,7 +3977,7 @@ def get_options(cwd: str = ""):
             "engines": ["v1", "v2", "v3"],
             "commands": [dict(c) for c in QUICK_COMMANDS],
             "terminals": [{"id": k, **v} for k, v in TERMINALS.items()],
-            "agents": list_agents(cwd), "default_agent": default_agent_name()}
+            "agents": list_agents(cwd), "default_agent": default_agent_name(cwd)}
 
 
 @app.post("/api/open-folder")

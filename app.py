@@ -222,12 +222,18 @@ def preflight() -> list[str]:
 
 
 def wait_for_backend(port, timeout=10):
-    """Wait until backend is responsive."""
+    """Wait until backend is responsive.
+
+    Polls /app/ rather than /api/sessions: /api/sessions now requires the local
+    token, and the token has not been injected into the webview yet at this
+    point. /app/ serves static assets, which are explicitly exempt from the
+    local-token check so the webview can bootstrap.
+    """
     import urllib.request
     start = time.time()
     while time.time() - start < timeout:
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/sessions")
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/app/")
             return True
         except Exception:
             time.sleep(0.2)
@@ -444,29 +450,46 @@ def main():
 
     # local_token was set during keychain pre-warm above; reused here for injection.
     def inject_local_token():
-        """Patch window.fetch so every mutating request carries X-Local-Token.
+        """Patch window.fetch and XMLHttpRequest so every API request carries X-Local-Token.
 
         Called once after the page loads. The token value is baked in at
-        injection time — it never changes unless the file is manually deleted.
-        The patch is invisible to the app: fetch behaves identically except
-        POST/DELETE/PATCH/PUT requests carry the header automatically.
+        injection time — it never changes unless manually deleted.
+
+        All methods are patched (not just mutating ones) because the backend now
+        requires the token on GET requests too — this closes the loopback bypass
+        that previously let any local process read sessions, transcripts, and
+        settings without authentication.
         """
         import json as _json
         token_literal = _json.dumps(local_token)
         script = f"""
 (function() {{
   const _localToken = {token_literal};
-  const _mutating = new Set(['POST', 'DELETE', 'PATCH', 'PUT']);
   const _origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {{
-    const method = (init && init.method ? init.method : 'GET').toUpperCase();
-    if (_mutating.has(method)) {{
-      init = init ? Object.assign({{}}, init) : {{}};
-      const headers = new Headers(init.headers || {{}});
-      if (!headers.has('X-Local-Token')) headers.set('X-Local-Token', _localToken);
-      init.headers = headers;
-    }}
+    init = init ? Object.assign({{}}, init) : {{}};
+    const headers = new Headers(init.headers || {{}});
+    if (!headers.has('X-Local-Token')) headers.set('X-Local-Token', _localToken);
+    init.headers = headers;
     return _origFetch(input, init);
+  }};
+  // Also patch XMLHttpRequest for any code that bypasses fetch.
+  const _origOpen = XMLHttpRequest.prototype.open;
+  const _origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {{
+    this._xltPatched = true;
+    return _origOpen.call(this, method, url, ...rest);
+  }};
+  const _origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function(name, value) {{
+    if (name.toLowerCase() === 'x-local-token') this._xltSet = true;
+    return _origSetHeader.call(this, name, value);
+  }};
+  XMLHttpRequest.prototype.send = function(...args) {{
+    if (this._xltPatched && !this._xltSet) {{
+      _origSetHeader.call(this, 'X-Local-Token', _localToken);
+    }}
+    return _origSend.apply(this, args);
   }};
 }})();
 """

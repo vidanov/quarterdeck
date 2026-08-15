@@ -7,6 +7,9 @@ __pycache__/
 .DS_Store
 icon.iconset/
 
+# Kiro local knowledge base (session-level semantic search index)
+.knowledge/
+
 # Runtime preferences and user-created working sets
 settings.json
 snapshots.json
