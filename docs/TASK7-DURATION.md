@@ -33,7 +33,7 @@ Written once, at session end (triggered by `stop` hook or `/api/sessions/{id}/di
     "model": "claude-sonnet-4.6",
     "effort": "max",
     "has_task_string": true,
-    "cwd": "/Users/a.vidanov/Documents/PROJECTS/PERSONAL/osa-kiro",
+    "cwd": "/Users/yourname/projects/osa-kiro",
     "project": "osa-kiro",
     "gating_on": false,
     "stack_auto_advancing": false,
