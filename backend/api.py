@@ -26,13 +26,15 @@ from . import side_chat
 from . import corrections
 from . import delivery
 from . import ownership
+from . import pastes as paste_store
 from . import screenshots
 from . import shell
 from . import tmux_manager as tmux
 from . import v3 as v3mod
 from .config import (
     AGENTS_DIR, BUILTIN_AGENTS, CAPTURE_LINES, DEFAULT_AGENT_KEY, CORRECTIONS_DIR, DELIVERY_DIR, EFFORTS,
-    HIDDEN_CWD_PREFIXES, KIRO_CLI_SETTINGS, MAX_CAPTURE_LINES, OWNERS_DIR, PORT, QUICK_COMMANDS,
+    GATES_DIR, HIDDEN_CWD_PREFIXES, KIRO_CLI_SETTINGS, MAX_CAPTURE_LINES, OWNERS_DIR, PORT, QUICK_COMMANDS,
+    PASTES_DIR, PASTE_MIN_CHARS, PASTE_MIN_LINES, PASTE_RETENTION_DAYS,
     RECENT_SESSIONS_LIMIT, REMOTE_PORT, STATE_DIR, STACKS_DIR,
     SESSIONS_DIR, CREW_SESSIONS_DIR, TAIL_LINES, TERMINALS, VITE_PORT, WORKSPACE_AGENTS_SUBDIR,
     SETTINGS_FILE, SNAPSHOTS_FILE, FAVOURITES_FILE, SUMMARIES_DIR, SLASH_QUEUES_DIR,
@@ -2779,24 +2781,75 @@ def corrections_summary():
     return corrections.get_correction_summary()
 
 
+def _can_read_files(session_id: str) -> bool:
+    """True when the session can read a paste file without a tool-approval prompt.
+
+    False when preToolUse gating is active (GATES_DIR/<id> exists).
+    A managed session with DEFAULT_TRUST_TOOLS="fs_read" will read silently;
+    a gated or ACP-only session needs the content inlined instead.
+    """
+    gate_file = GATES_DIR / session_id
+    return not gate_file.exists()
+
+
 @app.post("/api/sessions/{session_id}/input")
 def send_input(session_id: str, payload: dict):
     """Type text into a managed session and submit it.
 
-    For V3 sessions with an ACP observer, routes via ACP session/prompt
-    (more reliable than tmux send-keys). Falls back to tmux on any error.
+    Optional attachments: [{session_id, name}] — paste files to prepend as
+    reference lines (if the session can read files) or inline content (gated).
+    For V3 sessions with an ACP observer, routes via ACP session/prompt.
+    Falls back to tmux on any error.
     """
-    text = payload.get("text", payload.get("task", ""))
-    if not text.strip():
+    text = payload.get("text", payload.get("task", "")) or ""
+    attachments = payload.get("attachments") or []
+
+    # Build the full prompt: attachment references + typed text
+    parts = []
+    for att in attachments:
+        att_sid = att.get("session_id") or "_unassigned"
+        att_name = att.get("name", "")
+        if not att_name:
+            continue
+        try:
+            if _can_read_files(session_id):
+                # send a one-line file reference the agent reads via fs_read
+                att_meta_lines = att.get("lines", 0)
+                att_meta_size = att.get("size_display", "")
+                ref = paste_store.reference_line(att_sid, att_name, att_meta_lines, att_meta_size)
+                parts.append(ref)
+            else:
+                # gated session: inline the content with newlines preserved
+                content = paste_store.read(att_sid, att_name)
+                parts.append(content)
+        except (FileNotFoundError, ValueError):
+            pass  # stale attachment — skip silently
+
+    if text.strip():
+        parts.append(text)
+
+    if not parts:
         return {"error": "No text provided"}
-    # Newlines would submit early, so collapse them into one prompt.
-    flat = " ".join(text.split())
+
+    # For inline/gated delivery, use newlines-preserved path via tmux load-buffer
+    # (tmux_manager already handles >1024 chars with bracketed-paste).
+    # For reference-line delivery (short single line), flatten normally.
+    has_inline = any(
+        not _can_read_files(session_id) and (att.get("name")) for att in attachments
+    )
+    if has_inline:
+        full_text = "\n\n".join(parts)
+    else:
+        full_text = " ".join(p.strip() for p in parts if p.strip())
+        full_text = " ".join(full_text.split())  # collapse internal whitespace
+
+    flat = full_text
 
     # ACP-observed sessions (V3 foreign) bypass the tmux is_managed gate —
     # they communicate directly via the ACP session/prompt channel.
     if acp_observer.is_attached(session_id):
         try:
-            if text.startswith("/"):
+            if flat.startswith("/"):
                 if acp_observer.execute_command(session_id, flat):
                     return {"ok": True, "sent": flat[:200], "via": "acp-cmd"}
             else:
@@ -4228,6 +4281,25 @@ def dispatch_task(payload: dict):
     cwd = payload.get("cwd") or cwd_suggestion()["path"] or str(Path.home())
     if not task.strip():
         return {"error": "No task provided"}
+
+    # Prepend paste attachment references to the task (dispatch sessions read
+    # files freely — no gating at session start).
+    attachments = payload.get("attachments") or []
+    ref_lines = []
+    for att in attachments:
+        att_sid = att.get("session_id") or "_unassigned"
+        att_name = att.get("name", "")
+        if not att_name:
+            continue
+        try:
+            ref = paste_store.reference_line(att_sid, att_name,
+                                             att.get("lines", 0),
+                                             att.get("size_display", ""))
+            ref_lines.append(ref)
+        except (ValueError, Exception):
+            pass
+    if ref_lines:
+        task = "\n".join(ref_lines) + "\n" + task
 
     # Return as soon as tmux has the process: waiting for kiro-cli to write its
     # session id took seconds and made the UI feel dead. Correlation continues
@@ -6371,7 +6443,55 @@ def apply_cleanup(payload: dict):
     _remove_favourites(set(deleted))
     if deleted:
         _invalidate_projects_cache()
+    # Sweep expired paste files alongside session cleanup
+    paste_store.sweep()
     return {"deleted": deleted, "failed": failed, "count": len(deleted)}
+
+
+# ── Paste store ────────────────────────────────────────────────────────────
+
+@app.post("/api/pastes")
+def create_paste(payload: dict):
+    """Save a pasted document and return its metadata.
+
+    Body: {text: str, session_id?: str, name?: str}
+    Returns: {id, name, session_id, path, lines, bytes, size_display, preview}
+    """
+    text = payload.get("text", "")
+    if not text.strip():
+        return {"error": "No text provided"}
+    session_id = payload.get("session_id") or None
+    name = payload.get("name") or None
+    try:
+        meta = paste_store.save(session_id, text, name=name)
+        return meta
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/pastes/{session_id}/{name}")
+def get_paste(session_id: str, name: str):
+    """Fetch the full text of a paste file."""
+    try:
+        text = paste_store.read(session_id, name)
+        return {"text": text}
+    except FileNotFoundError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Paste not found")
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/pastes/{session_id}/{name}")
+def delete_paste(session_id: str, name: str):
+    """Delete a paste file."""
+    try:
+        paste_store.delete(session_id, name)
+        return {"ok": True}
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Projects view ---

@@ -92,6 +92,10 @@ CORRECTIONS_DIR = STATE_DIR / "corrections"
 STACKS_DIR = STATE_DIR / "stacks"
 SLASH_QUEUES_DIR = STATE_DIR / "slash-queues"
 SUMMARIES_DIR = STATE_DIR / "summaries"
+PASTES_DIR = STATE_DIR / "pastes"
+PASTE_MIN_CHARS = 1200   # threshold to trigger attachment-tile collapse
+PASTE_MIN_LINES = 20     # either condition is sufficient
+PASTE_RETENTION_DAYS = 30  # default sweep age
 # How long to wait for the hook's answer once the process-tree walk already has
 # one. Measured on kiro-cli 2.14.2: the agentSpawn hook fires ~0.25s after the
 # .lock file the walk keys on, so the walk always wins the race and the hook is

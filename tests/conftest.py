@@ -47,6 +47,7 @@ _STATE_MODULES = [
     "backend.audit",
     "backend.devices",
     "backend.api",   # re-exports config paths as its own module-level names
+    "backend.pastes",
 ]
 
 _REAL_STATE_ROOT = Path.home() / ".osa-kiro"
