@@ -5,7 +5,7 @@
  * For 'ref' segments: fetches full text from /api/pastes/… on first expand.
  * For 'heuristic' segments: uses inline content directly.
  */
-import { useState } from 'react'
+import React, { useState } from 'react'
 import { getPasteText } from '../api/sessions'
 
 export function DocCard({ segment }) {

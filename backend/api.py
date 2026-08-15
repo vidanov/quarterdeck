@@ -6391,9 +6391,12 @@ def preview_cleanup():
             except:
                 pass
 
+    paste_bytes = paste_store.storage_bytes()
     return {
         "zombies": zombies,
         "stale": stale,
+        "paste_bytes": paste_bytes,
+        "paste_size_display": paste_store._fmt_bytes(paste_bytes),
         "summary": {
             "zombie_count": len(zombies),
             "stale_count": len(stale),

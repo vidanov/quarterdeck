@@ -9,8 +9,8 @@
  *   <textarea onPaste={onPaste} … />
  *   <PasteAttachments attachments={attachments} onRemove={removeAttachment} />
  */
-import { useState, useCallback } from 'react'
-import { createPaste, deletePaste } from '../api/sessions'
+import { useState, useCallback, useEffect } from 'react'
+import { createPaste, deletePaste, getPasteText } from '../api/sessions'
 
 // Mirror the backend thresholds (also used by DocCard heuristic)
 export const PASTE_MIN_CHARS = 1200
@@ -21,7 +21,26 @@ function shouldCollapse(text) {
 }
 
 export function usePasteAttachments({ sessionId = null } = {}) {
-  const [attachments, setAttachments] = useState([])
+  const storageKey = sessionId ? `paste-attachments:${sessionId}` : null
+
+  // Restore persisted attachments on mount; prune entries whose files are gone
+  const [attachments, setAttachments] = useState(() => {
+    if (!storageKey) return []
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || '[]')
+      return Array.isArray(saved) ? saved.filter(a => a.name && !a.uploading) : []
+    } catch { return [] }
+  })
+
+  // Persist attachments whenever they change
+  useEffect(() => {
+    if (!storageKey) return
+    try {
+      const toSave = attachments.filter(a => a.name && !a.uploading)
+      if (toSave.length > 0) localStorage.setItem(storageKey, JSON.stringify(toSave))
+      else localStorage.removeItem(storageKey)
+    } catch {}
+  }, [attachments, storageKey])
 
   const onPaste = useCallback(async (e) => {
     const text = e.clipboardData?.getData('text/plain') ?? ''
@@ -61,7 +80,10 @@ export function usePasteAttachments({ sessionId = null } = {}) {
     }
   }, [])
 
-  const clearAttachments = useCallback(() => setAttachments([]), [])
+  const clearAttachments = useCallback(() => {
+    setAttachments([])
+    if (storageKey) localStorage.removeItem(storageKey)
+  }, [storageKey])
 
   return { attachments, setAttachments, onPaste, removeAttachment, clearAttachments }
 }

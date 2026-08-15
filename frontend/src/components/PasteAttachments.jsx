@@ -4,7 +4,7 @@
  * Each tile shows: clipped 4-line preview, PASTED badge, line/size counts,
  * × to remove, and click-to-expand in a modal.
  */
-import { useState } from 'react'
+import React, { useState } from 'react'
 import { getPasteText } from '../api/sessions'
 
 export function PasteAttachments({ attachments, onRemove }) {

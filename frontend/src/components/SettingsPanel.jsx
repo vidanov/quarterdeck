@@ -1006,6 +1006,12 @@ function DangerZone() {
       {preview && (
         <div className="danger-preview">
           {total === 0 && <p className="cleanup-hint">Nothing to clean up.</p>}
+          {preview.paste_bytes > 0 && (
+            <p className="cleanup-hint" style={{marginTop: 8}}>
+              <strong>Paste files</strong> — {preview.paste_size_display} stored in ~/.osa-kiro/pastes
+              (files older than 30 days are swept automatically on cleanup).
+            </p>
+          )}
           {(preview.zombies || []).length > 0 && (
             <>
               <p className="cleanup-hint" style={{marginTop: 8}}>
