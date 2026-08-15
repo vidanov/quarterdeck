@@ -299,8 +299,11 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
       {/* What it last said. The action line says what the session wants; this
           says what about — which is the difference between "three sessions are
           finished" and knowing which to deal with first. Quoted, not
-          summarised: it costs no tokens and cannot be wrong. */}
-      {session.last_message && (
+          summarised: it costs no tokens and cannot be wrong.
+          Backend suppresses last_message when the preceding user turn was
+          paste-only. Frontend also skips bare paste reference lines. */}
+      {session.last_message &&
+        !/^\[pasted document:/i.test(session.last_message.trim()) && (
         <div className={`card-last${session.control === 'managed' && (session.status === 'idle' || session.status === 'done') ? ' card-last-summary' : ''}`}
              title={session.last_message}>{session.last_message}</div>
       )}

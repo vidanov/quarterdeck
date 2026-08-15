@@ -1126,6 +1126,8 @@ def last_message(session_id: str, max_chars: int = LAST_MESSAGE_MAX) -> str:
             lines = f.read().decode("utf-8", errors="replace").split("\n")
         # The first line of a mid-file seek is usually a fragment; a failed
         # parse drops it, so no special case is needed.
+        _PASTE_RE = re.compile(r"^\[pasted document:", re.IGNORECASE)
+        found_assistant = False
         for line in reversed(lines):
             line = line.strip()
             if not line:
@@ -1134,11 +1136,27 @@ def last_message(session_id: str, max_chars: int = LAST_MESSAGE_MAX) -> str:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(entry, dict) or entry.get("kind") != "AssistantMessage":
+            if not isinstance(entry, dict):
                 continue
-            said = _block_text(entry)
-            if said:
-                text = said
+            kind = entry.get("kind", "")
+            if not found_assistant:
+                if kind != "AssistantMessage":
+                    continue
+                said = _block_text(entry)
+                if said:
+                    text = said
+                    found_assistant = True
+                    # Keep scanning to check the preceding user turn
+            else:
+                # Check if the immediately preceding human message was paste-only
+                if kind == "HumanMessage":
+                    human_text = _block_text(entry).strip()
+                    # All lines are paste references → suppress card preview
+                    if human_text and all(
+                        _PASTE_RE.match(ln.strip()) or not ln.strip()
+                        for ln in human_text.splitlines()
+                    ):
+                        text = ""
                 break
     except OSError:
         return ""
