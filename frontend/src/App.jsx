@@ -661,17 +661,18 @@ export default function App() {
       .catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-trigger summary for managed sessions that just went idle and have no summary yet
-  // Auto-trigger summary for managed sessions that just went idle and have no summary yet
+  // Auto-trigger summary for managed sessions that just went idle and have no summary yet.
+  // Also fires for sessions that were already idle/done when first seen (e.g. after page reload).
   const prevSessionStatuses = useRef({})
   useEffect(() => {
     const prev = prevSessionStatuses.current
     sessions.forEach(s => {
       if (s.control !== 'managed') return
       if (s.summary) return
-      const wasActive = prev[s.id] === 'thinking' || prev[s.id] === 'running'
       const isNowIdle = s.status === 'idle' || s.status === 'done'
-      if (wasActive && isNowIdle) {
+      const wasActive = prev[s.id] === 'thinking' || prev[s.id] === 'running'
+      const isNewToUs = !(s.id in prev)
+      if (isNowIdle && (wasActive || isNewToUs)) {
         api.summarize(s.id).catch(() => {})
       }
     })
