@@ -4,6 +4,20 @@ Completed work, extracted from the roadmap on 2026-07-28. Organized by area.
 
 ---
 
+## 2026-08-15
+
+### Paste-as-document across all inputs
+
+**Root cause fixed**: `api.py:send_input` collapsed every newline with `" ".join(text.split())`, destroying markdown, YAML, and code structure in any pasted document. The fix moves newline preservation upstream: large pastes are written to a file and delivered as a one-line file reference; the agent reads the file via `fs_read`. Gated sessions receive the content inline with newlines preserved via the existing bracketed-paste route in `tmux_manager.py`.
+
+**backend/pastes.py** (new): `save`, `read`, `delete`, `sweep`, `storage_bytes`, `reference_line`, `should_collapse`. Files at `~/.osa-kiro/pastes/<session_id>/<YYYYMMDD-HHMMSS>-<slug>.md`. Traversal guard in `_resolve()`. 16 tests.
+
+**backend/api.py**: `POST/GET/DELETE /api/pastes`; `_can_read_files()` checks `GATES_DIR`; `send_input` builds reference lines or inline content from `attachments[]`; `dispatch_task` prepends attachment references; `paste_store.sweep()` registered in cleanup; cleanup preview includes `paste_bytes`/`paste_size_display`.
+
+**Frontend**: `usePasteAttachments.js` hook intercepts pastes above threshold, POSTs to `/api/pastes`, persists to `localStorage['paste-attachments:<sid>']`. `PasteAttachments.jsx` renders clipped tile with PASTED badge, expand modal, and ×. `DocCard.jsx` renders pasted documents in the transcript as collapsible `<details>` cards (lazy-fetch for ref markers, inline for heuristic long-text). Wired into: main composer, side chat, wall tile reply, card fast reply, quick-create, NewSessionLauncher. Cleanup settings panel shows paste storage size.
+
+---
+
 ## 2026-08-14 (evening)
 
 ### ACP control surface — Tasks 4, 5, 6 (section 13)

@@ -45,6 +45,7 @@ What you get:
 - **Audit trail** — every mutating request, approval decision, and tool outcome recorded to a bounded local log
 - **Concierge** — natural-language command bar for finding sessions, launching work, and generating reports
 - **Draft persistence and history** — input drafts survive session switches; arrow-up recalls sent messages
+- **Paste as document** — pasting a large block of text collapses it into an attachment tile; delivery writes the content to a file so structure survives and context is not consumed
 - **Context compaction** — one click to send `/compact` when context is running high
 - **Self-update** — `Settings > Updates` pulls, rebuilds frontend, and restarts the backend in place
 
