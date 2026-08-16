@@ -187,6 +187,36 @@ function TaskStack({ sessionId, stack, setStack, canSend }) {
   )
 }
 
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false)
+  if (!text) return null
+  const copy = () => {
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 1500) }
+    // navigator.clipboard requires a secure context (HTTPS).
+    // Over plain HTTP (Tailscale without TLS) fall back to execCommand.
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done).catch(() => fallback())
+    } else {
+      fallback()
+    }
+    function fallback() {
+      const el = document.createElement('textarea')
+      el.value = text
+      el.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0'
+      document.body.appendChild(el)
+      el.focus()
+      el.select()
+      try { document.execCommand('copy'); done() } catch (_) {}
+      document.body.removeChild(el)
+    }
+  }
+  return (
+    <button className={`chat-copy-btn${copied ? ' chat-copy-btn--copied' : ''}`} onClick={copy} title="Copy to clipboard">
+      {copied ? '✓' : '⎘'}
+    </button>
+  )
+}
+
 function ContextPct({ pct, onCompact }) {
   if (!pct) return null
   const n = parseFloat(pct)
@@ -304,6 +334,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [slashQueue, setSlashQueue] = useState([])
   const [slashDraft, setSlashDraft] = useState('')
   const [delivery, setDelivery] = useState(null)  // steering delivery record
+  const [durationRecord, setDurationRecord] = useState(null)  // task 7: duration data
   const [pendingScreenshots, setPendingScreenshots] = useState([])
   const [chipPreview, setChipPreview] = useState(null) // {url, x, y}
   const dismissedScreenshots = useRef(new Set()) // names dismissed this session
@@ -619,6 +650,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     api.getSlashQueue(session.id).then(d => setSlashQueue(d.items || [])).catch(() => {})
     api.getDelivery(session.id).then(d => setDelivery(d)).catch(() => {})
     api.getAutoAdvance(session.id).then(d => setAutoAdvance(!!d.enabled)).catch(() => {})
+    api.getSessionDuration(session.id).then(d => setDurationRecord(d?.record || null)).catch(() => {})
   }, [session?.id])
 
   // Poll for new screenshots every 3 seconds when the composer is visible.
@@ -1500,6 +1532,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         </div>
                         <div className="chat-meta-user">
                           {ts && <span className="chat-ts">{ts}</span>}
+                          <CopyButton text={msg.text} />
                           {forkFn && <button className="chat-fork" title="Fork from this point" onClick={forkFn}>⑂</button>}
                         </div>
                       </>
@@ -1547,6 +1580,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         {finalMsg.truncated && (
                           <span className="chat-truncated-marker">…truncated</span>
                         )}
+                        <CopyButton text={finalMsg.text} />
                       </div>
                     )}
                   </div>
@@ -1563,6 +1597,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         {msg.truncated && (
                           <span className="chat-truncated-marker">…truncated</span>
                         )}
+                        <CopyButton text={msg.text} />
                       </div>
                     )}
                   </div>
@@ -1840,14 +1875,22 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           ⌥ {detail?.agent || session.agent}
         </div>
       )}
-      {(detail?.kiro_profile || session.kiro_profile) && (
-        <div className="detail-meta detail-profile"
-             title="Kiro profile used for this session">
-          ◉ {detail?.kiro_profile || session.kiro_profile}
-        </div>
-      )}
-      <div className="detail-danger">
-        {/* Only show delete for sessions that aren't actively running */}
+      {/* Profile · duration · delete — one compact line on both desktop and mobile */}
+      <div className="detail-meta-strip">
+        {(detail?.kiro_profile || session.kiro_profile) && (
+          <span className="detail-meta-strip-profile" title="Kiro profile used for this session">
+            ◉ {detail?.kiro_profile || session.kiro_profile}
+          </span>
+        )}
+        {durationRecord?.outcome?.wall_clock_min != null && (
+          <span className="detail-meta-strip-duration"
+                title={`Type: ${durationRecord.features?.type_tag || 'unknown'} · Project: ${durationRecord.features?.project || ''}`}>
+            ⏱ {Math.round(durationRecord.outcome.wall_clock_min)} min
+            {durationRecord.outcome.tool_calls_total > 0 && (
+              <> · {durationRecord.outcome.tool_calls_total} calls</>
+            )}
+          </span>
+        )}
         {(status === 'done' || control === 'archived' || status === 'idle' || status === 'error') && (
           <button className="detail-delete-btn" onClick={async () => {
             const title = detail?.title || session.title || 'this session'

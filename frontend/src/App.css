@@ -1954,8 +1954,8 @@ body.resizing .detail-resize::after { background: var(--accent); }
   font-size: 11px;
   color: var(--text-dim);
   font-family: 'SF Mono', 'Menlo', monospace;
-  margin-top: 12px;
-  padding-top: 8px;
+  margin-top: 6px;
+  padding-top: 4px;
   border-top: 1px solid var(--border);
   cursor: pointer;
 }
@@ -1966,7 +1966,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
   .terminal-live { min-height: 200px !important; }
 }
 .detail-agent {
-  margin-top: 4px;
+  margin-top: 2px;
   padding-top: 0;
   border-top: none;
   cursor: default;
@@ -2725,7 +2725,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: 1000;
   background: rgba(15, 23, 42, 0.38);
   display: flex;
   align-items: center;
@@ -3632,33 +3632,56 @@ body.resizing .detail-resize::after { background: var(--accent); }
   /* "◎ Side" → keep text, it's short and important */
   .detail-side-btn { overflow: visible; max-width: none; font-size: 13px; padding: 6px 8px; }
 
-  /* Hide + Queue button on mobile — use the stack chip instead */
-  .queue-btn { display: none; }
+  /* Queue button: restored, compact */
+  .queue-btn {
+    flex: 0 0 auto;
+    min-height: 44px;
+    min-width: 54px;
+    font-size: 13px;
+    padding: 0 10px;
+  }
 
   /* detail-meta path bar: hide on mobile — wastes a full row */
   .detail-meta { display: none; }
+  /* Agent line: redundant on mobile */
+  .detail-meta.detail-agent { display: none; }
 
-  /* ── Composer: full-width textarea, bigger send ──────────────────────── */
+  /* Slash queue: hide on mobile — not used there */
+  .slash-queue { display: none; }
+
+  /* ── Composer: textarea full-width row 1, buttons row 2 ─────────────── */
   .composer-row {
     flex-wrap: wrap;
     gap: 6px;
   }
+  /* chips-toggle: goes on row 2 with the buttons, not row 1 */
+  .composer-chips-toggle {
+    flex: 0 0 auto;
+    min-width: 44px;
+    min-height: 44px;
+    font-size: 16px;
+    order: 3;
+  }
+  /* textarea: full width on row 1 */
   .composer-input {
-    flex: 1 1 100%;   /* own full row */
-    min-height: 52px;
+    flex: 1 1 100%;
+    min-height: 72px;
     font-size: 16px;
     padding: 10px 12px;
-    max-height: 120px;
+    max-height: 160px;
+    order: 1;
   }
+  /* Send: fills most of row 2 */
   .dispatch-btn {
     flex: 1;
     min-height: 44px;
     font-size: 15px;
+    order: 4;
   }
-  .composer-send {
-    min-width: 44px;
-    min-height: 44px;
-    font-size: 18px;
+  /* Queue: compact at end of row 2 */
+  .queue-btn {
+    flex: 0 0 auto;
+    order: 5;
   }
 
   /* ── Overflow fix: pane and code blocks must not escape their container ─ */
@@ -4385,9 +4408,29 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .card-reply-trust:hover { background: var(--gray-bg, #f1f5f9); }
 .working-row-needs { border-left: 2px solid var(--accent); }
 
-/* Delete session button — bottom of detail panel, muted until hover */
-.detail-danger { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+/* Profile · duration · delete — one compact line */
+.detail-meta-strip {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.detail-meta-strip-profile {
+  color: var(--accent);
+  opacity: 0.85;
+  white-space: nowrap;
+}
+.detail-meta-strip-duration {
+  white-space: nowrap;
+}
 .detail-delete-btn {
+  margin-left: auto;
   font-size: 11px;
   color: var(--text-dim);
   background: none;
@@ -5828,6 +5871,30 @@ body.resizing .detail-resize::after { background: var(--accent); }
 }
 .chat-row-user:hover .chat-fork { opacity: 1; }
 .chat-fork:hover { color: var(--accent, #3b82f6); border-color: var(--accent, #3b82f6); }
+/* Copy button — appears on hover for both user bubbles and assistant text */
+.chat-copy-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 1px 5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+.chat-row-user:hover .chat-copy-btn,
+.chat-row-assistant:hover .chat-copy-btn { opacity: 1; }
+.chat-copy-btn:hover { color: var(--accent, #3b82f6); border-color: var(--accent, #3b82f6); }
+.chat-copy-btn--copied { color: #16a34a; border-color: #16a34a; opacity: 1 !important; }
+/* Position copy button at bottom-right of assistant text blocks */
+.chat-assistant-text { position: relative; }
+.chat-assistant-text .chat-copy-btn {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+}
 /* Tool calls collapsible */
 .chat-tools {
   margin-top: 6px;
