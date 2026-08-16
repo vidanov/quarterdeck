@@ -365,6 +365,16 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   // Side chat state
   const [sideChatOpen, setSideChatOpen] = useState(false)
+  const [overflowOpen, setOverflowOpen] = useState(false)
+  // Close overflow menu when clicking outside it
+  useEffect(() => {
+    if (!overflowOpen) return
+    const handler = (e) => {
+      if (!e.target.closest('.detail-overflow-wrap')) setOverflowOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [overflowOpen])
   const [sideChatLines, setSideChatLines] = useState([])
   const [sideChatThinking, setSideChatThinking] = useState(false)
   const [sideChatDraft, setSideChatDraft] = useState('')
@@ -1166,36 +1176,47 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           {control === 'acp' && (
             <span className="detail-acp-badge" title="Input routed via ACP — no tmux pane needed">◉ ACP</span>
           )}
-          {canSend && (
-            <button className="detail-switch" onClick={() => handoff(handoffTerminal)}
-                    title={`Quit here and reopen in ${(options.terminals || []).find(x => x.id === handoffTerminal)?.label || handoffTerminal} — change the terminal in Settings → General`}>
-              ⇱ Hand off
-            </button>
-          )}
+          {/* Expand/fullscreen — prominent, always present */}
           <button className="detail-icon detail-icon-expand" onClick={onToggleExpand}
-                  title={expanded ? 'Shrink panel (F)' : 'Maximise panel (F) — or double-click a card'}>
+                  title={expanded ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}>
             {expanded ? '⤡' : '⤢'}
           </button>
-          {onNewSession && expanded && (
-            <button className="detail-icon" onClick={onNewSession}
-                    title="New session (opens launcher)">
-              ＋
-            </button>
-          )}
-          {onToggleFocus && !expanded && (
-            <button className="detail-icon detail-icon-focus" onClick={onToggleFocus}
-                    title={focusMode ? 'Exit focus mode — restore grid' : 'Focus mode — collapse grid to attention strip'}>
-              {focusMode ? '◧' : '▣'}
-            </button>
-          )}
-          <button className="detail-correct" title="Log a correction — agent did something wrong"
-                  onClick={logCorrection}>⚑ Correction</button>
+          {/* Correction — icon only */}
+          <button className="detail-correct detail-icon" title="Log a correction — agent did something wrong"
+                  onClick={logCorrection}>⚑</button>
+          {/* Side chat — keep label, it's a mode */}
           <button className={`detail-switch detail-side-btn${sideChatOpen ? ' active' : ''}`}
                   title={sideChatOpen ? 'Close side chat' : 'Open side chat — ask questions about this session without polluting its context'}
                   onClick={openSideChat}
                   disabled={sideChatOpening}>
             {sideChatOpening ? '…' : '◎ Side'}
           </button>
+          {/* Overflow: Hand off, new session, wall toggle */}
+          <div className="detail-overflow-wrap">
+            <button className="detail-icon detail-overflow-btn"
+                    title="More actions"
+                    onClick={() => setOverflowOpen(v => !v)}>···</button>
+            {overflowOpen && (
+              <div className="detail-overflow-menu" onClick={() => setOverflowOpen(false)}>
+                {canSend && (
+                  <button className="detail-overflow-item" onClick={() => handoff(handoffTerminal)}
+                          title={`Reopen in ${(options.terminals || []).find(x => x.id === handoffTerminal)?.label || handoffTerminal}`}>
+                    ⇱ Hand off
+                  </button>
+                )}
+                {onNewSession && (
+                  <button className="detail-overflow-item" onClick={onNewSession}>
+                    ＋ New session
+                  </button>
+                )}
+                {onToggleFocus && !expanded && (
+                  <button className="detail-overflow-item" onClick={onToggleFocus}>
+                    {focusMode ? '◧ Exit focus' : '▣ Focus mode'}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           <button className="detail-close" onClick={onClose}>✕</button>
         </div>
       </div>
