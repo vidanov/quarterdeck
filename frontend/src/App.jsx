@@ -1377,24 +1377,21 @@ export default function App() {
                     return (
                       <button key={key}
                               className={`control-filter-btn ${controlFilter === key ? 'active' : ''}`}
+                              data-filter={key}
                               onClick={() => changeControlFilter(key)}>
                         {label} <span className="control-filter-count">{n}</span>
                       </button>
                     )
                   })}
-                  {/* Status chips */}
+                  {/* Status chips — only Waiting (approval needed); Thinking and Idle removed */}
                   <span className="toolbar-divider" />
-                  {[
-                    ['thinking', '⟳ Thinking', active.filter(s => s.status === 'thinking' || s.status === 'running').length],
-                    ['awaiting-approval', '⏸ Waiting', active.filter(s => s.status === 'awaiting-approval').length],
-                    ['idle', '· Idle', active.filter(s => s.status === 'idle').length],
-                  ].map(([key, label, n]) => n > 0 && (
-                    <button key={key}
-                            className={`status-chip ${statusFilter === key ? 'active' : ''}`}
-                            onClick={() => changeStatusFilter(statusFilter === key ? null : key)}>
-                      {label} <span className="control-filter-count">{n}</span>
+                  {active.filter(s => s.status === 'awaiting-approval').length > 0 && (
+                    <button
+                      className={`status-chip ${statusFilter === 'awaiting-approval' ? 'active' : ''}`}
+                      onClick={() => changeStatusFilter(statusFilter === 'awaiting-approval' ? null : 'awaiting-approval')}>
+                      ⏸ Waiting <span className="control-filter-count">{active.filter(s => s.status === 'awaiting-approval').length}</span>
                     </button>
-                  ))}
+                  )}
                 </div>
                 {/* View mode switcher — cards/list only; wall toggle lives in the header */}
                 <div className="view-mode-btns">

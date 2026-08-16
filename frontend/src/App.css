@@ -1522,7 +1522,7 @@ body {
 .detail-icon {
   font-size: 13px;
   line-height: 1;
-  padding: 3px 6px;
+  padding: 3px 8px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: #fff;
@@ -1530,6 +1530,55 @@ body {
   cursor: pointer;
 }
 .detail-icon:hover { color: var(--text); background: #f1f5f9; }
+/* Expand icon: slightly larger to match the screenshot maximize button feel */
+.detail-icon-expand {
+  font-size: 15px;
+  padding: 3px 7px;
+  color: var(--text-dim);
+}
+/* Correction: icon-only, no label */
+.detail-correct {
+  font-size: 14px;
+  padding: 3px 7px;
+}
+/* Overflow ··· menu */
+.detail-overflow-wrap {
+  position: relative;
+}
+.detail-overflow-btn {
+  font-size: 15px;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+}
+.detail-overflow-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+  z-index: 200;
+  min-width: 160px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.detail-overflow-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 12px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.detail-overflow-item:hover { background: var(--gray-bg, #f1f5f9); }
 .detail-rename { display: flex; gap: 5px; align-items: center; margin-bottom: 8px; }
 .detail-rename-input {
   flex: 1 1 auto;
@@ -3620,15 +3669,33 @@ body.resizing .detail-resize::after { background: var(--accent); }
   .detail-icon-expand { display: none; }
   /* Focus mode — layout concept doesn't apply when panel owns full screen */
   .detail-icon-focus { display: none; }
-  /* All / Crew / Idle filter strip — redundant on mobile single-column view */
-  .control-filter-btn { display: none; }
+  /* Filter strip: show All + Managed on mobile, hide Foreign and Crew */
+  .control-filter-btn[data-filter="foreign"],
+  .control-filter-btn[data-filter="crew"] { display: none; }
+  .control-filter-btn { min-height: 36px; font-size: 13px; padding: 5px 12px; }
+  /* Toolbar: constrain to viewport, filters scroll horizontally if needed */
+  .active-toolbar {
+    max-width: 100%;
+    overflow: hidden;
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+  .active-toolbar-filters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .active-toolbar-filters::-webkit-scrollbar { display: none; }
+  .toolbar-divider { flex-shrink: 0; }
   /* "Thinking" and "Idle" header stat badges — keep only "waiting" (approval needed) */
   .stat-running { display: none; }
   .stat-idle { display: none; }
   /* Section counts (Working 1 ▾, Needs you 2 ▾) — label only on mobile */
   .section-count { display: none; }
   /* "⚑ Correction" → icon only */
-  .detail-correct { overflow: hidden; max-width: 36px; font-size: 15px; padding: 6px 8px; }
+  .detail-correct { min-width: 44px; min-height: 44px; font-size: 16px; padding: 6px 8px; }
   /* "◎ Side" → keep text, it's short and important */
   .detail-side-btn { overflow: visible; max-width: none; font-size: 13px; padding: 6px 8px; }
 
