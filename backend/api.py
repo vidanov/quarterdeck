@@ -25,6 +25,7 @@ from . import concierge
 from . import side_chat
 from . import corrections
 from . import delivery
+from . import duration
 from . import ownership
 from . import pastes as paste_store
 from . import screenshots
@@ -91,6 +92,17 @@ async def lifespan(_app: FastAPI):
     ownership.init(OWNERS_DIR)
     delivery.init(DELIVERY_DIR, AGENTS_DIR)
     corrections.init(CORRECTIONS_DIR)
+    # Tighten profile credential files to owner-only on every startup.
+    # These contain live OAuth refresh tokens; the umask on older saves may
+    # have left them world-readable (security defect D2).
+    try:
+        for _pf in _PROFILES_DIR.glob("*.jsonl"):
+            try:
+                _pf.chmod(0o600)
+            except OSError:
+                pass
+    except Exception:
+        pass
     # Install the verify-claim stop-hook script into ~/.osa-kiro/hooks/ so
     # the stop hook can call it without knowing the repo location.
     _install_claim_hook_script()
@@ -208,6 +220,19 @@ def _check_auto_advance(last_seen: dict, summarising: set | None = None):
         if last_seen.get(session_id, 0) >= mtime:
             continue
         last_seen[session_id] = mtime
+        # Record duration data for this turn — additive, never raises.
+        # Only fires when the turn file itself is the stop signal (not a .json record
+        # written by this module, which passes the fullmatch guard above).
+        turn_file_size = 0
+        try:
+            turn_file_size = turn_file.stat().st_size
+        except OSError:
+            pass
+        if turn_file_size < 4096:
+            # Bare stop marks are tiny; skip writing over a real duration record.
+            threading.Thread(
+                target=duration.write_record, args=(session_id,), daemon=True
+            ).start()
         # Trigger a summary when a NEW stop event fires for a managed session.
         # concierge-enabled defaults to False — it's heavyweight (starts kiro-cli).
         # In-flight guard prevents spawning a second thread before the first finishes.
@@ -1530,7 +1555,16 @@ def _ownership_fields(session_id: str) -> dict:
     recorded_at_dispatch = bool(o.get("kiro_profile"))
     if recorded_at_dispatch:
         spawn_ts = o.get("spawned_at", 0.0)
-        profile_verified = (_last_profile_switch_at == 0.0 or spawn_ts >= _last_profile_switch_at)
+        switch_ts = _last_switch_ts()
+        # Two conditions must both hold:
+        # 1. The recorded name still matches the live active profile (cheap, catches
+        #    the case where mtime is unavailable).
+        # 2. No switch happened after this session spawned (survives restarts via
+        #    _last_switch_ts() which reads _previous.jsonl mtime).
+        profile_verified = (
+            profile == _cached_active_profile()
+            and (switch_ts == 0.0 or spawn_ts >= switch_ts)
+        )
     else:
         # Fallback value — we don't know when it spawned relative to any switch
         profile_verified = False
@@ -1541,6 +1575,7 @@ def _ownership_fields(session_id: str) -> dict:
         "handoverable": o.get("handoverable", True),
         "visible": o.get("visible", True),
         "kiro_profile": profile,
+        "kiro_profile_arn": o.get("kiro_profile_arn", ""),
         "profile_verified": profile_verified,
     }
 
@@ -1551,6 +1586,24 @@ _ACTIVE_PROFILE_TTL = 10.0  # seconds
 # time have an unverified profile label (the running process may be on the
 # old profile). Zero means no switch has occurred this session.
 _last_profile_switch_at: float = 0.0
+
+
+def _last_switch_ts() -> float:
+    """Wall-clock of the last profile switch, persisted across restarts.
+
+    `_last_profile_switch_at` is a module-level float that resets to 0.0 on
+    every backend restart. That caused every session to show profile_verified:
+    true after a restart, even if a switch had happened before the restart.
+    The fix: _previous.jsonl is rewritten on every switch, so its mtime *is*
+    the last-switch time and it already survives restarts. Take the max of the
+    in-memory value (exact, covers the current session) and the mtime (covers
+    across restarts).
+    """
+    try:
+        file_ts = _profile_data_path("_previous").stat().st_mtime
+    except OSError:
+        file_ts = 0.0
+    return max(_last_profile_switch_at, file_ts)
 
 
 def _cached_active_profile() -> str:
@@ -2337,20 +2390,31 @@ def _generate_summary_async(session_id: str, last_seq: int | None = None) -> Non
         # Use python3 explicitly — inside a frozen PyInstaller bundle,
         # sys.executable points to the frozen binary, not the Python interpreter.
         script = Path(__file__).parent / "acp_query.py"
-        python = sys.executable if not getattr(sys, "frozen", False) else "python3"
+        if not getattr(sys, "frozen", False):
+            python = sys.executable
+        else:
+            # Inside the frozen bundle sys.executable is the app binary.
+            # system python3 is 3.9 on macOS and does not support X|Y union syntax.
+            # Prefer python3.14 (Homebrew), fall back to python3 only if needed.
+            import shutil as _shutil_py
+            python = (
+                _shutil_py.which("python3.14") or
+                _shutil_py.which("python3.13") or
+                _shutil_py.which("python3.12") or
+                _shutil_py.which("python3.11") or
+                "python3"
+            )
         # When running inside the frozen app bundle, the script lives inside
         # backend/ which also contains collections.py (a Quarterdeck module).
         # System python adds the script's directory to sys.path, causing
         # collections.py to shadow stdlib and crash with a circular import.
-        # Copy the script to /tmp so it runs outside that directory.
-        if getattr(sys, "frozen", False):
-            import shutil as _shutil, os as _os
-            tmp_script = Path("/tmp/qd_acp_query.py")
-            _shutil.copy2(script, tmp_script)
-            run_script = tmp_script
-        else:
-            import os as _os
-            run_script = script
+        # Copy both acp_query.py and acp_session.py to /tmp so they run
+        # outside that directory with no bundle path contamination.
+        import shutil as _shutil, os as _os
+        tmp_script = Path("/tmp/qd_acp_query.py")
+        _shutil.copy2(script, tmp_script)
+        _shutil.copy2(script.parent / "acp_session.py", Path("/tmp/acp_session.py"))
+        run_script = tmp_script
         env = _os.environ.copy()
         env.pop("PYTHONPATH", None)  # strip any bundle-injected paths
         r = subprocess.run(
@@ -2797,6 +2861,37 @@ def get_corrections(session_id: str):
 def corrections_summary():
     """Per-session confirmed correction counts."""
     return corrections.get_correction_summary()
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Duration endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/stats/duration")
+def get_duration_stats(type_tag: str = "", project: str = ""):
+    """Calibrated p50/p90 duration estimate for a type+project combination."""
+    return duration.estimate(project, type_tag)
+
+
+@app.get("/api/sessions/{session_id}/duration")
+def get_session_duration(session_id: str):
+    """Return the task record for a session, or null if not yet recorded."""
+    rec = duration.get_record(session_id)
+    if rec is None:
+        return {"ok": True, "record": None}
+    return {"ok": True, "record": rec}
+
+
+@app.post("/api/sessions/{session_id}/duration/type-tag")
+def set_session_type_tag(session_id: str, payload: dict):
+    """Let the user correct the auto-classified type tag."""
+    tag = (payload.get("tag") or "").strip()
+    if tag not in duration.VALID_TAGS:
+        return {"error": f"invalid tag; must be one of {sorted(duration.VALID_TAGS)}"}
+    ok = duration.update_type_tag(session_id, tag)
+    if not ok:
+        return {"error": "no duration record for this session yet"}
+    return {"ok": True, "tag": tag}
 
 
 def _can_read_files(session_id: str) -> bool:
@@ -3971,13 +4066,51 @@ def delete_slash_queue_item(session_id: str, item_id: str):
 
 
 @app.get("/api/options")
-def get_options(cwd: str = ""):
-    """Model, effort, agent, engine, and quick-command choices the UI offers."""
-    return {"models": list(available_models()), "efforts": list(EFFORTS),
+def get_options(cwd: str = "", session_id: str = ""):
+    """Model, effort, agent, engine, and quick-command choices the UI offers.
+
+    When session_id is given, resolve the session's recorded profile and return
+    its memoised model list (written at save/switch time). Falls back to the
+    global live list when no cached list exists. Returns a 'source' field so the
+    UI knows where the list came from:
+      'profile-cache' — session's profile's cached entitlements (most accurate)
+      'live'          — currently active profile's live entitlements
+      'fallback'      — kiro-cli unreachable; hardcoded fallback list
+    """
+    models_source = "live"
+    models_list = list(available_models())
+
+    if session_id:
+        # Try to serve the session-scoped list.
+        try:
+            o = ownership.get_ownership(session_id) or {}
+            session_profile = o.get("kiro_profile", "")
+            if session_profile:
+                meta_path = _profile_meta_path(session_profile)
+                if meta_path.exists():
+                    meta_data = json.loads(meta_path.read_text())
+                    cached = meta_data.get("models")
+                    if cached and isinstance(cached, list) and len(cached) > 0:
+                        models_list = cached
+                        models_source = "profile-cache"
+        except Exception:
+            pass  # fall back to live list
+
+    # Detect fallback (config.MODELS is the hardcoded list; if live == MODELS,
+    # we cannot tell if it's a real match or a --list-models failure, but we
+    # can at least label it so the UI can show provenance).
+    from .config import MODELS as _MODELS
+    if tuple(models_list) == _MODELS:
+        models_source = "fallback"
+    elif models_source == "live":
+        models_source = "live"
+
+    return {"models": models_list, "efforts": list(EFFORTS),
             "engines": ["v1", "v2", "v3"],
             "commands": [dict(c) for c in QUICK_COMMANDS],
             "terminals": [{"id": k, **v} for k, v in TERMINALS.items()],
-            "agents": list_agents(cwd), "default_agent": default_agent_name(cwd)}
+            "agents": list_agents(cwd), "default_agent": default_agent_name(cwd),
+            "models_source": models_source}
 
 
 @app.post("/api/open-folder")
@@ -4087,6 +4220,8 @@ def dismiss_session(session_id: str):
         src.rename(dst)
     except OSError as e:
         return {"error": str(e)}
+    # Record duration data for dismissed crew sessions — additive, never raises.
+    threading.Thread(target=duration.write_record, args=(session_id,), daemon=True).start()
     return {"ok": True}
 
 
@@ -4159,12 +4294,18 @@ def _invalidate_projects_cache() -> None:
 
 
 @app.post("/api/sessions/{session_id}/delete")
-def delete_session(session_id: str):
-    """Delete an archived session's files.
+def delete_session(session_id: str, payload: dict = None):
+    """Delete a session's files, killing it first if it is still running.
 
-    Deleting a live session's lock and metadata would leave its process running
-    but unreachable, so callers must end it first.
+    Previously callers had to end the session manually before deleting. That
+    made the delete button silently fail for idle managed sessions: the process
+    is alive (waiting at the prompt), _session_is_active() returns True, and
+    the backend refused with 'session_active'. Now the endpoint kills the
+    session synchronously before deleting when it is still active.
     """
+    if payload is None:
+        payload = {}
+
     # V3 session: delete the directory
     if v3mod.is_v3_session(session_id):
         d = v3mod.session_dir(session_id)
@@ -4177,10 +4318,25 @@ def delete_session(session_id: str):
         return {"ok": True, "deleted": [str(d)]}
 
     if _session_is_active(session_id):
-        return {
-            "error": "Session is active; end it before deleting",
-            "code": "session_active",
-        }
+        # Kill the session so its files become deletable.
+        acp_observer.detach(session_id)
+        if tmux.is_managed(session_id):
+            tmux.kill(session_id, graceful=False)
+        else:
+            lock_data = read_lock(session_id)
+            pid = (lock_data or {}).get("pid")
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        # Give the process a moment to release its lock file.
+        import time as _time
+        for _ in range(10):
+            if not _session_is_active(session_id):
+                break
+            _time.sleep(0.3)
+
     deleted = _delete_session_files(session_id)
     _remove_favourites({session_id})
     tmux.clear_gate(session_id)
@@ -4360,8 +4516,17 @@ def dispatch_task(payload: dict):
         # Snapshot existing managed keys before this spawn completes correlation,
         # so the thread can identify the new session_id by set difference.
         managed_before = set(tmux.load_state()["managed"])
+        # Capture the ARN at dispatch time so we have something more stable than
+        # the profile name (names are user-editable; ARNs are not).
+        active_profile_arn = ""
+        try:
+            meta_path = _profile_meta_path(active_profile)
+            if meta_path.exists():
+                active_profile_arn = json.loads(meta_path.read_text()).get("profile_arn", "")
+        except Exception:
+            pass
 
-        def _tag_profile(sid: str, nonce_: str, profile: str, before: set) -> None:
+        def _tag_profile(sid: str, nonce_: str, profile: str, profile_arn: str, before: set) -> None:
             if not sid:
                 # Wait for nonce→session correlation. The resolver moves the
                 # pending entry to managed once it finds the session_id.
@@ -4379,10 +4544,11 @@ def dispatch_task(payload: dict):
             if sid:
                 o = ownership.get_ownership(sid) or {}
                 o["kiro_profile"] = profile
+                o["kiro_profile_arn"] = profile_arn  # stable identifier; name may change
                 o["spawned_at"] = time.time()  # used to mark badge unverified after a switch
                 ownership.write_sidecar(sid, o)
         threading.Thread(
-            target=_tag_profile, args=(session_id, nonce, active_profile, managed_before),
+            target=_tag_profile, args=(session_id, nonce, active_profile, active_profile_arn, managed_before),
             daemon=True,
         ).start()
 
@@ -5198,6 +5364,7 @@ def save_profile(payload: dict):
     # Write data
     data_path = _profile_data_path(name)
     data_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    data_path.chmod(0o600)  # contains live OAuth tokens — owner-only
     # Write metadata — include fingerprint, profile_arn, and the full state
     # profile entry so switch_profile can restore the exact ARN kiro-cli needs.
     info = _current_profile_identity()
@@ -5212,6 +5379,12 @@ def save_profile(payload: dict):
             con.close()
         except Exception:
             pass
+    # Capture the model entitlement list at save time — the only moment when
+    # this profile is definitely active and its entitlements are available.
+    try:
+        current_models = list(available_models(force=True))
+    except Exception:
+        current_models = []
     meta = {
         "email": info["email"],
         "provider": info["provider"],
@@ -5219,6 +5392,8 @@ def save_profile(payload: dict):
         "state_profile": state_profile,
         "token_fingerprint": _token_fingerprint(rows),
         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "models": current_models,
+        "models_refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     _profile_meta_path(name).write_text(json.dumps(meta))
     return {"ok": True, "email": info["email"]}
@@ -5238,6 +5413,7 @@ def switch_profile(payload: dict):
     if current_rows:
         prev_path = _profile_data_path("_previous")
         prev_path.write_text("\n".join(json.dumps(r) for r in current_rows) + "\n")
+        prev_path.chmod(0o600)  # contains live OAuth tokens — owner-only
     # Restore target auth tokens
     try:
         rows = [json.loads(line) for line in data_path.read_text().splitlines() if line.strip()]
@@ -5284,11 +5460,27 @@ def switch_profile(payload: dict):
     # Refresh model list synchronously — different profiles have different
     # entitlements and the frontend fetches /api/options immediately after switch.
     # Takes ~1-2s but avoids the race where the old list is returned.
+    # Also persist the list in meta.json so /api/options?session_id=... can serve
+    # the session-scoped list even after a subsequent switch (Tier 2 memoisation).
     try:
         from .config import available_models as _am
-        _am(force=True)
+        refreshed_models = list(_am(force=True))
     except Exception:
-        pass
+        refreshed_models = []
+    if refreshed_models:
+        try:
+            meta_path = _profile_meta_path(name)
+            existing_meta: dict = {}
+            if meta_path.exists():
+                try:
+                    existing_meta = json.loads(meta_path.read_text())
+                except Exception:
+                    pass
+            existing_meta["models"] = refreshed_models
+            existing_meta["models_refreshed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            meta_path.write_text(json.dumps(existing_meta))
+        except Exception:
+            pass
     return {"ok": True, "name": name, "email": email, "profile_arn": profile_arn}
 
 

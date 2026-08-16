@@ -1823,20 +1823,6 @@ export default function App() {
                   <ProfilePill visibleSessionIds={shownActive.map(s => s.id)}
                           onProfileSwitch={() => settingsApi.getOptions().then(setOptions).catch(() => {})}
                           onCurrentProfile={setActiveProfileName} />
-                  <button className={`wall-group-toggle${wallGrouped ? ' active' : ''}`}
-                          title={wallGrouped ? 'Flat grid' : 'Group by collection'}
-                          onClick={() => {
-                            const v = !wallGrouped
-                            setWallGrouped(v)
-                            localStorage.setItem('wall-grouped', v ? '1' : '0')
-                            if (v) {
-                              fetch('/api/collections').then(r => r.json())
-                                .then(d => setWallCollections((d.collections || []).filter(c => c.source !== 'snapshot')))
-                                .catch(() => {})
-                            }
-                          }}>
-                    {wallGrouped ? '⊟' : '⊞'} {wallGrouped ? 'Flat' : 'Board'}
-                  </button>
                   <button className="wall-new" title="New session (⌘↩)"
                           onClick={() => setLauncherOpen(true)}>+ <span className="wall-new-label">New session</span></button>
                   <button className="wall-settings" title="Settings"
