@@ -308,7 +308,7 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
           <span
             className={`card-profile ${session.profile_verified === false ? 'card-profile-unverified' : ''}`}
             title={session.profile_verified === false
-              ? `Switched to "${session.kiro_profile}"${session.kiro_profile_recorded ? ` (was "${session.kiro_profile_recorded}" at launch)` : ''}`
+              ? `Profile recorded at launch: "${session.kiro_profile}". A switch happened since — the running agent may be on a different profile.`
               : `Dispatched under profile "${session.kiro_profile}"`}
           >
             {session.profile_verified === false ? '○' : '◉'} {session.kiro_profile}
@@ -319,13 +319,13 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
         )}
       </div>
       <div className="card-title" title={session.cwd}>📁 {session.folder || showPath(session)}</div>
-      {/* Duration: type tag chip (only when classified) + estimate string (when n>=6) */}
-      {durationRecord && durationRecord.features?.type_tag && durationRecord.features.type_tag !== 'unknown' && (
+      {/* Duration: type tag chip (always when record exists) + estimate string (when n>=6) */}
+      {durationRecord && (
         <div className="card-duration-row">
           <span className="card-type-tag"
                 title="Task type — click to correct"
                 onClick={e => { e.stopPropagation(); setTagDropdownOpen(o => !o) }}>
-            {durationRecord.features.type_tag}
+            {durationRecord.features?.type_tag || 'unknown'}
           </span>
           {tagDropdownOpen && (
             <div className="card-tag-dropdown" onClick={e => e.stopPropagation()}>

@@ -1934,11 +1934,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       {/* Profile · duration · delete — one compact line on both desktop and mobile */}
       <div className="detail-meta-strip">
         {(detail?.kiro_profile || session.kiro_profile) && (
-          <span className="detail-meta-strip-profile"
-                title={detail?.profile_verified === false
-                  ? `Switched to "${detail?.kiro_profile || session.kiro_profile}"${(detail?.kiro_profile_recorded || session.kiro_profile_recorded) ? ` (was "${detail?.kiro_profile_recorded || session.kiro_profile_recorded}" at launch)` : ''}`
-                  : `Profile: ${detail?.kiro_profile || session.kiro_profile}`}>
-            {detail?.profile_verified === false ? '○' : '◉'} {detail?.kiro_profile || session.kiro_profile}
+          <span className="detail-meta-strip-profile" title="Kiro profile used for this session">
+            ◉ {detail?.kiro_profile || session.kiro_profile}
           </span>
         )}
         {durationRecord?.outcome?.wall_clock_min != null && (

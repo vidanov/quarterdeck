@@ -16,16 +16,17 @@ export function attentionOf(session, held = false) {
   }
   if (status === 'awaiting-approval') {
     return held
-      ? { needs: true, rank: 0, action: 'Tool call held' }
-      : { needs: true, rank: 1, action: 'Needs permission' }
+      ? { needs: true, rank: 0, action: 'Tool call held', why: 'allow or deny it' }
+      : { needs: true, rank: 1, action: 'Needs permission', why: 'answer the prompt' }
   }
   if (status === 'error') {
-    return { needs: true, rank: 2, action: 'Error' }
+    return { needs: true, rank: 2, action: 'Stopped with an error', why: 'check the output' }
   }
   if (status === 'idle') {
     return control === 'managed'
-      ? { needs: true, rank: 3, action: 'Your turn' }
-      : { needs: true, rank: 4, action: 'Finished elsewhere' }
+      ? { needs: true, rank: 3, action: 'Finished — your turn', why: 'reply or close it' }
+      // Read-only until taken over, so it is your turn in a weaker sense.
+      : { needs: true, rank: 4, action: 'Finished elsewhere', why: 'take it over to reply' }
   }
   return { needs: false, action: 'Working', rank: 91 }
 }
