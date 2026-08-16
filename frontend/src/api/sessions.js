@@ -83,3 +83,9 @@ export const getPasteText = (sessionId, name) =>
 export const deletePaste = (sessionId, name) =>
   fetch(`/api/pastes/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`,
     { method: 'DELETE' }).then(r => r.json())
+
+export const getSessionDuration = (id) => getJSON(`/api/sessions/${id}/duration`)
+export const getDurationStats = (project, typeTag) =>
+  getJSON(`/api/stats/duration?project=${encodeURIComponent(project)}&type_tag=${encodeURIComponent(typeTag)}`)
+export const setSessionTypeTag = (id, tag) =>
+  postJSON(`/api/sessions/${id}/duration/type-tag`, { tag })
