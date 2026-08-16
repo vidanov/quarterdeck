@@ -1544,37 +1544,38 @@ def _ownership_fields(session_id: str) -> dict:
     Defaults are always safe: human-owned, handoverable, visible.
     """
     o = ownership.get_ownership(session_id)
+    recorded_profile = o.get("kiro_profile") or ""
+    active_profile = _cached_active_profile()
     # kiro_profile is recorded at dispatch time; fall back to the currently
     # active profile so older sessions that pre-date profile tracking still
     # show a value. Cached to avoid a SQLite read per session per poll.
-    profile = o.get("kiro_profile") or _cached_active_profile()
+    profile = recorded_profile or active_profile
     # profile_verified: true when the profile was recorded at dispatch AND no
     # global switch has happened since that session spawned.
     # A kiro-cli process holds the credentials it loaded at launch; a global
     # switch cannot reach into it. After a switch the badge is unverified.
-    recorded_at_dispatch = bool(o.get("kiro_profile"))
+    recorded_at_dispatch = bool(recorded_profile)
     if recorded_at_dispatch:
         spawn_ts = o.get("spawned_at", 0.0)
         switch_ts = _last_switch_ts()
-        # Two conditions must both hold:
-        # 1. The recorded name still matches the live active profile (cheap, catches
-        #    the case where mtime is unavailable).
-        # 2. No switch happened after this session spawned (survives restarts via
-        #    _last_switch_ts() which reads _previous.jsonl mtime).
         profile_verified = (
-            profile == _cached_active_profile()
+            recorded_profile == active_profile
             and (switch_ts == 0.0 or spawn_ts >= switch_ts)
         )
     else:
-        # Fallback value — we don't know when it spawned relative to any switch
         profile_verified = False
+    # When profile is unverified, show the current active profile instead of
+    # the stale dispatch-time one. The tooltip carries the recorded name so the
+    # user can see what changed.
+    display_profile = active_profile if (not profile_verified and active_profile) else profile
     return {
         "owner": o.get("owner", "human"),
         "role": o.get("role", "primary"),
         "group_id": o.get("group_id"),
         "handoverable": o.get("handoverable", True),
         "visible": o.get("visible", True),
-        "kiro_profile": profile,
+        "kiro_profile": display_profile,
+        "kiro_profile_recorded": recorded_profile if not profile_verified else "",
         "kiro_profile_arn": o.get("kiro_profile_arn", ""),
         "profile_verified": profile_verified,
     }
