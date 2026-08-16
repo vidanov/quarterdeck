@@ -144,7 +144,53 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const renameInputRef = useRef(null)
+  // Duration: task record (type_tag) and estimate
+  const [durationRecord, setDurationRecord] = useState(null)
+  const [durationEstimate, setDurationEstimate] = useState(null)
+  const [tagDropdownOpen, setTagDropdownOpen] = useState(false)
   useEffect(() => () => clearTimeout(openTimer.current), [])
+
+  // Fetch the duration record for this session on mount.
+  // Also fetch the estimate for this session's project+type_tag.
+  useEffect(() => {
+    api.getSessionDuration(session.id)
+      .then(d => {
+        if (d?.record) {
+          setDurationRecord(d.record)
+          // Now fetch the estimate for this project+type_tag combination
+          const project = d.record.features?.project || ''
+          const typeTag = d.record.features?.type_tag || ''
+          if (project && typeTag) {
+            api.getDurationStats(project, typeTag)
+              .then(est => { if (est && est.display !== undefined) setDurationEstimate(est) })
+              .catch(() => {})
+          }
+        }
+      })
+      .catch(() => {})
+  }, [session.id])
+
+  const handleTagChange = (e, newTag) => {
+    e.stopPropagation()
+    setTagDropdownOpen(false)
+    api.setSessionTypeTag(session.id, newTag)
+      .then(d => {
+        if (d?.ok) {
+          setDurationRecord(prev => prev ? {
+            ...prev,
+            features: { ...prev.features, type_tag: newTag }
+          } : prev)
+          // Re-fetch estimate with new tag
+          const project = durationRecord?.features?.project || ''
+          if (project) {
+            api.getDurationStats(project, newTag)
+              .then(est => { if (est && est.display !== undefined) setDurationEstimate(est) })
+              .catch(() => {})
+          }
+        }
+      })
+      .catch(() => {})
+  }
 
   const startRename = (e) => {
     e.stopPropagation()
@@ -273,6 +319,32 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
         )}
       </div>
       <div className="card-title" title={session.cwd}>📁 {session.folder || showPath(session)}</div>
+      {/* Duration: type tag chip (always when record exists) + estimate string (when n>=6) */}
+      {durationRecord && (
+        <div className="card-duration-row">
+          <span className="card-type-tag"
+                title="Task type — click to correct"
+                onClick={e => { e.stopPropagation(); setTagDropdownOpen(o => !o) }}>
+            {durationRecord.features?.type_tag || 'unknown'}
+          </span>
+          {tagDropdownOpen && (
+            <div className="card-tag-dropdown" onClick={e => e.stopPropagation()}>
+              {['coding', 'research', 'writing', 'infra', 'review', 'unknown'].map(t => (
+                <span key={t}
+                      className={`card-tag-option${t === durationRecord.features?.type_tag ? ' card-tag-option-selected' : ''}`}
+                      onClick={e => handleTagChange(e, t)}>
+                  {t}
+                </span>
+              ))}
+            </div>
+          )}
+          {durationEstimate?.display && (
+            <span className="card-duration-est" title={`p50–p90 from ${durationEstimate.n} sessions`}>
+              est {durationEstimate.display}
+            </span>
+          )}
+        </div>
+      )}
       {attention?.why && <div className="card-why">{attention.why}</div>}
       {/* Stall warning — session is thinking/running but JSONL hasn't grown */}
       {session.stalled && (
@@ -296,14 +368,12 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
           ⏎ {session.sq_depth} queued
         </div>
       )}
-      {/* What it last said. The action line says what the session wants; this
-          says what about — which is the difference between "three sessions are
-          finished" and knowing which to deal with first. Quoted, not
-          summarised: it costs no tokens and cannot be wrong.
-          Backend suppresses last_message when the preceding user turn was
-          paste-only. Frontend also skips bare paste reference lines. */}
+      {/* What it last said. Skip when a concierge summary is already shown — 
+          the summary is more useful and showing both is redundant. */}
       {session.last_message &&
-        !/^\[pasted document:/i.test(session.last_message.trim()) && (
+        !/^\[pasted document:/i.test(session.last_message.trim()) &&
+        !(session.summary && session.control === 'managed' &&
+          (attention?.needs || session.status === 'idle' || session.status === 'done')) && (
         <div className={`card-last${session.control === 'managed' && (session.status === 'idle' || session.status === 'done') ? ' card-last-summary' : ''}`}
              title={session.last_message}>{session.last_message}</div>
       )}

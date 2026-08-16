@@ -358,6 +358,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [messagesError, setMessagesError] = useState(null)
   const transcriptMaxSeq = useRef(-1)
+  // In-memory transcript cache — keyed by session id, capped at 20 sessions.
+  // Allows instant display when switching back to a previously-viewed session.
+  const transcriptCache = useRef({})
   // Guard ref: tracks which session id we've already triggered a load for,
   // so the effect fires exactly once per session rather than on every render
   // that finds messages===null (which caused an infinite retry storm on error).
@@ -410,8 +413,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     : (canLive && isWorking ? 'live' : 'transcript')
   // Reset transcript when the session changes so stale messages never bleed across
   useEffect(() => {
-    setMessages(null)
-    setLoadingMessages(false)
+    // Seed from cache for instant display; fall back to null (loading state)
+    const cached = session?.id ? (transcriptCache.current[session.id] || null) : null
+    setMessages(cached)
+    setLoadingMessages(!cached)
     setMessagesError(null)
     transcriptMaxSeq.current = -1
     transcriptLoadedFor.current = null
@@ -482,7 +487,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           const fresh = newMsgs.filter(m => m.seq > maxSeen)
           if (!fresh.length) return prev
           transcriptMaxSeq.current = fresh[fresh.length - 1].seq
-          return [...prev, ...fresh]
+          const updated = [...prev, ...fresh]
+          transcriptCache.current[session.id] = updated
+          return updated
         })
       }).catch(() => {})
     }, 2000)
@@ -508,7 +515,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           const fresh = newMsgs.filter(m => m.seq > maxSeen)
           if (!fresh.length) return prev
           transcriptMaxSeq.current = fresh[fresh.length - 1].seq
-          return [...prev, ...fresh]
+          const updated = [...prev, ...fresh]
+          transcriptCache.current[session.id] = updated
+          return updated
         })
       }).catch(() => {})
     }
@@ -624,6 +633,29 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   useEffect(() => {
     if (!session) return
+    // Seed detail immediately from the card-level data we already have.
+    // This gives the panel something to render (title, status, path, summary)
+    // while the real fetch — which includes the full transcript — completes.
+    // The real fetch overwrites this within ~200ms on a local connection.
+    setDetail(prev => {
+      if (prev?.id === session.id) return prev   // already have real data, keep it
+      return {
+        id: session.id,
+        title: session.title,
+        cwd: session.cwd,
+        status: session.status,
+        control: session.control,
+        summary: session.summary,
+        last_message: session.last_message,
+        last_output: session.last_output,
+        model: session.model,
+        effort: session.effort,
+        kiro_profile: session.kiro_profile,
+        agent: session.agent,
+        output: null,   // not yet loaded — transcript shows loading state
+        _seeded: true,
+      }
+    })
     const prevOutputLen = { current: 0 }
     const fetchDetail = () => {
       api.getSession(session.id)
@@ -696,8 +728,11 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         const msgs = d.messages || []
         setMessages(msgs)
         if (msgs.length) transcriptMaxSeq.current = msgs[msgs.length - 1].seq
+        // Update cache — evict oldest entry if over 20 sessions
+        transcriptCache.current[session.id] = msgs
+        const keys = Object.keys(transcriptCache.current)
+        if (keys.length > 20) delete transcriptCache.current[keys[0]]
         // Scroll to end after load — regardless of whether the session is active.
-        // Use setTimeout so the DOM has rendered the new messages first.
         setTimeout(() => {
           if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight
         }, 50)

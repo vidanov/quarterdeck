@@ -15,11 +15,24 @@ thread pool.
 import sys
 from pathlib import Path
 
-# When run directly (subprocess from api.py), add parent dir to path so that
-# backend.acp_session is importable regardless of working directory.
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Support two execution contexts:
+# 1. In-project dev: __file__ is backend/acp_query.py → parent.parent is repo root
+#    → "from backend.acp_session import ACPSession" works.
+# 2. Frozen app copy to /tmp: __file__ is /tmp/qd_acp_query.py → parent.parent is /
+#    The backend package isn't there, so we also copy acp_session.py alongside
+#    and try a direct import as fallback.
+_here = Path(__file__).parent
+_repo_root = _here.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
-from backend.acp_session import ACPSession  # noqa: E402
+try:
+    from backend.acp_session import ACPSession  # in-project / bundle  # noqa: E402
+except ModuleNotFoundError:
+    # Running from /tmp after copy — acp_session.py was copied alongside us
+    if str(_here) not in sys.path:
+        sys.path.insert(0, str(_here))
+    from acp_session import ACPSession  # type: ignore  # noqa: E402
 
 TIMEOUT = 40.0
 

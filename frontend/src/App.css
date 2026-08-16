@@ -3286,27 +3286,18 @@ body.resizing .detail-resize::after { background: var(--accent); }
   .header {
     gap: 8px;
     margin-bottom: 10px;
+    flex-wrap: nowrap;
   }
   .header h1 { font-size: 15px; white-space: nowrap; }
   .header-wordmark { display: none; }       /* logo only on mobile */
-  /* Badges scroll sideways rather than wrapping — wrapping cost a full row on
-     a screen where rows are the scarce thing. */
-  /* flex-basis 0 with min-width 0 is what actually lets this shrink: the
-     default basis is the badges' own min-content width, and they are nowrap, so
-     the header pushed the Snapshot button off the screen instead. */
-  .header-stats {
-    gap: 6px;
-    flex: 1 1 0;
-    min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .header-stats::-webkit-scrollbar { display: none; }
-  .stat { font-size: 11px; padding: 3px 7px; white-space: nowrap; }
+  /* Hide the stat badges entirely on mobile — they cause the two-row wrap.
+     Status is visible on the cards themselves. */
+  .header-stats { display: none; }
   /* The buttons live outside the scroll strip now (see .header-actions), so
      they cannot be scrolled away and need no sticky offset to avoid the badges. */
   .header-actions { gap: 6px; margin-left: 6px; }
   .header-actions .scan-btn { display: none; }   /* Snapshot hidden on mobile */
+  .header-actions .wall-toggle-btn { display: none; } /* Wall toggle hidden on mobile — board view only */
   .gear-btn { display: flex; }                   /* Settings always visible */
 
   /* View tabs: a scroll strip, so "Stats" is reachable instead of clipped. */
