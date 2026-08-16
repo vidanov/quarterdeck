@@ -919,6 +919,7 @@ Internal identifiers stay unchanged (`~/.osa-kiro/`, `DECK_NONCE`, `DECK_PORT`,
 - ~~**Ctrl+X shortcut**~~ — done: chip in composer bar + `Ctrl+X` key in textarea
 - ~~**Quick new session from focused/fullscreen mode**~~ — done: ＋ button in detail header, opens launcher without collapsing panel
 - ~~**Persist helpers menu (chips strip) state across restarts**~~ — done 2026-08-13: `chipsOpen` saved to backend settings (`dispatch-cwd-mode`), survives WKWebView localStorage clear
+- ~~**Copy button on transcript messages**~~ — done 2026-08-15: `⎘` button on every assistant block and user bubble, hidden until row hover, copied state shows green `✓` for 1.5 s.
 
 ## Pending UX requests (2026-08-15)
 
