@@ -422,6 +422,13 @@ function CommandBar({ open, onClose, onAction, onOpenSession }) {
                           {item.last_activity && ` · ${item.last_activity}`}
                         </span>
                       )}
+                      {item.id && (
+                        <button className="cmdbar-item-open-btn"
+                                onClick={e => { e.stopPropagation(); handleItemClick(item) }}
+                                title="Open in detail panel">
+                          Open
+                        </button>
+                      )}
                     </div>
                   )
                 })}
