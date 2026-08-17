@@ -1143,6 +1143,17 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     setDraft(next === -1 ? preDraftRef.current : history[next])
   }
 
+  // Button-triggered history recall (no keyboard event available)
+  const recallByButton = (direction) => {
+    if (!history.length) return
+    const next = historyIndex + direction
+    if (next < -1 || next >= history.length) return
+    if (historyIndex === -1 && direction > 0) preDraftRef.current = draft
+    setHistoryIndex(next)
+    setDraft(next === -1 ? preDraftRef.current : history[next])
+    draftRef.current?.focus()
+  }
+
   // Commands needing an argument are staged in the composer so the user can
   // finish the sentence; the rest are sent straight through.
   const runCommand = (cmd) => {
@@ -1729,6 +1740,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         onClick={() => respond('C-x')}>ctrl-x</button>
                 <button className="composer-chip composer-key" title="Send Delete key"
                         onClick={() => respond('DC')}>del</button>
+                <button className="composer-chip composer-key" title="Previous message (history ↑)"
+                        onClick={() => recallByButton(1)}>↑</button>
+                <button className="composer-chip composer-key" title="Next message (history ↓)"
+                        onClick={() => recallByButton(-1)}>↓</button>
                 <button className="composer-chip composer-key" title="Send Enter on its own"
                         onClick={() => respond('Enter')}>↵</button>
                 {(options.commands || []).map(c => (
