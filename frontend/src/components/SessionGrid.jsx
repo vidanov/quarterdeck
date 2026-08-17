@@ -319,13 +319,13 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
         )}
       </div>
       <div className="card-title" title={session.cwd}>📁 {session.folder || showPath(session)}</div>
-      {/* Duration: type tag chip (always when record exists) + estimate string (when n>=6) */}
-      {durationRecord && (
+      {/* Duration: type tag chip (only when classified) + estimate (when n>=6) */}
+      {durationRecord && durationRecord.features?.type_tag && durationRecord.features.type_tag !== 'unknown' && (
         <div className="card-duration-row">
           <span className="card-type-tag"
                 title="Task type — click to correct"
                 onClick={e => { e.stopPropagation(); setTagDropdownOpen(o => !o) }}>
-            {durationRecord.features?.type_tag || 'unknown'}
+            {durationRecord.features.type_tag}
           </span>
           {tagDropdownOpen && (
             <div className="card-tag-dropdown" onClick={e => e.stopPropagation()}>
@@ -340,12 +340,11 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
           )}
           {durationEstimate?.display && (
             <span className="card-duration-est" title={`p50–p90 from ${durationEstimate.n} sessions`}>
-              est {durationEstimate.display}
+              {durationEstimate.display}
             </span>
           )}
         </div>
       )}
-      {attention?.why && <div className="card-why">{attention.why}</div>}
       {/* Stall warning — session is thinking/running but JSONL hasn't grown */}
       {session.stalled && (
         <div className="card-stalled" title="No output for an extended period">⚠ stalled</div>

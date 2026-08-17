@@ -1343,12 +1343,41 @@ body {
   padding-top: 8px;
   margin-top: 8px;
 }
+.composer-commands-wrap {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 7px;
+  min-width: 0;
+}
+.composer-commands-arrow {
+  flex-shrink: 0;
+  width: 22px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface, #fff);
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: color 0.12s, background 0.12s;
+}
+.composer-commands-arrow:hover { color: var(--text); background: var(--gray-bg, #f1f5f9); }
 .composer-commands {
   display: flex;
   gap: 5px;
-  flex-wrap: wrap;
-  margin-bottom: 7px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 1;
+  min-width: 0;
 }
+.composer-commands::-webkit-scrollbar { display: none; }
 .composer-chip {
   font-size: 11px;
   font-family: 'SF Mono', 'Menlo', monospace;

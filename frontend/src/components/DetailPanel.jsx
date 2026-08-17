@@ -337,6 +337,24 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [durationRecord, setDurationRecord] = useState(null)  // task 7: duration data
   const [pendingScreenshots, setPendingScreenshots] = useState([])
   const [chipPreview, setChipPreview] = useState(null) // {url, x, y}
+  const [chipPreviewBlob, setChipPreviewBlob] = useState(null) // blob URL for the preview img
+  // Fetch screenshot via JS (carries X-Local-Token injected by app.py) and
+  // create a blob URL — <img src> bypasses fetch/XHR and cannot carry auth headers.
+  useEffect(() => {
+    if (!chipPreview?.url) { setChipPreviewBlob(null); return }
+    let revoked = false
+    fetch(chipPreview.url)
+      .then(r => r.ok ? r.blob() : null)
+      .then(blob => {
+        if (!blob || revoked) return
+        setChipPreviewBlob(URL.createObjectURL(blob))
+      })
+      .catch(() => {})
+    return () => {
+      revoked = true
+      setChipPreviewBlob(prev => { if (prev) URL.revokeObjectURL(prev); return null })
+    }
+  }, [chipPreview?.url])
   const dismissedScreenshots = useRef(new Set()) // names dismissed this session
   const [autoAdvance, setAutoAdvance] = useState(false)
   // Chips bar: auto-open when session is active, collapsible when idle
@@ -1698,7 +1716,11 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         {canSend ? (
           <>
             {chipsOpen && (
-              <div className="composer-commands">
+              <div className="composer-commands-wrap">
+                <button className="composer-commands-arrow composer-commands-arrow-left"
+                        onClick={() => { const el = document.querySelector('.composer-commands'); if (el) el.scrollBy({ left: -120, behavior: 'smooth' }) }}
+                        tabIndex={-1} aria-hidden="true">‹</button>
+                <div className="composer-commands">
                 <button className="composer-chip composer-key" title="Send Escape — cancels the current turn or closes a menu"
                         onClick={() => respond('Escape')}>esc</button>
                 <button className="composer-chip composer-key" title="Send Ctrl+C — interrupt"
@@ -1733,6 +1755,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   {(options.efforts || []).map(x => <option key={x} value={x}>{x}</option>)}
                 </select>
               </div>
+                <button className="composer-commands-arrow composer-commands-arrow-right"
+                        onClick={() => { const el = document.querySelector('.composer-commands'); if (el) el.scrollBy({ left: 120, behavior: 'smooth' }) }}
+                        tabIndex={-1} aria-hidden="true">›</button>
+              </div>
             )}
             {pendingScreenshots.length > 0 && (
               <div className="screenshot-pending-bar">
@@ -1761,7 +1787,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         }}>✕</button>
               </div>
             )}
-            {chipPreview && createPortal(
+            {chipPreview && chipPreviewBlob && createPortal(
               <div className="wall-tile-preview" style={{
                 position: 'fixed',
                 left: Math.min(chipPreview.x + 12, window.innerWidth - 280),
@@ -1769,7 +1795,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 pointerEvents: 'none',
                 zIndex: 9999,
               }}>
-                <img src={chipPreview.url} alt="screenshot preview" />
+                <img src={chipPreviewBlob} alt="screenshot preview" />
               </div>,
               document.body
             )}
