@@ -342,7 +342,213 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
-def ensure_alive() -> bool:
+# ---------------------------------------------------------------------------
+# Fast-path resolver — no AI round-trip needed for common intents
+# ---------------------------------------------------------------------------
+
+def _search_sessions_fast(q: str) -> list[dict]:
+    """Search active + archived sessions by title/cwd keywords. Returns up to 12 matches.
+
+    Uses OR matching ranked by token hit count — a session matching 3 of 4 tokens
+    ranks above one matching 1. This handles queries like "Porsche S3 Gateway"
+    where no single session title contains all words.
+    """
+    import json as _json
+    import re as _re
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    if not SESSIONS_DIR.exists():
+        return results
+
+    active_ids: set[str] = set()
+    for lock_file in SESSIONS_DIR.glob("*.lock"):
+        active_ids.add(lock_file.stem)
+
+    tokens = [t for t in q.lower().split() if len(t) >= 2]
+    if not tokens:
+        return results
+
+    candidates: list[tuple[int, float, dict]] = []
+
+    for json_file in sorted(SESSIONS_DIR.glob("*.json"),
+                            key=lambda f: f.stat().st_mtime, reverse=True):
+        sid = json_file.stem
+        if sid in seen:
+            continue
+        try:
+            meta = _json.loads(json_file.read_text())
+        except Exception:
+            continue
+        title = meta.get("title") or meta.get("name") or ""
+        title = _re.sub(r"\s+[0-9a-f]{8}$", "", title, flags=_re.I).strip() or "Untitled"
+        cwd = meta.get("cwd") or ""
+        haystack = f"{title.lower()} {cwd.lower()}"
+        hits = sum(1 for t in tokens if t in haystack)
+        if hits == 0:
+            continue
+        seen.add(sid)
+        cwd_short = cwd.replace(str(Path.home()), "~") if cwd else ""
+        mtime = json_file.stat().st_mtime
+        candidates.append((hits, mtime, {
+            "id": sid,
+            "title": title[:80],
+            "cwd": cwd,
+            "cwd_short": cwd_short,
+            "status": "active" if sid in active_ids else "done",
+            "updated_at": meta.get("updated_at") or meta.get("created_at") or "",
+        }))
+
+    # Best hits first, then most recent
+    candidates.sort(key=lambda x: (-x[0], -x[1]))
+    # Require at least half the tokens to match (avoids very noisy results)
+    min_hits = max(1, (len(tokens) + 1) // 2)
+    for hits, _, entry in candidates:
+        if hits < min_hits:
+            break
+        results.append(entry)
+        if len(results) >= 12:
+            break
+    return results
+
+
+def _resolve_cwd_for_query(q: str) -> str | None:
+    """Try to find a project CWD that matches a keyword in the query."""
+    import os
+    home = Path.home()
+    projects_root = home / "Documents" / "PROJECTS"
+    if not projects_root.exists():
+        return None
+    q_lower = q.lower()
+    best = None
+    for category in projects_root.iterdir():
+        if not category.is_dir():
+            continue
+        for project in category.iterdir():
+            if not project.is_dir():
+                continue
+            name = project.name.lower()
+            if any(tok in name for tok in q_lower.split() if len(tok) > 3):
+                best = str(project)
+                break
+        if best:
+            break
+    return best
+
+
+_FIND_VERBS = {"find", "open", "show", "look", "search", "get", "where", "check"}
+_START_VERBS = {"start", "launch", "new", "create", "begin", "run", "dispatch", "resume"}
+
+
+def _fast_path(text: str) -> dict | None:
+    """Handle common intents without going through the AI concierge.
+
+    Returns a structured result dict if we can answer directly, else None.
+    Handles:
+    - "find/show/open X" → search sessions, return results with resume actions
+    - "start/launch X" → search first; if no match offer dispatch; if match offer resume
+    - Anything with 2+ words that looks like a session search
+    """
+    import re as _re
+    t = text.strip().lower()
+    words = t.split()
+    if not words:
+        return None
+
+    meaningful = [w for w in words if len(w) >= 2 and w not in (
+        "the", "a", "an", "for", "with", "and", "or", "in", "on", "at", "to", "of", "my",
+        "me", "is", "it", "its", "this", "that", "can", "you", "all", "any",
+        "working", "looking", "about", "some", "more",
+    )]
+    if len(meaningful) < 1:
+        return None
+
+    first_word = words[0]
+    is_find = first_word in _FIND_VERBS or any(w in _FIND_VERBS for w in words[:2])
+    is_start = first_word in _START_VERBS
+
+    if first_word in _FIND_VERBS | _START_VERBS:
+        rest = words[1:]
+        # Strip filler that sometimes follows verbs: "working on", "looking for", etc.
+        filler = {"working", "on", "looking", "for", "a", "the", "me", "my", "some"}
+        while rest and rest[0] in filler:
+            rest = rest[1:]
+        keywords = " ".join(rest)
+    else:
+        keywords = text.strip()
+
+    if not keywords or len(keywords) < 3:
+        return None
+
+    matches = _search_sessions_fast(keywords)
+
+    if is_start and not matches:
+        # Nothing found — offer to dispatch
+        cwd = _resolve_cwd_for_query(keywords) or str(Path.home())
+        cwd_short = cwd.replace(str(Path.home()), "~")
+        kw = keywords[:50]
+        return {
+            "type": "results",
+            "title": f"No sessions found for \u201c{kw}\u201d",
+            "narrative": f"No existing sessions match. Start a new one in {cwd_short}?",
+            "items": [],
+            "actions": [
+                {
+                    "label": f"Start: {kw}",
+                    "action": "dispatch",
+                    "cwd": cwd,
+                    "task": keywords,
+                }
+            ],
+        }
+
+    if not matches:
+        return None  # let AI handle truly ambiguous queries
+
+    # Build items + actions
+    items = []
+    actions = []
+    for s in matches[:8]:
+        items.append({
+            "id": s["id"],
+            "title": s["title"],
+            "cwd": s["cwd_short"],
+            "status": s["status"],
+            "updated_at": s["updated_at"],
+        })
+        label = s["title"][:40] if len(s["title"]) > 40 else s["title"]
+        verb = "Open" if s["status"] == "active" else "Resume"
+        actions.append({
+            "label": f"{verb}: {label}",
+            "action": "resume",
+            "session_id": s["id"],
+        })
+
+    if is_start and matches:
+        # Start was requested but sessions exist — also offer fresh dispatch
+        cwd = matches[0]["cwd"] or _resolve_cwd_for_query(keywords) or str(Path.home())
+        cwd_short = cwd.replace(str(Path.home()), "~")
+        kw = keywords[:40]
+        actions.append({
+            "label": f"New session: {kw}",
+            "action": "dispatch",
+            "cwd": cwd,
+            "task": keywords,
+        })
+
+    n = len(matches)
+    noun = "session" if n == 1 else "sessions"
+    kw = keywords
+    return {
+        "type": "results",
+        "title": f"{n} {noun} matching \u201c{kw}\u201d",
+        "narrative": None,
+        "items": items,
+        "actions": actions,
+    }
+
+
+
     """Make sure the concierge is running. Spawns if needed."""
     global _session_id
     with _lock:
@@ -404,8 +610,15 @@ def _has_final_after_tools(session_id: str, after_pos: int) -> bool:
 def query(text: str) -> dict:
     """Send a query to the concierge and return the structured response.
 
+    Tries the fast-path resolver first (direct session search, no AI round-trip).
+    Falls through to the AI concierge only for ambiguous or report-style queries.
     Tracks file position to only read NEW responses after the query is sent.
     """
+    # Fast path: session search / dispatch intents resolved without AI
+    fast = _fast_path(text)
+    if fast is not None:
+        return fast
+
     if not ensure_alive():
         return {
             "type": "error",
