@@ -2177,11 +2177,16 @@ body.resizing .detail-resize::after { background: var(--accent); }
   outline: none;
   z-index: 2;
 }
-/* Blinking cursor appears at bottom-right of pane in raw mode */
-.detail-shell-pane-wrap.raw-active .live-pane::after {
-  content: '▋';
-  color: #3a6;
+/* Blinking cursor indicator in raw mode input bar */
+.detail-shell-raw-active-dot {
+  display: inline-block;
+  width: 7px;
+  height: 12px;
+  background: #3a6;
+  border-radius: 1px;
   animation: shell-cursor-blink 1s step-end infinite;
+  vertical-align: middle;
+  margin-left: 4px;
 }
 @keyframes shell-cursor-blink {
   0%, 100% { opacity: 1; }
