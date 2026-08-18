@@ -110,6 +110,7 @@ function StackItem({ item, index, count, sessionId, setStack, onDelete, onMove }
 function TaskStack({ sessionId, stack, setStack, canSend }) {
   const notify = useToast()
   const [autoAdvance, setAutoAdvanceState] = useState(false)
+  const [expanded, setExpanded] = useState(false)
 
   useEffect(() => {
     if (!sessionId) return
@@ -128,9 +129,6 @@ function TaskStack({ sessionId, stack, setStack, canSend }) {
       .then(d => { if (d.items) setStack(d.items) }).catch(() => {})
   }
 
-  // One path for every reordering gesture — drag, ↑ and ↓ — so they cannot
-  // disagree about what the new order is. Optimistic locally, then reconciled
-  // with whatever the server says the order became.
   const moveItem = (fromIdx, toIdx) => {
     if (fromIdx === toIdx || toIdx < 0 || toIdx >= stack.length) return
     const next = [...stack]
@@ -151,39 +149,41 @@ function TaskStack({ sessionId, stack, setStack, canSend }) {
       .catch(() => notify('Could not send', 'error'))
   }
 
-  if (!stack.length && !canSend) return null
+  if (!stack.length) return null
 
   return (
     <div className="task-stack">
-      {stack.length > 0 && (
-        <>
-          <div className="stack-header">
-            <span className="stack-label">Queue ({stack.length})</span>
-            <label className="stack-auto" title="Automatically send next item when session goes idle">
-              <input type="checkbox" checked={autoAdvance} onChange={toggleAutoAdvance} />
-              auto
-            </label>
-            {canSend && (
-              <button className="stack-send-next" onClick={sendNext} title="Send next item now">
-                ↗ Send next
-              </button>
-            )}
-          </div>
-          <ul className="stack-list">
-            {stack.map((item, i) => (
-              <StackItem
-                key={item.id}
-                item={item}
-                index={i}
-                count={stack.length}
-                sessionId={sessionId}
-                setStack={setStack}
-                onDelete={deleteItem}
-                onMove={moveItem}
-              />
-            ))}
-          </ul>
-        </>
+      {/* Compact toggle bar — no full-width header */}
+      <div className="stack-toggle-row">
+        <button className="stack-toggle-btn" onClick={() => setExpanded(v => !v)}
+                title={expanded ? 'Collapse queue' : 'Expand queue'}>
+          {expanded ? '▾' : '▸'} Queue ({stack.length})
+        </button>
+        <label className="stack-auto" title="Automatically send next item when session goes idle">
+          <input type="checkbox" checked={autoAdvance} onChange={toggleAutoAdvance} />
+          auto
+        </label>
+        {canSend && (
+          <button className="stack-send-next" onClick={sendNext} title="Send next item now">
+            ↗ Send next
+          </button>
+        )}
+      </div>
+      {expanded && (
+        <ul className="stack-list">
+          {stack.map((item, i) => (
+            <StackItem
+              key={item.id}
+              item={item}
+              index={i}
+              count={stack.length}
+              sessionId={sessionId}
+              setStack={setStack}
+              onDelete={deleteItem}
+              onMove={moveItem}
+            />
+          ))}
+        </ul>
       )}
     </div>
   )
