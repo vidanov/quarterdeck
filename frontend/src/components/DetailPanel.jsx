@@ -1329,8 +1329,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   disabled={sideChatOpening}>
             {sideChatOpening ? '…' : '◎ Side'}
           </button>
-          {/* CLI binding chip — shows bound CLI status, click to bind/unbind */}
-          {(() => {
+          {/* CLI binding chip — only for foreign sessions (manually started kiro-cli).
+              Managed sessions already accept input directly via the composer. */}
+          {control === 'foreign' && (() => {
             const st = cliStatus
             if (!st) return null
             const isBound = st.bound
@@ -1341,7 +1342,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             if (!isBound) {
               return (
                 <button className="detail-cli-chip detail-cli-unbound" onClick={openCliBinder}
-                        title="Connect to this session's CLI pane — send commands and track status">
+                        title="Connect to this CLI's tmux pane — send commands and track idle/busy status">
                   + CLI
                 </button>
               )
@@ -1978,8 +1979,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <button className="dispatch-btn" type="submit" disabled={!draft.trim() || sending}>
                 {sending ? '…' : cliSendMode && cliStatus?.bound ? '↗ CLI' : '↗ Send'}
               </button>
-              {/* CLI send mode toggle — only shown when a CLI is bound */}
-              {cliStatus?.bound && cliStatus.status !== 'unbound' && (
+              {/* CLI send mode toggle — only for foreign sessions with a bound CLI */}
+              {control === 'foreign' && cliStatus?.bound && cliStatus.status !== 'unbound' && (
                 <button
                   type="button"
                   className={`detail-cli-mode-btn${cliSendMode ? ' active' : ''}`}
@@ -1991,7 +1992,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 </button>
               )}
               {/* New session here — when bound CLI is busy */}
-              {cliStatus?.bound && (cliStatus.status === 'thinking' || cliStatus.status === 'awaiting-approval') && onNewSession && (
+              {control === 'foreign' && cliStatus?.bound && (cliStatus.status === 'thinking' || cliStatus.status === 'awaiting-approval') && onNewSession && (
                 <button type="button" className="detail-cli-new-session-btn"
                         title={`CLI is busy — start a new session in ${cliStatus.cwd || 'same folder'}`}
                         onClick={() => onNewSession(cliStatus.cwd)}>
