@@ -507,9 +507,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [shellSt, setShellSt] = useState(null)
   const [shellCmd, setShellCmd] = useState('')
   const [shellBusy, setShellBusy] = useState(false)
-  const [shellRawMode, setShellRawMode] = useState(false)
+  const [shellRawMode, setShellRawMode] = useState(() => localStorage.getItem('shell-raw-mode') === '1')
   const shellRawRef = useRef(null)
   const shellLastEscRef = useRef(0)  // timestamp of last Esc press for double-Esc exit
+
+  const setShellRaw = (val) => {
+    setShellRawMode(val)
+    localStorage.setItem('shell-raw-mode', val ? '1' : '0')
+  }
   const shellPaneRef = useRef(null)
   const shellMetricRef = useRef(null)
   const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
@@ -677,11 +682,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   useEffect(() => {
     if (shellRawMode && shellRawRef.current) shellRawRef.current.focus()
   }, [shellRawMode])
-
-  // Turn off raw mode when switching sessions or leaving shell view
-  useEffect(() => {
-    setShellRawMode(false)
-  }, [session?.id, viewOverride])
 
   // Reset transcript when the session changes so stale messages never bleed across.
   // useLayoutEffect runs before paint — prevents one render frame of old content showing.
@@ -2118,49 +2118,49 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 </div>
               )}
               {(shellSt?.alive || shellPane) && (
-                <pre className="live-pane" ref={shellPaneRef}>{shellPane ? shellPane.replace(/(\n\s*)+$/, '\n') : '…'}</pre>
+                <div className={`detail-shell-pane-wrap${shellRawMode ? ' raw-active' : ''}`}>
+                  <pre className="live-pane" ref={shellPaneRef}>{shellPane ? shellPane.replace(/(\n\s*)+$/, '\n') : '…'}</pre>
+                  {shellRawMode && shellSt?.alive && (
+                    <div
+                      ref={shellRawRef}
+                      className="detail-shell-raw-overlay"
+                      tabIndex={0}
+                      onKeyDown={e => {
+                        const key = keyEventToTmux(e)
+                        if (!key) return
+                        if (key === 'Escape') {
+                          const now = Date.now()
+                          if (now - shellLastEscRef.current < 500) {
+                            setShellRaw(false)
+                            shellLastEscRef.current = 0
+                            return
+                          }
+                          shellLastEscRef.current = now
+                        } else {
+                          shellLastEscRef.current = 0
+                        }
+                        e.preventDefault()
+                        e.stopPropagation()
+                        shellsApi.shellRawKey(activeShellId, key)
+                          .then(() => shellsApi.getShellPane(activeShellId)
+                            .then(d => { setShellSt(d); setShellPane(d.pane || '') }))
+                      }}
+                      onBlur={() => {
+                        setTimeout(() => {
+                          if (shellRawMode && shellRawRef.current) shellRawRef.current.focus()
+                        }, 50)
+                      }}
+                    />
+                  )}
+                </div>
               )}
               {shellSt?.alive && (
                 <div className="detail-shell-input-row">
                   {shellRawMode ? (
-                    /* Raw terminal mode — capture overlay grabs all keystrokes */
                     <div className="detail-shell-raw-wrap">
-                      <div
-                        ref={shellRawRef}
-                        className="detail-shell-raw-capture"
-                        tabIndex={0}
-                        onKeyDown={e => {
-                          const key = keyEventToTmux(e)
-                          if (!key) return
-                          // Double-Esc exits raw mode (within 500 ms)
-                          if (key === 'Escape') {
-                            const now = Date.now()
-                            if (now - shellLastEscRef.current < 500) {
-                              setShellRawMode(false)
-                              shellLastEscRef.current = 0
-                              return
-                            }
-                            shellLastEscRef.current = now
-                          } else {
-                            shellLastEscRef.current = 0
-                          }
-                          e.preventDefault()
-                          e.stopPropagation()
-                          shellsApi.shellRawKey(activeShellId, key)
-                            .then(() => shellsApi.getShellPane(activeShellId)
-                              .then(d => { setShellSt(d); setShellPane(d.pane || '') }))
-                        }}
-                        onBlur={() => {
-                          // Re-focus if still in raw mode (click on pane area)
-                          setTimeout(() => {
-                            if (shellRawMode && shellRawRef.current) shellRawRef.current.focus()
-                          }, 50)
-                        }}
-                      >
-                        <span className="detail-shell-raw-hint">⌨ Raw — type freely · Esc twice to exit</span>
-                      </div>
+                      <span className="detail-shell-raw-hint">⌨ Raw mode — Esc×2 to exit</span>
                       <button className="detail-shell-raw-exit"
-                              onClick={() => setShellRawMode(false)}
+                              onClick={() => setShellRaw(false)}
                               title="Exit raw mode">✕ Exit raw</button>
                     </div>
                   ) : (
@@ -2176,7 +2176,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         ))}
                         <button className="composer-chip composer-key detail-shell-raw-btn"
                                 title="Raw terminal mode — all keyboard shortcuts work"
-                                onClick={() => setShellRawMode(true)}>
+                                onClick={() => setShellRaw(true)}>
                           ⌨ Raw
                         </button>
                       </div>
