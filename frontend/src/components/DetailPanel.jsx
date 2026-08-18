@@ -2276,7 +2276,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         }}>✕</button>
               </div>
             )}
-            {chipPreview && chipPreviewBlob && createPortal(
+            {chipPreview && createPortal(
               <div className="wall-tile-preview" style={{
                 position: 'fixed',
                 left: Math.min(chipPreview.x + 12, window.innerWidth - 280),
@@ -2284,7 +2284,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 pointerEvents: 'none',
                 zIndex: 9999,
               }}>
-                <img src={chipPreviewBlob} alt="screenshot preview" />
+                {chipPreviewBlob
+                  ? <img src={chipPreviewBlob} alt="screenshot preview" />
+                  : <div className="chip-preview-loading">Loading…</div>}
               </div>,
               document.body
             )}
