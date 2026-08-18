@@ -426,73 +426,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         }
       })
   }
-  // --- Shell pane state (deck-shell singleton, surfaced as a tab) ---
-  const [shellSt, setShellSt] = useState(null)
-  const [shellPane, setShellPane] = useState('')
-  const [shellCmd, setShellCmd] = useState('')
-  const [shellBusy, setShellBusy] = useState(false)
-  const shellPaneRef = useRef(null)
-  const shellMetricRef = useRef(null)
-  const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
-
-  // Poll shell status when the shell tab is active
-  useEffect(() => {
-    if (effectiveView !== 'shell') return
-    let active = true
-    const poll = () => settingsApi.getShellPane().then(d => {
-      if (!active) return
-      setShellSt(d)
-      setShellPane(d.pane || '')
-    }).catch(() => {})
-    poll()
-    const iv = setInterval(poll, 1200)
-    return () => { active = false; clearInterval(iv) }
-  }, [effectiveView])
-
-  // Auto-scroll shell pane
-  useEffect(() => {
-    const box = shellPaneRef.current
-    if (box) box.scrollTop = box.scrollHeight
-  }, [shellPane])
-
-  // Resize shell tmux window to match rendered box
-  useEffect(() => {
-    if (effectiveView !== 'shell' || !shellSt?.alive) return
-    const box = shellPaneRef.current, probe = shellMetricRef.current
-    if (!box || !probe) return
-    let timer
-    const measure = () => {
-      const cell = probe.getBoundingClientRect()
-      const cw = cell.width / CELL_SAMPLE
-      if (!(cw > 0) || !(cell.height > 0)) return
-      const style = getComputedStyle(box)
-      const usable = box.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
-      const cols = Math.max(PANE_MIN_COLS, Math.floor(usable / cw))
-      const rows = Math.max(PANE_MIN_ROWS, Math.floor(box.clientHeight / cell.height))
-      const sent = shellSentSizeRef.current
-      if (sent.cols === cols && sent.rows === rows) return
-      shellSentSizeRef.current = { cols, rows }
-      settingsApi.resizeShell(cols, rows).catch(() => { shellSentSizeRef.current = { cols: 0, rows: 0 } })
-    }
-    const observer = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(measure, 120) })
-    observer.observe(box)
-    measure()
-    return () => { clearTimeout(timer); observer.disconnect() }
-  }, [effectiveView, shellSt?.alive])
-
-  const shellAct = (path, body) => {
-    setShellBusy(true)
-    return settingsApi.shellAction(path, body)
-      .then(d => { settingsApi.getShellPane().then(r => { setShellSt(r); setShellPane(r.pane || '') }).catch(() => {}); return d })
-      .catch(() => {})
-      .finally(() => setShellBusy(false))
-  }
-  const shellSend = (text) => {
-    if (!text.trim()) return
-    setShellCmd('')
-    shellAct('input', { text })
-  }
-
   // Chips bar: auto-open when session is active, collapsible when idle
   const [chipsOpen, setChipsOpen] = useState(() => localStorage.getItem('detail-chips-open') === '1')
   // Restore from backend on mount — localStorage is wiped when WKWebView restarts
@@ -565,6 +498,74 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const effectiveView = viewOverride
     ? (viewOverride === 'live' && !canLive ? 'transcript' : viewOverride)
     : (canLive && isWorking ? 'live' : 'transcript')
+
+  // --- Shell pane state (deck-shell singleton, surfaced as a tab) ---
+  const [shellSt, setShellSt] = useState(null)
+  const [shellPane, setShellPane] = useState('')
+  const [shellCmd, setShellCmd] = useState('')
+  const [shellBusy, setShellBusy] = useState(false)
+  const shellPaneRef = useRef(null)
+  const shellMetricRef = useRef(null)
+  const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
+
+  // Poll shell status when the shell tab is active
+  useEffect(() => {
+    if (effectiveView !== 'shell') return
+    let active = true
+    const poll = () => settingsApi.getShellPane().then(d => {
+      if (!active) return
+      setShellSt(d)
+      setShellPane(d.pane || '')
+    }).catch(() => {})
+    poll()
+    const iv = setInterval(poll, 1200)
+    return () => { active = false; clearInterval(iv) }
+  }, [effectiveView])
+
+  // Auto-scroll shell pane
+  useEffect(() => {
+    const box = shellPaneRef.current
+    if (box) box.scrollTop = box.scrollHeight
+  }, [shellPane])
+
+  // Resize shell tmux window to match rendered box
+  useEffect(() => {
+    if (effectiveView !== 'shell' || !shellSt?.alive) return
+    const box = shellPaneRef.current, probe = shellMetricRef.current
+    if (!box || !probe) return
+    let timer
+    const measure = () => {
+      const cell = probe.getBoundingClientRect()
+      const cw = cell.width / CELL_SAMPLE
+      if (!(cw > 0) || !(cell.height > 0)) return
+      const style = getComputedStyle(box)
+      const usable = box.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+      const cols = Math.max(PANE_MIN_COLS, Math.floor(usable / cw))
+      const rows = Math.max(PANE_MIN_ROWS, Math.floor(box.clientHeight / cell.height))
+      const sent = shellSentSizeRef.current
+      if (sent.cols === cols && sent.rows === rows) return
+      shellSentSizeRef.current = { cols, rows }
+      settingsApi.resizeShell(cols, rows).catch(() => { shellSentSizeRef.current = { cols: 0, rows: 0 } })
+    }
+    const observer = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(measure, 120) })
+    observer.observe(box)
+    measure()
+    return () => { clearTimeout(timer); observer.disconnect() }
+  }, [effectiveView, shellSt?.alive])
+
+  const shellAct = (path, body) => {
+    setShellBusy(true)
+    return settingsApi.shellAction(path, body)
+      .then(d => { settingsApi.getShellPane().then(r => { setShellSt(r); setShellPane(r.pane || '') }).catch(() => {}); return d })
+      .catch(() => {})
+      .finally(() => setShellBusy(false))
+  }
+  const shellSend = (text) => {
+    if (!text.trim()) return
+    setShellCmd('')
+    shellAct('input', { text })
+  }
+
   // Reset transcript when the session changes so stale messages never bleed across
   useEffect(() => {
     // Seed from cache for instant display; fall back to null (loading state)
@@ -1967,7 +1968,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           happen in one place. */}
       <div className="detail-footer">
       <div className="composer">
-        {canSend ? (
+        {canSend && effectiveView !== 'shell' ? (
           <>
             {chipsOpen && (
               <div className="composer-commands-wrap">
