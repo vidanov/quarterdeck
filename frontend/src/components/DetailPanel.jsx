@@ -2227,14 +2227,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   {cliStatus.status === 'idle' ? '🟢' : cliStatus.status === 'thinking' ? '🟡' : '⚪'} CLI
                 </button>
               )}
-              {/* New session here — when bound CLI is busy */}
-              {control === 'foreign' && cliStatus?.bound && (cliStatus.status === 'thinking' || cliStatus.status === 'awaiting-approval') && onNewSession && (
-                <button type="button" className="detail-cli-new-session-btn"
-                        title={`CLI is busy — start a new session in ${cliStatus.cwd || 'same folder'}`}
-                        onClick={() => onNewSession(cliStatus.cwd)}>
-                  + New here
-                </button>
-              )}
+
               <button className="queue-btn" type="button"
                       title="Add to task queue instead of sending now"
                       disabled={!draft.trim()}
