@@ -426,6 +426,73 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         }
       })
   }
+  // --- Shell pane state (deck-shell singleton, surfaced as a tab) ---
+  const [shellSt, setShellSt] = useState(null)
+  const [shellPane, setShellPane] = useState('')
+  const [shellCmd, setShellCmd] = useState('')
+  const [shellBusy, setShellBusy] = useState(false)
+  const shellPaneRef = useRef(null)
+  const shellMetricRef = useRef(null)
+  const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
+
+  // Poll shell status when the shell tab is active
+  useEffect(() => {
+    if (effectiveView !== 'shell') return
+    let active = true
+    const poll = () => settingsApi.getShellPane().then(d => {
+      if (!active) return
+      setShellSt(d)
+      setShellPane(d.pane || '')
+    }).catch(() => {})
+    poll()
+    const iv = setInterval(poll, 1200)
+    return () => { active = false; clearInterval(iv) }
+  }, [effectiveView])
+
+  // Auto-scroll shell pane
+  useEffect(() => {
+    const box = shellPaneRef.current
+    if (box) box.scrollTop = box.scrollHeight
+  }, [shellPane])
+
+  // Resize shell tmux window to match rendered box
+  useEffect(() => {
+    if (effectiveView !== 'shell' || !shellSt?.alive) return
+    const box = shellPaneRef.current, probe = shellMetricRef.current
+    if (!box || !probe) return
+    let timer
+    const measure = () => {
+      const cell = probe.getBoundingClientRect()
+      const cw = cell.width / CELL_SAMPLE
+      if (!(cw > 0) || !(cell.height > 0)) return
+      const style = getComputedStyle(box)
+      const usable = box.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+      const cols = Math.max(PANE_MIN_COLS, Math.floor(usable / cw))
+      const rows = Math.max(PANE_MIN_ROWS, Math.floor(box.clientHeight / cell.height))
+      const sent = shellSentSizeRef.current
+      if (sent.cols === cols && sent.rows === rows) return
+      shellSentSizeRef.current = { cols, rows }
+      settingsApi.resizeShell(cols, rows).catch(() => { shellSentSizeRef.current = { cols: 0, rows: 0 } })
+    }
+    const observer = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(measure, 120) })
+    observer.observe(box)
+    measure()
+    return () => { clearTimeout(timer); observer.disconnect() }
+  }, [effectiveView, shellSt?.alive])
+
+  const shellAct = (path, body) => {
+    setShellBusy(true)
+    return settingsApi.shellAction(path, body)
+      .then(d => { settingsApi.getShellPane().then(r => { setShellSt(r); setShellPane(r.pane || '') }).catch(() => {}); return d })
+      .catch(() => {})
+      .finally(() => setShellBusy(false))
+  }
+  const shellSend = (text) => {
+    if (!text.trim()) return
+    setShellCmd('')
+    shellAct('input', { text })
+  }
+
   // Chips bar: auto-open when session is active, collapsible when idle
   const [chipsOpen, setChipsOpen] = useState(() => localStorage.getItem('detail-chips-open') === '1')
   // Restore from backend on mount — localStorage is wiped when WKWebView restarts
@@ -1568,6 +1635,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)} title="Follow session state">auto</button>
                 <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')} title="Always show live pane">live</button>
                 <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')} title="Always show transcript">transcript</button>
+                <button className={`detail-pin-btn ${viewOverride === 'shell' ? 'active' : ''}`} onClick={() => setViewOverride('shell')} title="Open terminal shell — run commands alongside this session">shell</button>
               </div>
             )}
             {session.context_pct != null && session.context_pct !== '' && (
@@ -1591,6 +1659,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)}>auto</button>
               <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')}>live</button>
               <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')}>transcript</button>
+              <button className={`detail-pin-btn ${viewOverride === 'shell' ? 'active' : ''}`} onClick={() => setViewOverride('shell')} title="Open terminal shell">shell</button>
             </div>
           )}
           {session.context_pct != null && session.context_pct !== '' && (
@@ -1608,6 +1677,50 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           {echo && <pre className="live-echo">❯ {echo}</pre>}
           {!atBottom && (
             <button className="live-scroll-btn" onClick={scrollToBottom} title="Scroll to latest">↓</button>
+          )}
+        </div>
+      )}
+      {effectiveView === 'shell' && (
+        <div className="detail-shell-view">
+          {/* Off-screen ruler for column measurement */}
+          <pre className="live-metric" ref={shellMetricRef} aria-hidden="true">{'M'.repeat(CELL_SAMPLE)}</pre>
+          {!shellSt?.alive && (
+            <div className="detail-shell-open-row">
+              <span className="detail-shell-hint">
+                {shellSt?.exists ? '⚠ Shell exited.' : 'No shell running.'}
+              </span>
+              <button className="detail-shell-open-btn" disabled={shellBusy}
+                      onClick={() => shellAct('open', { cwd: session.cwd || '~' })}>
+                {shellSt?.exists ? 'Restart shell' : 'Open shell'}
+                {session.cwd ? ` in ${session.cwd.replace(/.*\//, '')}` : ''}
+              </button>
+            </div>
+          )}
+          {(shellSt?.alive || shellPane) && (
+            <pre className="shell-pane detail-shell-pane" ref={shellPaneRef}>
+              {shellPane || '…'}
+            </pre>
+          )}
+          {shellSt?.alive && (
+            <div className="detail-shell-input-row">
+              <div className="detail-shell-keys">
+                {[['Tab','Tab'],['Up','↑'],['Down','↓'],['C-c','^C'],['C-d','^D'],['C-l','^L']].map(([key, label]) => (
+                  <button key={key} className="composer-chip composer-key" disabled={shellBusy}
+                          onClick={() => shellAct('key', { key })}>{label}</button>
+                ))}
+              </div>
+              <form className="detail-shell-form" onSubmit={e => { e.preventDefault(); shellSend(shellCmd) }}>
+                <input className="detail-shell-cmd" value={shellCmd} spellCheck={false}
+                       autoCapitalize="off" autoCorrect="off"
+                       placeholder="Type a shell command…"
+                       onChange={e => setShellCmd(e.target.value)} />
+                <button className="dispatch-btn" type="submit" disabled={shellBusy || !shellCmd.trim()}>↩</button>
+                <button type="button" className="detail-cli-new-session-btn"
+                        title="Close this shell"
+                        disabled={shellBusy}
+                        onClick={() => shellAct('close')}>✕ Close</button>
+              </form>
+            </div>
           )}
         </div>
       )}
@@ -2010,6 +2123,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                       }}>
                 + Queue
               </button>
+              {/* New session here — managed session is busy, start parallel work in same folder */}
+              {canSend && isWorking && onNewSession && (
+                <button type="button" className="detail-cli-new-session-btn"
+                        title={`Start a new session in ${session.cwd || 'same folder'} while this one runs`}
+                        onClick={() => onNewSession(session.cwd)}>
+                  + New here
+                </button>
+              )}
             </form>
             <TaskStack sessionId={session.id} stack={stack} setStack={setStack} canSend={canSend} />
             {/* Slash command queue — send text/commands after current turn ends */}
