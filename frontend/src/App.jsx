@@ -282,7 +282,7 @@ export default function App() {
   const askConfirm = useConfirm()
   const confirmPending = useConfirmPending()
   const {
-    sessions, error, refresh: fetchSessions, refreshBurst,
+    sessions, error, loaded: sessionsLoaded, refresh: fetchSessions, refreshBurst,
     killing, markKilling, unmarkKilling,
     notifiedIds, ackedIds, ack: handleAckSession,
     addOptimistic, resolveOptimistic, rejectOptimistic,
@@ -1504,9 +1504,11 @@ export default function App() {
 
               {shownActive.length === 0 && (
                 <div className="empty">
-                  {active.length === 0
-                    ? <>No active sessions. Press <strong>+</strong> to launch one, or resume from Snapshots.</>
-                    : <>No {controlFilter} sessions. <button className="link-btn" onClick={() => changeControlFilter('all')}>Show all {active.length}</button></>}
+                  {!sessionsLoaded
+                    ? 'Loading…'
+                    : active.length === 0
+                      ? <>No active sessions. Press <strong>+</strong> to launch one, or resume from Snapshots.</>
+                      : <>No {controlFilter} sessions. <button className="link-btn" onClick={() => changeControlFilter('all')}>Show all {active.length}</button></>}
                 </div>
               )}
               {shownActive.length > 0 && sessionViewMode === 'cards' && needsYou.length === 0 && (
