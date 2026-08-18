@@ -6006,6 +6006,17 @@ body.resizing .detail-resize::after { background: var(--accent); }
   border-radius: 5px;
   display: block;
 }
+.chip-preview-loading {
+  width: 252px;
+  height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 11px;
+  background: var(--surface);
+  border-radius: 5px;
+}
 
 /* --- Wall tile open button --- */
 .wall-tile-open {
