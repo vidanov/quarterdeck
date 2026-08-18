@@ -1703,15 +1703,15 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)} title="Follow session state">auto</button>
                 <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')} title="Always show live pane">live</button>
                 <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')} title="Always show transcript">transcript</button>
-                <button className={`detail-pin-btn detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
-                        onClick={() => {
-                          if (viewOverride === 'shell') { setViewOverride(null); return }
-                          setViewOverride('shell')
-                          if (!activeShellId) openShellForCwd(session?.cwd)
-                        }}
-                        title="Open terminal shell for this project">shell</button>
               </div>
             )}
+            <button className={`detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
+                    onClick={() => {
+                      if (viewOverride === 'shell') { setViewOverride(null); return }
+                      setViewOverride('shell')
+                      if (!activeShellId) openShellForCwd(session?.cwd)
+                    }}
+                    title="Open terminal shell for this project">⌨ shell</button>
             {session.context_pct != null && session.context_pct !== '' && (
               <ContextPct pct={session.context_pct} onCompact={() => queueOrSend('/compact')} />
             )}
@@ -1733,15 +1733,15 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)}>auto</button>
               <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')}>live</button>
               <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')}>transcript</button>
-              <button className={`detail-pin-btn detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
-                      onClick={() => {
-                        if (viewOverride === 'shell') { setViewOverride(null); return }
-                        setViewOverride('shell')
-                        if (!activeShellId) openShellForCwd(session?.cwd)
-                      }}
-                      title="Terminal shell">shell</button>
             </div>
           )}
+          <button className={`detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
+                  onClick={() => {
+                    if (viewOverride === 'shell') { setViewOverride(null); return }
+                    setViewOverride('shell')
+                    if (!activeShellId) openShellForCwd(session?.cwd)
+                  }}
+                  title="Terminal shell">⌨ shell</button>
           {session.context_pct != null && session.context_pct !== '' && (
             <ContextPct pct={session.context_pct} onCompact={() => queueOrSend('/compact')} />
           )}
