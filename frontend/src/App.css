@@ -2185,7 +2185,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
   background: #3a6;
   border-radius: 1px;
   animation: shell-cursor-blink 1s step-end infinite;
-  vertical-align: middle;
+  vertical-align: text-bottom;
   margin-left: 4px;
 }
 @keyframes shell-cursor-blink {

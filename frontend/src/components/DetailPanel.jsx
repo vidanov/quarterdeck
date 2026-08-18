@@ -2123,7 +2123,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 </div>
               )}
               {(shellSt?.alive || shellPane) && (
-                <div className={`detail-shell-pane-wrap${shellRawMode ? ' raw-active' : ''}`}>
+                <div className="detail-shell-pane-wrap">
                   <pre className="live-pane" ref={shellPaneRef}>{shellPane ? shellPane.replace(/(\n\s*)+$/, '\n') : '…'}</pre>
                   {shellRawMode && shellSt?.alive && (
                     <div
@@ -2146,8 +2146,23 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         }
                         e.preventDefault()
                         e.stopPropagation()
+                        // Optimistic echo for printable single chars
+                        if (key.length === 1 && key !== '\n') {
+                          setShellPane(prev => {
+                            const trimmed = (prev || '').replace(/(\n\s*)+$/, '')
+                            return trimmed + key
+                          })
+                        } else if (key === 'Enter') {
+                          setShellPane(prev => (prev || '').replace(/(\n\s*)+$/, '') + '\n')
+                        } else if (key === 'BSpace') {
+                          setShellPane(prev => {
+                            const trimmed = (prev || '').replace(/(\n\s*)+$/, '')
+                            return trimmed.slice(0, -1)
+                          })
+                        }
                         // Fire-and-forget — 150ms poll picks up result
                         shellsApi.shellRawKey(activeShellId, key).catch(() => {})
+                      }}
                       }}
                       onBlur={() => {
                         setTimeout(() => {
