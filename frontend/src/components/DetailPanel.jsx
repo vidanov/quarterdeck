@@ -513,7 +513,16 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   // Refresh shell list when session changes
   useEffect(() => {
-    shellsApi.listShells().then(d => setShells(d.shells || [])).catch(() => {})
+    shellsApi.listShells().then(d => {
+      const all = d.shells || []
+      setShells(all)
+      // Auto-select a shell matching this session's cwd if one exists
+      if (!activeShellId) {
+        const cwd = session?.cwd || ''
+        const match = all.find(sh => sh.cwd === cwd || sh.cwd.startsWith(cwd + '/') || cwd.startsWith(sh.cwd + '/'))
+        if (match) setActiveShellId(match.shell_id)
+      }
+    }).catch(() => {})
   }, [session?.id])
 
   // Poll active shell pane
@@ -1683,7 +1692,13 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)} title="Follow session state">auto</button>
                 <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')} title="Always show live pane">live</button>
                 <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')} title="Always show transcript">transcript</button>
-                <button className={`detail-pin-btn detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`} onClick={() => setViewOverride(v => v === 'shell' ? null : 'shell')} title="Terminal shell — run commands alongside this session">shell</button>
+                <button className={`detail-pin-btn detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
+                        onClick={() => {
+                          if (viewOverride === 'shell') { setViewOverride(null); return }
+                          setViewOverride('shell')
+                          if (!activeShellId) openShellForCwd(session?.cwd)
+                        }}
+                        title="Open terminal shell for this project">shell</button>
               </div>
             )}
             {session.context_pct != null && session.context_pct !== '' && (
@@ -1707,7 +1722,13 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)}>auto</button>
               <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')}>live</button>
               <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')}>transcript</button>
-              <button className={`detail-pin-btn detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`} onClick={() => setViewOverride(v => v === 'shell' ? null : 'shell')} title="Terminal shell">shell</button>
+              <button className={`detail-pin-btn detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
+                      onClick={() => {
+                        if (viewOverride === 'shell') { setViewOverride(null); return }
+                        setViewOverride('shell')
+                        if (!activeShellId) openShellForCwd(session?.cwd)
+                      }}
+                      title="Terminal shell">shell</button>
             </div>
           )}
           {session.context_pct != null && session.context_pct !== '' && (
@@ -1972,28 +1993,42 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       {/* ── Shell view — full height, replaces transcript/live when active ── */}
       {effectiveView === 'shell' && (
         <div className="detail-shell-full">
-          {/* Shell tabs strip */}
-          <div className="detail-shell-strip">
-            {shells.map(sh => (
-              <button
-                key={sh.shell_id}
-                className={`detail-shell-tab${activeShellId === sh.shell_id ? ' active' : ''}${!sh.alive ? ' dead' : ''}`}
-                onClick={() => setActiveShellId(activeShellId === sh.shell_id ? null : sh.shell_id)}
-                title={sh.cwd}>
-                <span className="detail-shell-tab-dot">{sh.alive ? '🟢' : '⚪'}</span>
-                <span className="detail-shell-tab-label">{sh.cwd_short || sh.cwd}</span>
-                <span className="detail-shell-tab-close"
-                      onClick={e => { e.stopPropagation(); closeShellTab(sh.shell_id) }}
-                      title="Close this shell">×</span>
-              </button>
-            ))}
-            <button className="detail-shell-add-btn"
-                    disabled={shellBusy}
-                    onClick={() => openShellForCwd(session?.cwd)}
-                    title={`Open shell in ${session?.cwd || '~'}`}>
-              + New shell
-            </button>
-          </div>
+          {/* Shell tabs strip — only shells in the same folder */}
+          {(() => {
+            const sessionCwd = session?.cwd || ''
+            const sameFolder = shells.filter(sh =>
+              !sessionCwd || sh.cwd === sessionCwd ||
+              sh.cwd.startsWith(sessionCwd + '/') ||
+              sessionCwd.startsWith(sh.cwd + '/')
+            )
+            const folderName = sessionCwd.replace(/.*\//, '') || sessionCwd
+            return (
+              <div className="detail-shell-strip">
+                {sameFolder.map(sh => {
+                  const label = sh.cwd.replace(/.*\//, '') || sh.cwd
+                  return (
+                    <button
+                      key={sh.shell_id}
+                      className={`detail-shell-tab${activeShellId === sh.shell_id ? ' active' : ''}${!sh.alive ? ' dead' : ''}`}
+                      onClick={() => setActiveShellId(activeShellId === sh.shell_id ? null : sh.shell_id)}
+                      title={sh.cwd}>
+                      <span className="detail-shell-tab-dot">{sh.alive ? '🟢' : '⚪'}</span>
+                      <span className="detail-shell-tab-label">{label}</span>
+                      <span className="detail-shell-tab-close"
+                            onClick={e => { e.stopPropagation(); closeShellTab(sh.shell_id) }}
+                            title="Close this shell">×</span>
+                    </button>
+                  )
+                })}
+                <button className="detail-shell-add-btn"
+                        disabled={shellBusy}
+                        onClick={() => openShellForCwd(sessionCwd)}
+                        title={`New shell in ${folderName || '~'}`}>
+                  + New
+                </button>
+              </div>
+            )
+          })()}
           {/* Shell pane content */}
           {!activeShellId ? (
             <div className="detail-shell-empty">
@@ -2044,7 +2079,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       )}
       <div className="detail-footer">
       <div className="composer">
-        {canSend ? (
+        {canSend && effectiveView !== 'shell' ? (
           <>
             {chipsOpen && (
               <div className="composer-commands-wrap">
@@ -2200,36 +2235,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                       }}>
                 + Queue
               </button>
-              {/* New session here — managed session is busy, start parallel work in same folder */}
-              {canSend && isWorking && onNewSession && (
-                <button type="button" className="detail-cli-new-session-btn"
-                        title={`Start a new session in ${session.cwd || 'same folder'} while this one runs`}
-                        onClick={() => onNewSession(session.cwd)}>
-                  + New here
-                </button>
-              )}
             </form>
             <TaskStack sessionId={session.id} stack={stack} setStack={setStack} canSend={canSend} />
-            {/* Slash command queue — send text/commands after current turn ends */}
+            {/* Slash command queue — items display only, input removed */}
             <div className="slash-queue">
-              <form className="slash-queue-form" onSubmit={e => {
-                e.preventDefault()
-                const text = slashDraft.trim()
-                if (!text) return
-                api.pushSlashQueue(session.id, text)
-                  .then(d => { if (d.ok) { setSlashQueue(d.queue); setSlashDraft('') } })
-                  .catch(() => {})
-              }}>
-                <input
-                  className="slash-queue-input"
-                  placeholder="Queue a slash command e.g. /compact"
-                  value={slashDraft}
-                  onChange={e => setSlashDraft(e.target.value)}
-                />
-                <button className="slash-queue-add" type="submit" disabled={!slashDraft.trim()}>
-                  + After turn
-                </button>
-              </form>
               {slashQueue.length > 0 && (
                 <ul className="slash-queue-list">
                   {slashQueue.map((item, i) => (
