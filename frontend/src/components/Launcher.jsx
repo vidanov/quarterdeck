@@ -478,9 +478,9 @@ function AttentionBar({ sessions, selectedId, onPick }) {
   )
 }
 
-function NewSessionLauncher({ options, onDispatch, onCancel }) {
+function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
   const [task, setTask] = useState('')
-  const [cwd, setCwd] = useState('')
+  const [cwd, setCwd] = useState(initialCwd || '')
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
   // Remembered across launches: picking an agent is a deliberate choice, and

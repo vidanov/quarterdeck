@@ -309,6 +309,7 @@ export default function App() {
   const [focusMode, setFocusMode] = useState(false)
   const toggleFocus = () => setFocusMode(v => !v)
   const [launcherOpen, setLauncherOpen] = useState(false)
+  const [launcherCwd, setLauncherCwd] = useState('')
   const [wallFocused, setWallFocused] = useState(null)
   const [wallInput, setWallInput] = useState('')
   const [wallOutput, setWallOutput] = useState('')
@@ -1405,7 +1406,7 @@ export default function App() {
                   its options unfolded — showing both left two "what should the
                   agent do" fields on screen, only one of which was listening. */}
               {launcherOpen ? (
-                <NewSessionLauncher options={options} onDispatch={handleDispatch} onCancel={() => setLauncherOpen(false)} />
+                <NewSessionLauncher options={options} onDispatch={handleDispatch} initialCwd={launcherCwd} onCancel={() => { setLauncherOpen(false); setLauncherCwd('') }} />
               ) : (
                 <QuickCreate onDispatch={handleDispatch} suggestion={cwdSuggestion} sessions={sessions} />
               )}
@@ -1788,7 +1789,7 @@ export default function App() {
         {selected && <DetailPanel session={sessions.find(s => s.id === selected.id) || selected} onClose={() => { 
           if (returnView) { changeSessionViewMode(returnView); setReturnView(null) }
           selectSession(null); setFocusMode(false)
-        }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActive} onNewSession={() => { if (expanded) setExpanded(false); setLauncherOpen(true) }} fromWall={returnView === 'wall'} />}
+        }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActive} onNewSession={(cwd) => { if (expanded) setExpanded(false); setLauncherOpen(true); if (cwd) setLauncherCwd(cwd) }} fromWall={returnView === 'wall'} />}
         {/* Wall / ambient view overlay — big tiles, interactive, full screen */}
         {sessionViewMode === 'wall' && (() => {
           const wallSendInput = () => {

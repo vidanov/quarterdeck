@@ -4748,6 +4748,61 @@ def kiro_logout():
         return {"error": str(e)}
 
 
+# --- CLI binding ---
+#
+# Connects external kiro-cli tmux panes to Quarterdeck sessions so the user
+# can send chat from the detail panel and see the CLI's idle/busy state.
+
+from . import cli_bindings as _cli
+
+
+@app.get("/api/cli/list")
+def cli_list():
+    """Discover all kiro-cli panes visible in tmux, with their status."""
+    return {"instances": _cli.discover_cli_instances()}
+
+
+@app.get("/api/cli/status/{session_id}")
+def cli_status(session_id: str):
+    """Return the binding + live status for a session's bound CLI pane."""
+    return _cli.get_status(session_id)
+
+
+@app.post("/api/cli/bind")
+def cli_bind(payload: dict):
+    """Bind a Quarterdeck session to a CLI tmux pane.
+
+    Body: { "session_id": "...", "tmux_session": "..." }
+    """
+    session_id = payload.get("session_id", "")
+    tmux_session = payload.get("tmux_session", "")
+    if not session_id or not tmux_session:
+        return {"ok": False, "error": "session_id and tmux_session required"}
+    return _cli.bind(session_id, tmux_session)
+
+
+@app.delete("/api/cli/bind/{session_id}")
+def cli_unbind(session_id: str):
+    """Remove the CLI binding for a session."""
+    return _cli.unbind(session_id)
+
+
+@app.post("/api/cli/send")
+def cli_send(payload: dict):
+    """Send text to the CLI pane bound to a session.
+
+    Body: { "session_id": "...", "text": "..." }
+
+    Returns ok=False with busy=True when the CLI is running a task, so the
+    frontend can offer "New session here" instead.
+    """
+    session_id = payload.get("session_id", "")
+    text = payload.get("text", "")
+    if not session_id:
+        return {"ok": False, "error": "session_id required"}
+    return _cli.send(session_id, text)
+
+
 # --- Concierge assistant ---
 
 @app.post("/api/assist")
