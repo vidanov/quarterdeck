@@ -2163,7 +2163,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         // Fire-and-forget — 150ms poll picks up result
                         shellsApi.shellRawKey(activeShellId, key).catch(() => {})
                       }}
-                      }}
                       onBlur={() => {
                         setTimeout(() => {
                           if (shellRawMode && shellRawRef.current) shellRawRef.current.focus()
