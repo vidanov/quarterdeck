@@ -4,6 +4,7 @@ import { errorOf } from '../api/client'
 import * as api from '../api/sessions'
 import * as settingsApi from '../api/settings'
 import * as cliApi from '../api/cli'
+import * as shellsApi from '../api/shells'
 import { usePasteAttachments } from '../hooks/usePasteAttachments'
 import { PasteAttachments } from './PasteAttachments'
 import { DocCard } from './DocCard'
@@ -499,28 +500,33 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     ? (viewOverride === 'live' && !canLive ? 'transcript' : viewOverride)
     : (canLive && isWorking ? 'live' : 'transcript')
 
-  // --- Shell pane state (deck-shell singleton, surfaced as a tab) ---
-  const [shellSt, setShellSt] = useState(null)
+  // --- Multi-shell state (per-folder named sessions) ---
+  const [activeShellId, setActiveShellId] = useState(null) // which shell tab is open
+  const [shells, setShells] = useState([])          // list of known shells for this cwd
   const [shellPane, setShellPane] = useState('')
+  const [shellSt, setShellSt] = useState(null)
   const [shellCmd, setShellCmd] = useState('')
   const [shellBusy, setShellBusy] = useState(false)
   const shellPaneRef = useRef(null)
   const shellMetricRef = useRef(null)
   const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
 
-  // Poll shell status when the shell tab is active
+  // Refresh shell list when session changes
   useEffect(() => {
-    if (effectiveView !== 'shell') return
+    shellsApi.listShells().then(d => setShells(d.shells || [])).catch(() => {})
+  }, [session?.id])
+
+  // Poll active shell pane
+  useEffect(() => {
+    if (!activeShellId) return
     let active = true
-    const poll = () => settingsApi.getShellPane().then(d => {
-      if (!active) return
-      setShellSt(d)
-      setShellPane(d.pane || '')
-    }).catch(() => {})
+    const poll = () => shellsApi.getShellPane(activeShellId)
+      .then(d => { if (!active) return; setShellSt(d); setShellPane(d.pane || '') })
+      .catch(() => {})
     poll()
     const iv = setInterval(poll, 1200)
     return () => { active = false; clearInterval(iv) }
-  }, [effectiveView])
+  }, [activeShellId])
 
   // Auto-scroll shell pane
   useEffect(() => {
@@ -530,7 +536,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   // Resize shell tmux window to match rendered box
   useEffect(() => {
-    if (effectiveView !== 'shell' || !shellSt?.alive) return
+    if (!activeShellId || !shellSt?.alive) return
     const box = shellPaneRef.current, probe = shellMetricRef.current
     if (!box || !probe) return
     let timer
@@ -545,25 +551,66 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       const sent = shellSentSizeRef.current
       if (sent.cols === cols && sent.rows === rows) return
       shellSentSizeRef.current = { cols, rows }
-      settingsApi.resizeShell(cols, rows).catch(() => { shellSentSizeRef.current = { cols: 0, rows: 0 } })
+      shellsApi.shellResize(activeShellId, cols, rows)
+        .catch(() => { shellSentSizeRef.current = { cols: 0, rows: 0 } })
     }
     const observer = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(measure, 120) })
     observer.observe(box)
     measure()
     return () => { clearTimeout(timer); observer.disconnect() }
-  }, [effectiveView, shellSt?.alive])
+  }, [activeShellId, shellSt?.alive])
+
+  const openShellForCwd = (cwd) => {
+    setShellBusy(true)
+    shellsApi.openShell(cwd || session?.cwd || '~')
+      .then(d => {
+        if (d.ok) {
+          setActiveShellId(d.shell_id)
+          setShellSt(d)
+          setShellPane('')
+          shellsApi.listShells().then(r => setShells(r.shells || [])).catch(() => {})
+        } else {
+          notify(d.error || 'Failed to open shell', 'error')
+        }
+      })
+      .catch(() => notify('Shell open failed', 'error'))
+      .finally(() => setShellBusy(false))
+  }
+
+  const closeShellTab = (shellId) => {
+    shellsApi.closeShell(shellId).then(() => {
+      shellsApi.listShells().then(d => {
+        const remaining = d.shells || []
+        setShells(remaining)
+        if (activeShellId === shellId) {
+          setActiveShellId(remaining.length > 0 ? remaining[remaining.length - 1].shell_id : null)
+        }
+      }).catch(() => {})
+    }).catch(() => {})
+  }
 
   const shellAct = (path, body) => {
+    if (!activeShellId) return
     setShellBusy(true)
-    return settingsApi.shellAction(path, body)
-      .then(d => { settingsApi.getShellPane().then(r => { setShellSt(r); setShellPane(r.pane || '') }).catch(() => {}); return d })
+    const fn = path === 'input'
+      ? shellsApi.shellInput(activeShellId, body.text)
+      : path === 'key'
+        ? shellsApi.shellKey(activeShellId, body.key)
+        : path === 'close'
+          ? shellsApi.closeShell(activeShellId)
+          : Promise.resolve({})
+    fn.then(() => shellsApi.getShellPane(activeShellId)
+        .then(d => { setShellSt(d); setShellPane(d.pane || '') }).catch(() => {}))
       .catch(() => {})
       .finally(() => setShellBusy(false))
   }
+
   const shellSend = (text) => {
-    if (!text.trim()) return
+    if (!text.trim() || !activeShellId) return
     setShellCmd('')
-    shellAct('input', { text })
+    setShellBusy(true)
+    shellsApi.shellInput(activeShellId, text)
+      .finally(() => setShellBusy(false))
   }
 
   // Reset transcript when the session changes so stale messages never bleed across
@@ -1636,7 +1683,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)} title="Follow session state">auto</button>
                 <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')} title="Always show live pane">live</button>
                 <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')} title="Always show transcript">transcript</button>
-                <button className={`detail-pin-btn ${viewOverride === 'shell' ? 'active' : ''}`} onClick={() => setViewOverride('shell')} title="Open terminal shell — run commands alongside this session">shell</button>
               </div>
             )}
             {session.context_pct != null && session.context_pct !== '' && (
@@ -1660,7 +1706,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)}>auto</button>
               <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')}>live</button>
               <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')}>transcript</button>
-              <button className={`detail-pin-btn ${viewOverride === 'shell' ? 'active' : ''}`} onClick={() => setViewOverride('shell')} title="Open terminal shell">shell</button>
             </div>
           )}
           {session.context_pct != null && session.context_pct !== '' && (
@@ -1681,45 +1726,65 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           )}
         </div>
       )}
-      {effectiveView === 'shell' && (
+      {/* Shell strip — separate from kiro view tabs, per-folder tabs + add button */}
+      {canSend && (
+        <div className="detail-shell-strip">
+          {shells.map(sh => (
+            <button
+              key={sh.shell_id}
+              className={`detail-shell-tab${activeShellId === sh.shell_id ? ' active' : ''}${!sh.alive ? ' dead' : ''}`}
+              onClick={() => setActiveShellId(activeShellId === sh.shell_id ? null : sh.shell_id)}
+              title={sh.cwd}>
+              <span className="detail-shell-tab-dot">{sh.alive ? '🟢' : '⚪'}</span>
+              <span className="detail-shell-tab-label">{sh.cwd_short || sh.cwd}</span>
+              <span className="detail-shell-tab-close"
+                    onClick={e => { e.stopPropagation(); closeShellTab(sh.shell_id) }}
+                    title="Close this shell">×</span>
+            </button>
+          ))}
+          <button className="detail-shell-add-btn"
+                  disabled={shellBusy}
+                  onClick={() => openShellForCwd(session?.cwd)}
+                  title={`Open shell in ${session?.cwd || '~'}`}>
+            + Shell
+          </button>
+        </div>
+      )}
+      {/* Active shell pane */}
+      {activeShellId && (
         <div className="detail-shell-view">
-          {/* Off-screen ruler for column measurement */}
           <pre className="live-metric" ref={shellMetricRef} aria-hidden="true">{'M'.repeat(CELL_SAMPLE)}</pre>
           {!shellSt?.alive && (
             <div className="detail-shell-open-row">
-              <span className="detail-shell-hint">
-                {shellSt?.exists ? '⚠ Shell exited.' : 'No shell running.'}
-              </span>
+              <span className="detail-shell-hint">{shellSt?.exists ? '⚠ Shell exited.' : 'Shell not found.'}</span>
               <button className="detail-shell-open-btn" disabled={shellBusy}
-                      onClick={() => shellAct('open', { cwd: session.cwd || '~' })}>
-                {shellSt?.exists ? 'Restart shell' : 'Open shell'}
-                {session.cwd ? ` in ${session.cwd.replace(/.*\//, '')}` : ''}
+                      onClick={() => openShellForCwd(session?.cwd)}>
+                Restart
               </button>
             </div>
           )}
           {(shellSt?.alive || shellPane) && (
-            <pre className="shell-pane detail-shell-pane" ref={shellPaneRef}>
-              {shellPane || '…'}
-            </pre>
+            <pre className="shell-pane detail-shell-pane" ref={shellPaneRef}>{shellPane || '…'}</pre>
           )}
           {shellSt?.alive && (
             <div className="detail-shell-input-row">
               <div className="detail-shell-keys">
                 {[['Tab','Tab'],['Up','↑'],['Down','↓'],['C-c','^C'],['C-d','^D'],['C-l','^L']].map(([key, label]) => (
                   <button key={key} className="composer-chip composer-key" disabled={shellBusy}
-                          onClick={() => shellAct('key', { key })}>{label}</button>
+                          onClick={() => shellsApi.shellKey(activeShellId, key)
+                            .then(() => shellsApi.getShellPane(activeShellId)
+                              .then(d => { setShellSt(d); setShellPane(d.pane || '') }))}>
+                    {label}
+                  </button>
                 ))}
               </div>
-              <form className="detail-shell-form" onSubmit={e => { e.preventDefault(); shellSend(shellCmd) }}>
+              <form className="detail-shell-form"
+                    onSubmit={e => { e.preventDefault(); shellSend(shellCmd) }}>
                 <input className="detail-shell-cmd" value={shellCmd} spellCheck={false}
                        autoCapitalize="off" autoCorrect="off"
                        placeholder="Type a shell command…"
                        onChange={e => setShellCmd(e.target.value)} />
                 <button className="dispatch-btn" type="submit" disabled={shellBusy || !shellCmd.trim()}>↩</button>
-                <button type="button" className="detail-cli-new-session-btn"
-                        title="Close this shell"
-                        disabled={shellBusy}
-                        onClick={() => shellAct('close')}>✕ Close</button>
               </form>
             </div>
           )}
@@ -1968,7 +2033,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           happen in one place. */}
       <div className="detail-footer">
       <div className="composer">
-        {canSend && effectiveView !== 'shell' ? (
+        {canSend ? (
           <>
             {chipsOpen && (
               <div className="composer-commands-wrap">
