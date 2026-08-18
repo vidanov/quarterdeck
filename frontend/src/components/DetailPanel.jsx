@@ -511,9 +511,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const shellMetricRef = useRef(null)
   const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
 
-  // Refresh shell list when session changes
-  useEffect(() => {
-    // Reset shell selection when session changes, then re-match to new cwd
+  // Refresh shell list when session changes — useLayoutEffect for instant clear before paint
+  useLayoutEffect(() => {
     setActiveShellId(null)
     setShellPane('')
     setShellSt(null)
@@ -633,8 +632,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       .finally(() => setShellBusy(false))
   }
 
-  // Reset transcript when the session changes so stale messages never bleed across
-  useEffect(() => {
+  // Reset transcript when the session changes so stale messages never bleed across.
+  // useLayoutEffect runs before paint — prevents one render frame of old content showing.
+  useLayoutEffect(() => {
     // Seed from cache for instant display; fall back to null (loading state)
     const cached = session?.id ? (transcriptCache.current[session.id] || null) : null
     setMessages(cached)
