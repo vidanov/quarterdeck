@@ -507,6 +507,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [shellSt, setShellSt] = useState(null)
   const [shellCmd, setShellCmd] = useState('')
   const [shellBusy, setShellBusy] = useState(false)
+  const [shellRawMode, setShellRawMode] = useState(false)
+  const shellRawRef = useRef(null)
   const shellPaneRef = useRef(null)
   const shellMetricRef = useRef(null)
   const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
@@ -631,6 +633,54 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     shellsApi.shellInput(activeShellId, text)
       .finally(() => setShellBusy(false))
   }
+
+  // Translate a browser KeyboardEvent to a tmux send-keys string.
+  // Returns null for keys we want to let the browser handle (F5, browser shortcuts).
+  const keyEventToTmux = (e) => {
+    const c = e.ctrlKey, a = e.altKey, s = e.shiftKey, k = e.key
+    // Ctrl combos
+    if (c && !a) {
+      const map = {
+        'a':'C-a','b':'C-b','c':'C-c','d':'C-d','e':'C-e','f':'C-f',
+        'g':'C-g','h':'C-h','i':'C-i','j':'C-j','k':'C-k','l':'C-l',
+        'm':'C-m','n':'C-n','o':'C-o','p':'C-p','q':'C-q','r':'C-r',
+        's':'C-s','t':'C-t','u':'C-u','v':'C-v','w':'C-w','x':'C-x',
+        'y':'C-y','z':'C-z',
+        '[':'Escape','\\':'C-\\',']':'C-]',
+      }
+      if (map[k.toLowerCase()]) return map[k.toLowerCase()]
+    }
+    // Alt/Meta combos — tmux uses M- prefix
+    if (a && !c) {
+      if (k.length === 1) return `M-${k}`
+      const amap = { 'ArrowLeft':'M-Left','ArrowRight':'M-Right','ArrowUp':'M-Up','ArrowDown':'M-Down','Backspace':'M-BSpace' }
+      if (amap[k]) return amap[k]
+    }
+    // Special keys
+    const specials = {
+      'Enter':'Enter','Escape':'Escape','Tab': s ? 'BTab' : 'Tab',
+      'Backspace':'BSpace','Delete':'DC','Insert':'IC',
+      'ArrowUp':'Up','ArrowDown':'Down','ArrowLeft':'Left','ArrowRight':'Right',
+      'Home':'Home','End':'End','PageUp':'PageUp','PageDown':'PageDown',
+      'F1':'F1','F2':'F2','F3':'F3','F4':'F4','F5':'F5',
+      'F6':'F6','F7':'F7','F8':'F8','F9':'F9','F10':'F10',
+      'F11':'F11','F12':'F12',
+    }
+    if (specials[k]) return specials[k]
+    // Printable single chars
+    if (k.length === 1 && !c) return k
+    return null
+  }
+
+  // When raw mode is active, focus the capture div and relay all keys to tmux
+  useEffect(() => {
+    if (shellRawMode && shellRawRef.current) shellRawRef.current.focus()
+  }, [shellRawMode])
+
+  // Turn off raw mode when switching sessions or leaving shell view
+  useEffect(() => {
+    setShellRawMode(false)
+  }, [session?.id, viewOverride])
 
   // Reset transcript when the session changes so stale messages never bleed across.
   // useLayoutEffect runs before paint — prevents one render frame of old content showing.
@@ -2071,24 +2121,62 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               )}
               {shellSt?.alive && (
                 <div className="detail-shell-input-row">
-                  <div className="detail-shell-keys">
-                    {[['Tab','Tab'],['Up','↑'],['Down','↓'],['C-c','^C'],['C-d','^D'],['C-l','^L']].map(([key, label]) => (
-                      <button key={key} className="composer-chip composer-key" disabled={shellBusy}
-                              onClick={() => shellsApi.shellKey(activeShellId, key)
-                                .then(() => shellsApi.getShellPane(activeShellId)
-                                  .then(d => { setShellSt(d); setShellPane(d.pane || '') }))}>
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  <form className="detail-shell-form"
-                        onSubmit={e => { e.preventDefault(); shellSend(shellCmd) }}>
-                    <input className="detail-shell-cmd" value={shellCmd} spellCheck={false}
-                           autoCapitalize="off" autoCorrect="off"
-                           placeholder="Type a shell command…"
-                           onChange={e => setShellCmd(e.target.value)} />
-                    <button className="dispatch-btn" type="submit" disabled={shellBusy || !shellCmd.trim()}>↩</button>
-                  </form>
+                  {shellRawMode ? (
+                    /* Raw terminal mode — capture overlay grabs all keystrokes */
+                    <div className="detail-shell-raw-wrap">
+                      <div
+                        ref={shellRawRef}
+                        className="detail-shell-raw-capture"
+                        tabIndex={0}
+                        onKeyDown={e => {
+                          const key = keyEventToTmux(e)
+                          if (!key) return
+                          e.preventDefault()
+                          e.stopPropagation()
+                          shellsApi.shellRawKey(activeShellId, key)
+                            .then(() => shellsApi.getShellPane(activeShellId)
+                              .then(d => { setShellSt(d); setShellPane(d.pane || '') }))
+                        }}
+                        onBlur={() => {
+                          // Re-focus if still in raw mode (click on pane area)
+                          setTimeout(() => {
+                            if (shellRawMode && shellRawRef.current) shellRawRef.current.focus()
+                          }, 50)
+                        }}
+                      >
+                        <span className="detail-shell-raw-hint">⌨ Raw — type freely · Esc twice to exit</span>
+                      </div>
+                      <button className="detail-shell-raw-exit"
+                              onClick={() => setShellRawMode(false)}
+                              title="Exit raw mode">✕ Exit raw</button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="detail-shell-keys">
+                        {[['Tab','Tab'],['Up','↑'],['Down','↓'],['C-c','^C'],['C-d','^D'],['C-l','^L']].map(([key, label]) => (
+                          <button key={key} className="composer-chip composer-key" disabled={shellBusy}
+                                  onClick={() => shellsApi.shellKey(activeShellId, key)
+                                    .then(() => shellsApi.getShellPane(activeShellId)
+                                      .then(d => { setShellSt(d); setShellPane(d.pane || '') }))}>
+                            {label}
+                          </button>
+                        ))}
+                        <button className="composer-chip composer-key detail-shell-raw-btn"
+                                title="Raw terminal mode — all keyboard shortcuts work"
+                                onClick={() => setShellRawMode(true)}>
+                          ⌨ Raw
+                        </button>
+                      </div>
+                      <form className="detail-shell-form"
+                            onSubmit={e => { e.preventDefault(); shellSend(shellCmd) }}>
+                        <input className="detail-shell-cmd" value={shellCmd} spellCheck={false}
+                               autoCapitalize="off" autoCorrect="off"
+                               placeholder="Type a shell command…"
+                               onChange={e => setShellCmd(e.target.value)} />
+                        <button className="dispatch-btn" type="submit" disabled={shellBusy || !shellCmd.trim()}>↩</button>
+                      </form>
+                    </>
+                  )}
                 </div>
               )}
             </div>

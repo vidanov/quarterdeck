@@ -8,6 +8,8 @@ export const shellInput = (shellId, text) =>
   postJSON(`/api/shells/${shellId}/input`, { text })
 export const shellKey = (shellId, key) =>
   postJSON(`/api/shells/${shellId}/key`, { key })
+export const shellRawKey = (shellId, key) =>
+  postJSON(`/api/shells/${shellId}/key`, { key, raw: true })
 export const shellResize = (shellId, cols, rows) =>
   postJSON(`/api/shells/${shellId}/resize`, { cols, rows })
 export const closeShell = (shellId) => del(`/api/shells/${shellId}`)

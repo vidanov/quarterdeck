@@ -2155,6 +2155,44 @@ body.resizing .detail-resize::after { background: var(--accent); }
   background: var(--surface);
   flex-shrink: 0;
 }
+/* Raw terminal mode */
+.detail-shell-raw-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.detail-shell-raw-capture {
+  flex: 1;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid #3a6;
+  background: rgba(51,170,100,0.07);
+  color: #3a6;
+  font-size: 11px;
+  cursor: text;
+  outline: none;
+  user-select: none;
+}
+.detail-shell-raw-capture:focus {
+  border-color: #4db37a;
+  box-shadow: 0 0 0 2px rgba(51,170,100,0.2);
+}
+.detail-shell-raw-hint { pointer-events: none; }
+.detail-shell-raw-exit {
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.detail-shell-raw-exit:hover { border-color: var(--red); color: var(--red); }
+.detail-shell-raw-btn { opacity: 0.75; }
+.detail-shell-raw-btn:hover { opacity: 1; }
 .detail-shell-keys { display: flex; gap: 4px; flex-wrap: wrap; }
 .detail-shell-form { display: flex; gap: 5px; align-items: center; }
 .detail-shell-cmd {
