@@ -1538,6 +1538,13 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     ＋ New session
                   </button>
                 )}
+                {onNewSession && session?.cwd && (
+                  <button className="detail-overflow-item"
+                          title={`Start a fresh session in ${session.cwd}`}
+                          onClick={() => onNewSession(session.cwd)}>
+                    ↺ Restart here
+                  </button>
+                )}
                 {onToggleFocus && !expanded && (
                   <button className="detail-overflow-item" onClick={onToggleFocus}>
                     {focusMode ? '◧ Exit focus' : '▣ Focus mode'}
