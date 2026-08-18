@@ -2008,8 +2008,13 @@ body.resizing .detail-resize::after { background: var(--accent); }
   justify-content: center;
 }
 /* shell tab button distinct from kiro view tabs */
-.detail-pin-btn-shell { border-left: 1px solid var(--border); margin-left: 4px; }
-.detail-pin-btn-shell.active { color: #3a6; border-color: #3a6; }
+.detail-pin-btn-shell {
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border) !important;
+  color: var(--text-dim);
+}
+.detail-pin-btn-shell.active { color: #3a6; }
 /* ---- Shell strip — per-folder tabs ---- */
 .detail-shell-strip {
   display: flex;
