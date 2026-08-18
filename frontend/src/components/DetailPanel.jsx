@@ -1726,8 +1726,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           )}
         </div>
       )}
-      {/* Shell strip — separate from kiro view tabs, per-folder tabs + add button */}
-      {canSend && (
+      {/* Shell strip — visible for all sessions, independent of kiro control state */}
+      {session && (
         <div className="detail-shell-strip">
           {shells.map(sh => (
             <button
