@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { errorOf } from '../api/client'
 import * as api from '../api/sessions'
 import * as settingsApi from '../api/settings'
+import * as cliApi from '../api/cli'
 import { usePasteAttachments } from '../hooks/usePasteAttachments'
 import { PasteAttachments } from './PasteAttachments'
 import { DocCard } from './DocCard'
@@ -357,6 +358,58 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   }, [chipPreview?.url])
   const dismissedScreenshots = useRef(new Set()) // names dismissed this session
   const [autoAdvance, setAutoAdvance] = useState(false)
+
+  // --- CLI binding state ---
+  const [cliStatus, setCliStatus] = useState(null) // null | {bound, tmux_session, cwd, status}
+  const [cliBindOpen, setCliBindOpen] = useState(false) // show bind picker
+  const [cliInstances, setCliInstances] = useState([]) // available CLI panes
+  const [cliSendMode, setCliSendMode] = useState(false) // send to CLI instead of session
+
+  // Poll CLI status when a session is open
+  useEffect(() => {
+    if (!session?.id) return
+    let active = true
+    const poll = () => {
+      cliApi.getCLIStatus(session.id)
+        .then(d => { if (active) setCliStatus(d) })
+        .catch(() => {})
+    }
+    poll()
+    const iv = setInterval(poll, 5000)
+    return () => { active = false; clearInterval(iv) }
+  }, [session?.id])
+
+  const openCliBinder = () => {
+    cliApi.listCLI()
+      .then(d => { setCliInstances(d.instances || []); setCliBindOpen(true) })
+      .catch(() => {})
+  }
+  const bindCli = (tmuxSession) => {
+    cliApi.bindCLI(session.id, tmuxSession)
+      .then(d => {
+        if (d.ok) { setCliBindOpen(false); cliApi.getCLIStatus(session.id).then(setCliStatus) }
+        else notify(d.error || 'Bind failed', 'error')
+      })
+  }
+  const unbindCli = () => {
+    cliApi.unbindCLI(session.id)
+      .then(() => { setCliStatus({ bound: false, status: 'unbound' }); setCliSendMode(false) })
+  }
+  const sendToCli = (text) => {
+    cliApi.sendToCLI(session.id, text)
+      .then(d => {
+        if (d.ok) {
+          notify('Sent to CLI', 'info')
+          setDraft('')
+          setHistory(prev => { const h = [text, ...prev.filter(x => x !== text)].slice(0, HISTORY_LIMIT); writeHistory(session.id, h); return h })
+          setHistoryIndex(-1)
+        } else if (d.busy) {
+          notify('CLI is busy — use "New session here" to start a parallel session', 'warn')
+        } else {
+          notify(d.error || 'Send failed', 'error')
+        }
+      })
+  }
   // Chips bar: auto-open when session is active, collapsible when idle
   const [chipsOpen, setChipsOpen] = useState(() => localStorage.getItem('detail-chips-open') === '1')
   // Restore from backend on mount — localStorage is wiped when WKWebView restarts
@@ -1077,6 +1130,11 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const submitDraft = (e) => {
     if (e) e.preventDefault()
     if (!draft.trim() && attachments.length === 0) return
+    // Route to CLI when in CLI send mode and a CLI is bound and idle
+    if (cliSendMode && cliStatus?.bound) {
+      sendToCli(draft)
+      return
+    }
     sendText(draft)
     // Newest first, deduped against the immediately preceding entry
     if (draft.trim()) {
@@ -1255,6 +1313,60 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   disabled={sideChatOpening}>
             {sideChatOpening ? '…' : '◎ Side'}
           </button>
+          {/* CLI binding chip — shows bound CLI status, click to bind/unbind */}
+          {(() => {
+            const st = cliStatus
+            if (!st) return null
+            const isBound = st.bound
+            const chipStatus = st.status // idle | thinking | awaiting-approval | unknown | dead | unbound
+            const dot = chipStatus === 'idle' ? '🟢' : chipStatus === 'thinking' ? '🟡' : chipStatus === 'awaiting-approval' ? '🔴' : isBound ? '⚪' : null
+            const label = chipStatus === 'idle' ? 'CLI idle' : chipStatus === 'thinking' ? 'CLI busy' : chipStatus === 'awaiting-approval' ? 'CLI waiting' : chipStatus === 'dead' ? 'CLI dead' : null
+            if (!isBound && !dot) {
+              // Show a subtle attach button
+              return (
+                <button className="detail-cli-chip detail-cli-unbound" onClick={openCliBinder}
+                        title="Attach a running kiro-cli to this session">
+                  + CLI
+                </button>
+              )
+            }
+            if (!isBound) return null
+            return (
+              <button className={`detail-cli-chip detail-cli-${chipStatus}`}
+                      onClick={openCliBinder}
+                      title={`Bound to ${st.tmux_session} (${st.cwd || '?'}) — click to change`}>
+                {dot} {label || chipStatus}
+              </button>
+            )
+          })()}
+          {/* CLI bind picker */}
+          {cliBindOpen && (
+            <div className="detail-cli-picker" onClick={() => setCliBindOpen(false)}>
+              <div className="detail-cli-picker-inner" onClick={e => e.stopPropagation()}>
+                <div className="detail-cli-picker-title">Attach a CLI pane</div>
+                {cliInstances.length === 0 && (
+                  <div className="detail-cli-picker-empty">No kiro-cli panes found in tmux.</div>
+                )}
+                {cliInstances.map(inst => (
+                  <div key={inst.tmux_session} className="detail-cli-picker-row"
+                       onClick={() => bindCli(inst.tmux_session)}>
+                    <span className={`detail-cli-status-dot detail-cli-dot-${inst.status}`}>
+                      {inst.status === 'idle' ? '🟢' : inst.status === 'thinking' ? '🟡' : '⚪'}
+                    </span>
+                    <span className="detail-cli-picker-name">{inst.tmux_session}</span>
+                    <span className="detail-cli-picker-cwd">{inst.cwd_short || inst.cwd}</span>
+                    <span className={`detail-cli-picker-status detail-cli-picker-status-${inst.status}`}>{inst.status}</span>
+                  </div>
+                ))}
+                {cliStatus?.bound && (
+                  <button className="detail-cli-picker-unbind" onClick={() => { setCliBindOpen(false); unbindCli() }}>
+                    Detach current
+                  </button>
+                )}
+                <button className="detail-cli-picker-cancel" onClick={() => setCliBindOpen(false)}>Cancel</button>
+              </div>
+            </div>
+          )}
           {/* Overflow: Hand off, new session, wall toggle */}
           <div className="detail-overflow-wrap">
             <button className="detail-icon detail-overflow-btn"
@@ -1847,8 +1959,28 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 placeholder="Reply to this session…  (Enter to send, Shift+Enter for a new line)"
               />
               <button className="dispatch-btn" type="submit" disabled={!draft.trim() || sending}>
-                {sending ? '…' : '↗ Send'}
+                {sending ? '…' : cliSendMode && cliStatus?.bound ? '↗ CLI' : '↗ Send'}
               </button>
+              {/* CLI send mode toggle — only shown when a CLI is bound */}
+              {cliStatus?.bound && cliStatus.status !== 'unbound' && (
+                <button
+                  type="button"
+                  className={`detail-cli-mode-btn${cliSendMode ? ' active' : ''}`}
+                  title={cliSendMode
+                    ? `Sending to CLI (${cliStatus.tmux_session}) — click to send to session instead`
+                    : `Click to send to CLI (${cliStatus.tmux_session}) instead of this session`}
+                  onClick={() => setCliSendMode(v => !v)}>
+                  {cliStatus.status === 'idle' ? '🟢' : cliStatus.status === 'thinking' ? '🟡' : '⚪'} CLI
+                </button>
+              )}
+              {/* New session here — when bound CLI is busy */}
+              {cliStatus?.bound && (cliStatus.status === 'thinking' || cliStatus.status === 'awaiting-approval') && onNewSession && (
+                <button type="button" className="detail-cli-new-session-btn"
+                        title={`CLI is busy — start a new session in ${cliStatus.cwd || 'same folder'}`}
+                        onClick={() => onNewSession(cliStatus.cwd)}>
+                  + New here
+                </button>
+              )}
               <button className="queue-btn" type="button"
                       title="Add to task queue instead of sending now"
                       disabled={!draft.trim()}
