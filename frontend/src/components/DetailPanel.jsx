@@ -513,15 +513,16 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   // Refresh shell list when session changes
   useEffect(() => {
+    // Reset shell selection when session changes, then re-match to new cwd
+    setActiveShellId(null)
+    setShellPane('')
+    setShellSt(null)
     shellsApi.listShells().then(d => {
       const all = d.shells || []
       setShells(all)
-      // Auto-select a shell matching this session's cwd if one exists
-      if (!activeShellId) {
-        const cwd = session?.cwd || ''
-        const match = all.find(sh => sh.cwd === cwd || sh.cwd.startsWith(cwd + '/') || cwd.startsWith(sh.cwd + '/'))
-        if (match) setActiveShellId(match.shell_id)
-      }
+      const cwd = session?.cwd || ''
+      const match = all.find(sh => sh.cwd === cwd || sh.cwd.startsWith(cwd + '/') || cwd.startsWith(sh.cwd + '/'))
+      if (match) setActiveShellId(match.shell_id)
     }).catch(() => {})
   }, [session?.id])
 
