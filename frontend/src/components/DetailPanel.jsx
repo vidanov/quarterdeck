@@ -380,9 +380,25 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   }, [session?.id])
 
   const openCliBinder = () => {
-    cliApi.listCLI()
-      .then(d => { setCliInstances(d.instances || []); setCliBindOpen(true) })
-      .catch(() => {})
+    // Auto-bind to this session's own CLI pane (kiro-{uuid}) if it exists.
+    // Only fall back to the picker when that pane isn't in tmux.
+    const naturalTmux = `kiro-${session.id}`
+    cliApi.bindCLI(session.id, naturalTmux)
+      .then(d => {
+        if (d.ok) {
+          cliApi.getCLIStatus(session.id).then(setCliStatus)
+        } else {
+          // Natural pane not found — open the full picker as fallback
+          cliApi.listCLI()
+            .then(r => { setCliInstances(r.instances || []); setCliBindOpen(true) })
+            .catch(() => {})
+        }
+      })
+      .catch(() => {
+        cliApi.listCLI()
+          .then(r => { setCliInstances(r.instances || []); setCliBindOpen(true) })
+          .catch(() => {})
+      })
   }
   const bindCli = (tmuxSession) => {
     cliApi.bindCLI(session.id, tmuxSession)
@@ -1318,23 +1334,24 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             const st = cliStatus
             if (!st) return null
             const isBound = st.bound
-            const chipStatus = st.status // idle | thinking | awaiting-approval | unknown | dead | unbound
+            const chipStatus = st.status
+            const isNatural = st.tmux_session === `kiro-${session.id}`
             const dot = chipStatus === 'idle' ? '🟢' : chipStatus === 'thinking' ? '🟡' : chipStatus === 'awaiting-approval' ? '🔴' : isBound ? '⚪' : null
             const label = chipStatus === 'idle' ? 'CLI idle' : chipStatus === 'thinking' ? 'CLI busy' : chipStatus === 'awaiting-approval' ? 'CLI waiting' : chipStatus === 'dead' ? 'CLI dead' : null
-            if (!isBound && !dot) {
-              // Show a subtle attach button
+            if (!isBound) {
               return (
                 <button className="detail-cli-chip detail-cli-unbound" onClick={openCliBinder}
-                        title="Attach a running kiro-cli to this session">
+                        title="Connect to this session's CLI pane — send commands and track status">
                   + CLI
                 </button>
               )
             }
-            if (!isBound) return null
             return (
               <button className={`detail-cli-chip detail-cli-${chipStatus}`}
                       onClick={openCliBinder}
-                      title={`Bound to ${st.tmux_session} (${st.cwd || '?'}) — click to change`}>
+                      title={isNatural
+                        ? `CLI connected — click to switch to a different pane`
+                        : `Bound to ${st.tmux_session} — click to change`}>
                 {dot} {label || chipStatus}
               </button>
             )
