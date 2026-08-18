@@ -1992,7 +1992,13 @@ body.resizing .detail-resize::after { background: var(--accent); }
   cursor: pointer;
 }
 
-/* ---- Shell strip — per-folder tabs below the compact bar ---- */
+/* ── Shell section — distinct panel at bottom, above kiro composer ── */
+.detail-shell-section {
+  flex-shrink: 0;
+  border-top: 2px solid var(--border);
+  background: var(--panel-bg, #1a1a1a);
+}
+/* ---- Shell strip — per-folder tabs ---- */
 .detail-shell-strip {
   display: flex;
   align-items: center;
