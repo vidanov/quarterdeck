@@ -5068,7 +5068,7 @@ def shells_input(shell_id: str, payload: dict):
 
 @app.post("/api/shells/{shell_id}/key")
 def shells_key(shell_id: str, payload: dict):
-    return shell.send_key_named(shell_id, payload.get("key", ""))
+    return shell.send_key_named(shell_id, payload.get("key", ""), raw=bool(payload.get("raw", False)))
 
 
 @app.post("/api/shells/{shell_id}/resize")

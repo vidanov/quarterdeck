@@ -145,8 +145,14 @@ def send_text_named(shell_id: str, text: str, submit: bool = True) -> dict:
     return {"ok": True}
 
 
-def send_key_named(shell_id: str, key: str) -> dict:
-    if key not in ALLOWED_KEYS:
+def send_key_named(shell_id: str, key: str, raw: bool = False) -> dict:
+    """Send a named tmux key (e.g. 'C-c', 'Enter') to a named shell.
+
+    When raw=True the key string bypasses the ALLOWED_KEYS whitelist and is
+    passed directly to tmux send-keys — used by the frontend's raw terminal
+    mode where keydown events are translated to tmux key names.
+    """
+    if not raw and key not in ALLOWED_KEYS:
         return {"ok": False, "error": f"Key not allowed: {key}"}
     name = _tmux_name(shell_id)
     if not tmux.session_exists(name):
