@@ -2156,49 +2156,48 @@ body.resizing .detail-resize::after { background: var(--accent); }
   flex-shrink: 0;
 }
 /* Raw terminal mode */
+.detail-shell-pane-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.detail-shell-pane-wrap .live-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* Transparent overlay captures keystrokes when raw mode is active */
+.detail-shell-raw-overlay {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  cursor: text;
+  outline: none;
+  z-index: 2;
+}
+/* Blinking cursor appears at bottom-right of pane in raw mode */
+.detail-shell-pane-wrap.raw-active .live-pane::after {
+  content: '▋';
+  color: #3a6;
+  animation: shell-cursor-blink 1s step-end infinite;
+}
+@keyframes shell-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
 .detail-shell-raw-wrap {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
 }
-.detail-shell-raw-capture {
-  flex: 1;
-  padding: 5px 10px;
-  border-radius: 5px;
-  border: 1px solid #3a6;
-  background: rgba(51,170,100,0.07);
+.detail-shell-raw-hint {
   color: #3a6;
   font-size: 11px;
-  cursor: text;
-  outline: none;
-  user-select: none;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  flex: 1;
 }
-.detail-shell-raw-capture:focus {
-  border-color: #4db37a;
-  box-shadow: 0 0 0 2px rgba(51,170,100,0.2);
-}
-.detail-shell-raw-capture::after {
-  content: '';
-  display: inline-block;
-  width: 7px;
-  height: 13px;
-  background: #3a6;
-  border-radius: 1px;
-  animation: shell-cursor-blink 1s step-end infinite;
-  opacity: 0;
-}
-.detail-shell-raw-capture:focus::after {
-  opacity: 1;
-}
-@keyframes shell-cursor-blink {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0; }
-}
-.detail-shell-raw-hint { pointer-events: none; }
 .detail-shell-raw-exit {
   padding: 3px 8px;
   border-radius: 4px;
