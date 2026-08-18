@@ -1683,6 +1683,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)} title="Follow session state">auto</button>
                 <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')} title="Always show live pane">live</button>
                 <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')} title="Always show transcript">transcript</button>
+                <button className={`detail-pin-btn detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`} onClick={() => setViewOverride(v => v === 'shell' ? null : 'shell')} title="Terminal shell — run commands alongside this session">shell</button>
               </div>
             )}
             {session.context_pct != null && session.context_pct !== '' && (
@@ -1706,6 +1707,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)}>auto</button>
               <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')}>live</button>
               <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')}>transcript</button>
+              <button className={`detail-pin-btn detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`} onClick={() => setViewOverride(v => v === 'shell' ? null : 'shell')} title="Terminal shell">shell</button>
             </div>
           )}
           {session.context_pct != null && session.context_pct !== '' && (
@@ -1967,67 +1969,79 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       )}
       {/* Composer lives with the output it belongs to, so reading and replying
           happen in one place. */}
-      {/* ── Shell panel ── separate zone at bottom, above the kiro composer ── */}
-      <div className="detail-shell-section">
-        <div className="detail-shell-strip">
-          {shells.map(sh => (
-            <button
-              key={sh.shell_id}
-              className={`detail-shell-tab${activeShellId === sh.shell_id ? ' active' : ''}${!sh.alive ? ' dead' : ''}`}
-              onClick={() => setActiveShellId(activeShellId === sh.shell_id ? null : sh.shell_id)}
-              title={sh.cwd}>
-              <span className="detail-shell-tab-dot">{sh.alive ? '🟢' : '⚪'}</span>
-              <span className="detail-shell-tab-label">{sh.cwd_short || sh.cwd}</span>
-              <span className="detail-shell-tab-close"
-                    onClick={e => { e.stopPropagation(); closeShellTab(sh.shell_id) }}
-                    title="Close this shell">×</span>
+      {/* ── Shell view — full height, replaces transcript/live when active ── */}
+      {effectiveView === 'shell' && (
+        <div className="detail-shell-full">
+          {/* Shell tabs strip */}
+          <div className="detail-shell-strip">
+            {shells.map(sh => (
+              <button
+                key={sh.shell_id}
+                className={`detail-shell-tab${activeShellId === sh.shell_id ? ' active' : ''}${!sh.alive ? ' dead' : ''}`}
+                onClick={() => setActiveShellId(activeShellId === sh.shell_id ? null : sh.shell_id)}
+                title={sh.cwd}>
+                <span className="detail-shell-tab-dot">{sh.alive ? '🟢' : '⚪'}</span>
+                <span className="detail-shell-tab-label">{sh.cwd_short || sh.cwd}</span>
+                <span className="detail-shell-tab-close"
+                      onClick={e => { e.stopPropagation(); closeShellTab(sh.shell_id) }}
+                      title="Close this shell">×</span>
+              </button>
+            ))}
+            <button className="detail-shell-add-btn"
+                    disabled={shellBusy}
+                    onClick={() => openShellForCwd(session?.cwd)}
+                    title={`Open shell in ${session?.cwd || '~'}`}>
+              + New shell
             </button>
-          ))}
-          <button className="detail-shell-add-btn"
-                  disabled={shellBusy}
-                  onClick={() => openShellForCwd(session?.cwd)}
-                  title={`Open shell in ${session?.cwd || '~'}`}>
-            + Shell
-          </button>
-        </div>
-        {activeShellId && (
-          <div className="detail-shell-view">
-            <pre className="live-metric" ref={shellMetricRef} aria-hidden="true">{'M'.repeat(CELL_SAMPLE)}</pre>
-            {!shellSt?.alive && (
-              <div className="detail-shell-open-row">
-                <span className="detail-shell-hint">{shellSt?.exists ? '⚠ Shell exited.' : 'Shell not found.'}</span>
-                <button className="detail-shell-open-btn" disabled={shellBusy}
-                        onClick={() => openShellForCwd(session?.cwd)}>Restart</button>
-              </div>
-            )}
-            {(shellSt?.alive || shellPane) && (
-              <pre className="shell-pane detail-shell-pane" ref={shellPaneRef}>{shellPane || '…'}</pre>
-            )}
-            {shellSt?.alive && (
-              <div className="detail-shell-input-row">
-                <div className="detail-shell-keys">
-                  {[['Tab','Tab'],['Up','↑'],['Down','↓'],['C-c','^C'],['C-d','^D'],['C-l','^L']].map(([key, label]) => (
-                    <button key={key} className="composer-chip composer-key" disabled={shellBusy}
-                            onClick={() => shellsApi.shellKey(activeShellId, key)
-                              .then(() => shellsApi.getShellPane(activeShellId)
-                                .then(d => { setShellSt(d); setShellPane(d.pane || '') }))}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <form className="detail-shell-form"
-                      onSubmit={e => { e.preventDefault(); shellSend(shellCmd) }}>
-                  <input className="detail-shell-cmd" value={shellCmd} spellCheck={false}
-                         autoCapitalize="off" autoCorrect="off"
-                         placeholder="Type a shell command…"
-                         onChange={e => setShellCmd(e.target.value)} />
-                  <button className="dispatch-btn" type="submit" disabled={shellBusy || !shellCmd.trim()}>↩</button>
-                </form>
-              </div>
-            )}
           </div>
-        )}
-      </div>
+          {/* Shell pane content */}
+          {!activeShellId ? (
+            <div className="detail-shell-empty">
+              <button className="detail-shell-open-btn"
+                      disabled={shellBusy}
+                      onClick={() => openShellForCwd(session?.cwd)}>
+                Open shell{session?.cwd ? ` in ${session.cwd.replace(/.*\//, '')}` : ''}
+              </button>
+            </div>
+          ) : (
+            <div className="detail-shell-view">
+              <pre className="live-metric" ref={shellMetricRef} aria-hidden="true">{'M'.repeat(CELL_SAMPLE)}</pre>
+              {!shellSt?.alive && (
+                <div className="detail-shell-open-row">
+                  <span className="detail-shell-hint">{shellSt?.exists ? '⚠ Shell exited.' : 'Shell not found.'}</span>
+                  <button className="detail-shell-open-btn" disabled={shellBusy}
+                          onClick={() => openShellForCwd(session?.cwd)}>Restart</button>
+                </div>
+              )}
+              {(shellSt?.alive || shellPane) && (
+                <pre className="shell-pane detail-shell-pane" ref={shellPaneRef}>{shellPane || '…'}</pre>
+              )}
+              {shellSt?.alive && (
+                <div className="detail-shell-input-row">
+                  <div className="detail-shell-keys">
+                    {[['Tab','Tab'],['Up','↑'],['Down','↓'],['C-c','^C'],['C-d','^D'],['C-l','^L']].map(([key, label]) => (
+                      <button key={key} className="composer-chip composer-key" disabled={shellBusy}
+                              onClick={() => shellsApi.shellKey(activeShellId, key)
+                                .then(() => shellsApi.getShellPane(activeShellId)
+                                  .then(d => { setShellSt(d); setShellPane(d.pane || '') }))}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <form className="detail-shell-form"
+                        onSubmit={e => { e.preventDefault(); shellSend(shellCmd) }}>
+                    <input className="detail-shell-cmd" value={shellCmd} spellCheck={false}
+                           autoCapitalize="off" autoCorrect="off"
+                           placeholder="Type a shell command…"
+                           onChange={e => setShellCmd(e.target.value)} />
+                    <button className="dispatch-btn" type="submit" disabled={shellBusy || !shellCmd.trim()}>↩</button>
+                  </form>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       <div className="detail-footer">
       <div className="composer">
         {canSend ? (

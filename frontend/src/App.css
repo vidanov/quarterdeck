@@ -1993,11 +1993,23 @@ body.resizing .detail-resize::after { background: var(--accent); }
 }
 
 /* ── Shell section — distinct panel at bottom, above kiro composer ── */
-.detail-shell-section {
-  flex-shrink: 0;
-  border-top: 2px solid var(--border);
-  background: var(--panel-bg, #1a1a1a);
+/* ── Shell full view — replaces transcript/live, same flex footprint ── */
+.detail-shell-full {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
+.detail-shell-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* shell tab button distinct from kiro view tabs */
+.detail-pin-btn-shell { border-left: 1px solid var(--border); margin-left: 4px; }
+.detail-pin-btn-shell.active { color: #3a6; border-color: #3a6; }
 /* ---- Shell strip — per-folder tabs ---- */
 .detail-shell-strip {
   display: flex;
@@ -2060,10 +2072,9 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .detail-shell-view {
   display: flex;
   flex-direction: column;
-  border-bottom: 1px solid var(--border);
-  max-height: 280px;
-  min-height: 120px;
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 .detail-shell-open-row {
   display: flex;
@@ -2083,7 +2094,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
 }
 .detail-shell-pane {
   flex: 1;
-  min-height: 60px;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: auto;
   padding: 6px 10px;
