@@ -509,6 +509,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [shellBusy, setShellBusy] = useState(false)
   const [shellRawMode, setShellRawMode] = useState(false)
   const shellRawRef = useRef(null)
+  const shellLastEscRef = useRef(0)  // timestamp of last Esc press for double-Esc exit
   const shellPaneRef = useRef(null)
   const shellMetricRef = useRef(null)
   const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
@@ -2117,7 +2118,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 </div>
               )}
               {(shellSt?.alive || shellPane) && (
-                <pre className="live-pane" ref={shellPaneRef}>{shellPane || '…'}</pre>
+                <pre className="live-pane" ref={shellPaneRef}>{shellPane ? shellPane.replace(/(\n\s*)+$/, '\n') : '…'}</pre>
               )}
               {shellSt?.alive && (
                 <div className="detail-shell-input-row">
@@ -2131,6 +2132,18 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         onKeyDown={e => {
                           const key = keyEventToTmux(e)
                           if (!key) return
+                          // Double-Esc exits raw mode (within 500 ms)
+                          if (key === 'Escape') {
+                            const now = Date.now()
+                            if (now - shellLastEscRef.current < 500) {
+                              setShellRawMode(false)
+                              shellLastEscRef.current = 0
+                              return
+                            }
+                            shellLastEscRef.current = now
+                          } else {
+                            shellLastEscRef.current = 0
+                          }
                           e.preventDefault()
                           e.stopPropagation()
                           shellsApi.shellRawKey(activeShellId, key)
