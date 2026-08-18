@@ -590,10 +590,20 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const closeShellTab = (shellId) => {
     shellsApi.closeShell(shellId).then(() => {
       shellsApi.listShells().then(d => {
-        const remaining = d.shells || []
-        setShells(remaining)
+        const sessionCwd = session?.cwd || ''
+        const remaining = (d.shells || []).filter(sh =>
+          !sessionCwd || sh.cwd === sessionCwd ||
+          sh.cwd.startsWith(sessionCwd + '/') ||
+          sessionCwd.startsWith(sh.cwd + '/')
+        )
+        setShells(d.shells || [])
         if (activeShellId === shellId) {
-          setActiveShellId(remaining.length > 0 ? remaining[remaining.length - 1].shell_id : null)
+          if (remaining.length > 0) {
+            setActiveShellId(remaining[remaining.length - 1].shell_id)
+          } else {
+            setActiveShellId(null)
+            setViewOverride(null) // back to chat
+          }
         }
       }).catch(() => {})
     }).catch(() => {})
@@ -2040,7 +2050,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </button>
             </div>
           ) : (
-            <div className="detail-shell-view">
+            <div className={`detail-shell-view terminal terminal-live pane-${paneTheme}`}>
               <pre className="live-metric" ref={shellMetricRef} aria-hidden="true">{'M'.repeat(CELL_SAMPLE)}</pre>
               {!shellSt?.alive && (
                 <div className="detail-shell-open-row">
@@ -2050,7 +2060,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 </div>
               )}
               {(shellSt?.alive || shellPane) && (
-                <pre className="shell-pane detail-shell-pane" ref={shellPaneRef}>{shellPane || '…'}</pre>
+                <pre className="live-pane" ref={shellPaneRef}>{shellPane || '…'}</pre>
               )}
               {shellSt?.alive && (
                 <div className="detail-shell-input-row">

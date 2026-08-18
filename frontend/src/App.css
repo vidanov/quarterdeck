@@ -2068,13 +2068,19 @@ body.resizing .detail-resize::after { background: var(--accent); }
 }
 .detail-shell-add-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* Shell pane view */
+/* Shell pane view — uses terminal terminal-live for styling */
 .detail-shell-view {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+/* live-pane inside shell view fills available space */
+.detail-shell-view .live-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .detail-shell-open-row {
   display: flex;
