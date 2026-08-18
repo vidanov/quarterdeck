@@ -443,22 +443,17 @@ async def health_build():
 
     if running_sha and stamp.get("git_sha") and running_sha != stamp["git_sha"]:
         stale_reason = f"git HEAD moved: built at {stamp.get('git_short', stamp['git_sha'][:7])}, now at {running_sha[:7]}"
-
-    if not stale_reason and repo_root:
-        stamp_hashes = stamp.get("source_hashes", {})
-        current_backend = _build_source_hash_from(repo_root, ["backend/*.py"])
-        current_frontend = _build_source_hash_from(repo_root, [
-            "frontend/src/**/*.jsx",
-            "frontend/src/**/*.js",
-            "frontend/src/**/*.css",
-        ])
-        if current_backend != stamp_hashes.get("backend"):
-            stale_reason = "backend source changed since build"
-            changed_files = [str(f.relative_to(repo_root))
-                             for f in sorted(repo_root.glob("backend/*.py"))]
-        elif current_frontend != stamp_hashes.get("frontend_src"):
-            stale_reason = "frontend source changed since build"
-            changed_files = ["frontend/src/"]
+        # Show which files changed between the two commits
+        if repo_root and not changed_files:
+            try:
+                diff_out = subprocess.check_output(
+                    ["git", "diff", "--name-only", stamp["git_sha"], running_sha],
+                    text=True, stderr=subprocess.DEVNULL,
+                    cwd=str(repo_root),
+                ).strip()
+                changed_files = [f for f in diff_out.splitlines() if f][:10]
+            except Exception:
+                pass
 
     stale = bool(stale_reason)
     dev_mode = bool(os.environ.get("DECK_DEV"))
