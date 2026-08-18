@@ -5042,6 +5042,55 @@ def shell_close():
     return shell.close()
 
 
+# --- Multi-shell API (per-folder named sessions) ---
+
+@app.get("/api/shells")
+def shells_list():
+    """List all running named shell sessions."""
+    return {"shells": shell.list_shells()}
+
+
+@app.post("/api/shells/open")
+def shells_open(payload: dict):
+    """Open (or return existing) shell for a cwd. Body: {cwd: str}"""
+    return shell.open_for(payload.get("cwd", "~"))
+
+
+@app.get("/api/shells/{shell_id}/pane")
+def shells_pane(shell_id: str, lines: int = CAPTURE_LINES):
+    lines = max(1, min(lines, MAX_CAPTURE_LINES))
+    return shell.get_pane_named(shell_id, lines)
+
+
+@app.post("/api/shells/{shell_id}/input")
+def shells_input(shell_id: str, payload: dict):
+    text = payload.get("text", "")
+    if not isinstance(text, str):
+        return {"ok": False, "error": "text must be a string"}
+    return shell.send_text_named(shell_id, text,
+                                  submit=payload.get("submit", True) is not False)
+
+
+@app.post("/api/shells/{shell_id}/key")
+def shells_key(shell_id: str, payload: dict):
+    return shell.send_key_named(shell_id, payload.get("key", ""))
+
+
+@app.post("/api/shells/{shell_id}/resize")
+def shells_resize(shell_id: str, payload: dict):
+    cols, rows = payload.get("cols"), payload.get("rows")
+    if not isinstance(cols, int) or not isinstance(rows, int) \
+       or isinstance(cols, bool) or isinstance(rows, bool) \
+       or cols < 1 or rows < 1:
+        return {"ok": False, "error": "cols and rows must be positive integers"}
+    return shell.resize_named(shell_id, min(cols, 500), min(rows, 200))
+
+
+@app.delete("/api/shells/{shell_id}")
+def shells_close(shell_id: str):
+    return shell.close_named(shell_id)
+
+
 @app.get("/api/assist/activity")
 def assist_activity():
     """Get the concierge's current pane activity for live status display."""

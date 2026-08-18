@@ -1992,64 +1992,119 @@ body.resizing .detail-resize::after { background: var(--accent); }
   cursor: pointer;
 }
 
-/* ---- Shell tab in detail panel ---- */
+/* ---- Shell strip — per-folder tabs below the compact bar ---- */
+.detail-shell-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.detail-shell-strip::-webkit-scrollbar { display: none; }
+.detail-shell-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 160px;
+}
+.detail-shell-tab:hover { border-color: var(--accent); color: var(--text); }
+.detail-shell-tab.active { border-color: #3a6; background: rgba(51,170,100,0.1); color: var(--text); }
+.detail-shell-tab.dead { opacity: 0.5; }
+.detail-shell-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 110px;
+}
+.detail-shell-tab-close {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.detail-shell-tab-close:hover { color: var(--red); background: var(--red-bg); }
+.detail-shell-add-btn {
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.detail-shell-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Shell pane view */
 .detail-shell-view {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  max-height: 280px;
+  min-height: 120px;
+  flex-shrink: 0;
 }
 .detail-shell-open-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 16px;
+  padding: 10px 12px;
 }
 .detail-shell-hint { color: var(--text-dim); font-size: 12px; }
 .detail-shell-open-btn {
-  padding: 5px 14px;
-  border-radius: 6px;
+  padding: 3px 10px;
+  border-radius: 5px;
   border: 1px solid var(--accent);
   background: transparent;
   color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
   cursor: pointer;
 }
-.detail-shell-open-btn:hover { background: var(--accent-bg); }
 .detail-shell-pane {
   flex: 1;
-  min-height: 120px;
-  max-height: 100%;
+  min-height: 60px;
   overflow-y: auto;
   overflow-x: auto;
-  padding: 8px 10px;
+  padding: 6px 10px;
   margin: 0;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.4;
   white-space: pre;
   color: var(--text);
-  border-bottom: 1px solid var(--border);
 }
 .detail-shell-input-row {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 6px 8px;
+  gap: 3px;
+  padding: 4px 8px;
   border-top: 1px solid var(--border);
   background: var(--surface);
   flex-shrink: 0;
 }
 .detail-shell-keys { display: flex; gap: 4px; flex-wrap: wrap; }
-.detail-shell-form { display: flex; gap: 6px; align-items: center; }
+.detail-shell-form { display: flex; gap: 5px; align-items: center; }
 .detail-shell-cmd {
   flex: 1;
   background: var(--input-bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 8px;
+  border-radius: 5px;
+  padding: 4px 8px;
   color: var(--text);
   font-family: var(--mono);
   font-size: 12px;
