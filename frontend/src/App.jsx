@@ -1249,9 +1249,7 @@ export default function App() {
           <span className="stale-build-msg">
             Running build is behind source
             {buildHealth.changed_files?.length > 0 && (
-              <> — {buildHealth.changed_files.length} file{buildHealth.changed_files.length > 1 ? 's' : ''} changed
-                <span className="stale-build-files"> ({buildHealth.changed_files.join(', ')})</span>
-              </>
+              <> — {buildHealth.changed_files.length} file{buildHealth.changed_files.length !== 1 ? 's' : ''} changed since built commit</>
             )}
           </span>
           <button
