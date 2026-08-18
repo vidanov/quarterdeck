@@ -2009,12 +2009,23 @@ body.resizing .detail-resize::after { background: var(--accent); }
 }
 /* shell tab button distinct from kiro view tabs */
 .detail-pin-btn-shell {
-  margin-left: 10px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border) !important;
+  margin-left: 8px;
+  padding: 2px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
   color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.detail-pin-btn-shell.active { color: #3a6; }
+.detail-pin-btn-shell:hover { border-color: var(--accent); color: var(--text); }
+.detail-pin-btn-shell.active {
+  background: rgba(51,170,100,0.12);
+  border-color: #3a6;
+  color: #3a6;
+}
 /* ---- Shell strip — per-folder tabs ---- */
 .detail-shell-strip {
   display: flex;
