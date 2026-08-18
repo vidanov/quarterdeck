@@ -2173,10 +2173,30 @@ body.resizing .detail-resize::after { background: var(--accent); }
   cursor: text;
   outline: none;
   user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .detail-shell-raw-capture:focus {
   border-color: #4db37a;
   box-shadow: 0 0 0 2px rgba(51,170,100,0.2);
+}
+.detail-shell-raw-capture::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  background: #3a6;
+  border-radius: 1px;
+  animation: shell-cursor-blink 1s step-end infinite;
+  opacity: 0;
+}
+.detail-shell-raw-capture:focus::after {
+  opacity: 1;
+}
+@keyframes shell-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
 }
 .detail-shell-raw-hint { pointer-events: none; }
 .detail-shell-raw-exit {
