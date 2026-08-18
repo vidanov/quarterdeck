@@ -340,18 +340,23 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [pendingScreenshots, setPendingScreenshots] = useState([])
   const [chipPreview, setChipPreview] = useState(null) // {url, x, y}
   const [chipPreviewBlob, setChipPreviewBlob] = useState(null) // blob URL for the preview img
+  const [chipPreviewError, setChipPreviewError] = useState(null)
   // Fetch screenshot via JS (carries X-Local-Token injected by app.py) and
   // create a blob URL — <img src> bypasses fetch/XHR and cannot carry auth headers.
   useEffect(() => {
-    if (!chipPreview?.url) { setChipPreviewBlob(null); return }
+    if (!chipPreview?.url) { setChipPreviewBlob(null); setChipPreviewError(null); return }
     let revoked = false
+    setChipPreviewError(null)
     fetch(chipPreview.url)
-      .then(r => r.ok ? r.blob() : null)
+      .then(r => {
+        if (!r.ok) { setChipPreviewError(`HTTP ${r.status}`); return null }
+        return r.blob()
+      })
       .then(blob => {
         if (!blob || revoked) return
         setChipPreviewBlob(URL.createObjectURL(blob))
       })
-      .catch(() => {})
+      .catch(e => { if (!revoked) setChipPreviewError(e.message) })
     return () => {
       revoked = true
       setChipPreviewBlob(prev => { if (prev) URL.revokeObjectURL(prev); return null })
@@ -533,7 +538,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     }).catch(() => {})
   }, [session?.id])
 
-  // Poll active shell pane
+  // Poll active shell pane — faster in raw mode for responsive feel
   useEffect(() => {
     if (!activeShellId) return
     let active = true
@@ -541,9 +546,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       .then(d => { if (!active) return; setShellSt(d); setShellPane(d.pane || '') })
       .catch(() => {})
     poll()
-    const iv = setInterval(poll, 1200)
+    const iv = setInterval(poll, shellRawMode ? 150 : 1200)
     return () => { active = false; clearInterval(iv) }
-  }, [activeShellId])
+  }, [activeShellId, shellRawMode])
 
   // Auto-scroll shell pane
   useEffect(() => {
@@ -2141,9 +2146,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                         }
                         e.preventDefault()
                         e.stopPropagation()
-                        shellsApi.shellRawKey(activeShellId, key)
-                          .then(() => shellsApi.getShellPane(activeShellId)
-                            .then(d => { setShellSt(d); setShellPane(d.pane || '') }))
+                        // Fire-and-forget — 150ms poll picks up result
+                        shellsApi.shellRawKey(activeShellId, key).catch(() => {})
                       }}
                       onBlur={() => {
                         setTimeout(() => {
@@ -2158,7 +2162,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 <div className="detail-shell-input-row">
                   {shellRawMode ? (
                     <div className="detail-shell-raw-wrap">
-                      <span className="detail-shell-raw-hint">⌨ Raw mode — Esc×2 to exit</span>
+                      <span className="detail-shell-raw-hint">⌨ Raw mode — Esc×2 to exit<span className="detail-shell-raw-active-dot" /></span>
                       <button className="detail-shell-raw-exit"
                               onClick={() => setShellRaw(false)}
                               title="Exit raw mode">✕ Exit raw</button>
@@ -2286,7 +2290,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               }}>
                 {chipPreviewBlob
                   ? <img src={chipPreviewBlob} alt="screenshot preview" />
-                  : <div className="chip-preview-loading">Loading…</div>}
+                  : chipPreviewError
+                    ? <div className="chip-preview-loading">⚠ {chipPreviewError}</div>
+                    : <div className="chip-preview-loading">Loading…</div>}
               </div>,
               document.body
             )}
