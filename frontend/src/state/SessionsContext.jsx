@@ -19,6 +19,7 @@ const NOTIFY_MS = 5000
 export function SessionsProvider({ children }) {
   const [sessions, setSessions] = useState([])
   const [error, setError] = useState(null)
+  const [loaded, setLoaded] = useState(false)  // true after first successful fetch
   const [notifiedIds, setNotifiedIds] = useState(new Set())
   const [ackedIds, setAckedIds] = useState(new Set())
   // Sessions asked to end. Held here so the card can go at once rather than
@@ -83,8 +84,7 @@ export function SessionsProvider({ children }) {
         return [...visibleGhosts, ...merged]
       })
       setError(null)
-
-      // Track status changes for notifications
+      setLoaded(true)
       const newNotified = new Set()
       for (const s of newSessions) {
         const prev = prevStatuses.current[s.id]
@@ -185,7 +185,7 @@ export function SessionsProvider({ children }) {
   }, [])
 
   const value = {
-    sessions, error, refresh, refreshBurst,
+    sessions, error, loaded, refresh, refreshBurst,
     killing, markKilling, unmarkKilling,
     notifiedIds, ackedIds, ack,
     addOptimistic, resolveOptimistic, rejectOptimistic,
