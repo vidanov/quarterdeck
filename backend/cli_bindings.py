@@ -76,21 +76,23 @@ def _pane_pid(name: str) -> int:
         return 0
 
 
-def _pane_env(pid: int, var: str) -> str:
-    """Read an env var from a running process via its /proc or macOS equivalent."""
-    # On macOS: ps -Eewww -p PID shows the environment
-    try:
-        r = subprocess.run(
-            ["ps", "-Ewww", "-p", str(pid)],
-            capture_output=True, text=True, timeout=5
-        )
-        for line in r.stdout.splitlines():
-            for token in line.split():
-                if token.startswith(f"{var}="):
-                    return token[len(var) + 1:]
-    except Exception:
-        pass
-    return ""
+def _tmux_env(session: str, var: str) -> str:
+    """Read an env var from a tmux session's own environment.
+
+    tmux keeps a copy of the environment a session was created with,
+    independent of what the OS will let another process's owner read back.
+    The previous approach shelled out to `ps -Ewww -p <pid>` and grepped for
+    VAR=, which is silently dead on macOS: Apple's ps omits another process's
+    environment from the listing — no error, just nothing to find — so every
+    call returned "". Reading it from tmux's own copy instead of the OS
+    works regardless, and is what session-scoped markers like Captain's
+    CAPTAIN_SESSION or a non-standard KIRO_SESSION_ID should go through.
+    """
+    out = _tmux("show-environment", "-t", session, var)
+    if not out or out.startswith("-"):  # tmux prints "-VAR" for an unset var
+        return ""
+    _, _, value = out.strip().partition("=")
+    return value
 
 
 def _pane_cmd(name: str) -> str:
@@ -144,8 +146,16 @@ def discover_cli_instances() -> list[dict]:
         name = name.strip()
         if not name:
             continue
-        # Skip internal Quarterdeck sessions
-        if name.startswith("deck-"):
+        # Skip internal Quarterdeck sessions, and anything Captain owns — its
+        # Bosun and worker sessions run kiro-cli too, but they are managed by
+        # Captain's own loop, not something to list here as an adoptable
+        # instance. The name prefix ("captain-") covers a session started
+        # since Captain began stamping it; CAPTAIN_SESSION covers one started
+        # before that but still running, which carries the marker in its
+        # tmux environment even though its name predates the convention.
+        if name.startswith("deck-") or name.startswith("captain-"):
+            continue
+        if _tmux_env(name, "CAPTAIN_SESSION"):
             continue
         # Check that the pane is running kiro-cli (or kiro-cli-chat)
         cmd = _pane_cmd(name)
@@ -159,9 +169,12 @@ def discover_cli_instances() -> list[dict]:
         m = _re.match(r"^kiro-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", name)
         if m:
             kiro_sid = m.group(1)
-        elif pid:
-            # Fall back to env var for non-standard names
-            kiro_sid = _pane_env(pid, "KIRO_SESSION_ID")
+        else:
+            # Fall back to env var for non-standard names. Read through tmux,
+            # not the OS: ps -Ewww cannot see another process's environment
+            # on macOS, so the old pid-based _pane_env always came back empty
+            # here.
+            kiro_sid = _tmux_env(name, "KIRO_SESSION_ID")
 
         pane_text = _capture_pane(name, lines=40)
         status = _pane_cli_status(pane_text)
