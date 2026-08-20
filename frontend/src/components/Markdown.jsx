@@ -30,10 +30,12 @@ function splitFilePaths(text) {
   const segments = []
   let last = 0
   let m
-  // Match paths starting with / or ~ that contain at least one more slash
-  const re = /((~|\/)[^\s"')\]`,*<>|]+\/[^\s"')\]`,*<>|]+)/g
+  // Match paths starting with / or ~ up to a whitespace boundary or quote.
+  // Allow spaces inside paths (e.g. "Obsidian Vault") but stop at obvious
+  // sentence-ending punctuation when followed by whitespace or end-of-string.
+  const re = /((~|\/)[^\n"')\]`,*<>|]+\/[^\n"')\]`,*<>|]+)/g
   while ((m = re.exec(text)) !== null) {
-    const path = m[1]
+    let path = m[1].replace(/[.,;:!?]+$/, '') // strip trailing punctuation
     // Only linkify if it has a known extension or looks like a real path (depth ≥ 2)
     const hasExt = FILE_EXTS.test(path)
     const depth = (path.match(/\//g) || []).length
@@ -70,7 +72,15 @@ export function mdInline(text, keyPrefix = 'i') {
     const tok = m[0]
     const key = `${keyPrefix}-${n++}`
     if (tok.startsWith('`')) {
-      out.push(<code key={key} className="md-code">{tok.slice(1, -1)}</code>)
+      const inner = tok.slice(1, -1)
+      // If the backtick content is an absolute file path, render a chip instead of <code>
+      const isFilePath = (inner.startsWith('/') || inner.startsWith('~')) &&
+        (FILE_EXTS.test(inner) || (inner.match(/\//g) || []).length >= 2)
+      if (isFilePath) {
+        out.push(<FileChip key={key} path={inner} />)
+      } else {
+        out.push(<code key={key} className="md-code">{inner}</code>)
+      }
     } else if (tok.startsWith('**')) {
       out.push(<strong key={key}>{tok.slice(2, -2)}</strong>)
     } else if (tok.startsWith('*') || tok.startsWith('_')) {
