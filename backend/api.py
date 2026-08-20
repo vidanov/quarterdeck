@@ -491,6 +491,25 @@ async def health_build():
     }
 
 
+@app.get("/api/dev/token")
+def dev_token(request: Request):
+    """Return the local token for browser-based dev mode (Vite at localhost:5173).
+
+    Only works when DECK_DEV=1 and the request is from loopback.
+    The pywebview app injects the token automatically; the browser cannot do
+    that, so this endpoint lets the Vite dev page bootstrap itself.
+
+    Safe: loopback-only, dev-only, returns nothing in the installed app.
+    """
+    if not os.environ.get("DECK_DEV"):
+        return JSONResponse({"error": "only available in dev mode"}, status_code=404)
+    if not require_local(request):
+        return JSONResponse({"error": "local only"}, status_code=403)
+    from backend.auth import read_local_token
+    token = read_local_token() or ""
+    return {"token": token, "dev": True}
+
+
 @app.post("/api/build/rebuild")
 def build_rebuild():
     """Rebuild the frontend (and restart) to clear a stale-build banner.
