@@ -4364,6 +4364,31 @@ def pick_folder(request: Request):
         return {"path": None, "error": str(e)}
 
 
+@app.post("/api/files/reveal")
+def reveal_file(payload: dict, request: Request):
+    """Reveal a file or folder in Finder. Local callers only.
+
+    Body: {"path": "/absolute/path/to/file"}
+    Uses `open -R` to select the file in its parent Finder window.
+    Falls back to opening the parent folder if the file doesn't exist.
+    """
+    if not require_local(request):
+        return {"error": "local only"}
+    path = (payload.get("path") or "").strip()
+    if not path:
+        return {"error": "path required"}
+    # Security: only absolute paths, no shell expansion
+    p = Path(path).expanduser().resolve()
+    if p.exists():
+        # -R selects the item in Finder without opening it
+        subprocess.run(["open", "-R", str(p)], timeout=5)
+    elif p.parent.exists():
+        subprocess.run(["open", str(p.parent)], timeout=5)
+    else:
+        return {"error": "path not found"}
+    return {"ok": True}
+
+
 @app.post("/api/sessions/{session_id}/kill")
 def kill_session(session_id: str, force: bool = False):
     """End a session.
