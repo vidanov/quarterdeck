@@ -293,6 +293,82 @@ function CollectionsSubTab({ sessions, onResumeSession }) {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot entry with inline rename
+// ---------------------------------------------------------------------------
+
+function SnapshotEntry({ snap, restoring, onRestoreAll, onDeleteSnapshot }) {
+  const notify = useToast()
+  const [renaming, setRenaming] = useState(false)
+  const [draft, setDraft] = useState('')
+  const inputRef = useRef(null)
+
+  const startRename = (e) => {
+    e.stopPropagation()
+    setDraft(snap.name || '')
+    setRenaming(true)
+    setTimeout(() => inputRef.current?.focus(), 30)
+  }
+
+  const saveRename = async () => {
+    const name = draft.trim()
+    setRenaming(false)
+    if (!name || name === snap.name) return
+    const d = await collectionsApi.renameCollection(snap.id, name).catch(() => ({ error: 'Network error' }))
+    if (d.error) notify(d.error, 'error')
+  }
+
+  const onKeyDown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveRename() }
+    if (e.key === 'Escape') { setRenaming(false) }
+  }
+
+  return (
+    <div className="snapshot-entry">
+      <div className="snapshot-header">
+        <div className="snapshot-title-row">
+          {renaming ? (
+            <input
+              ref={inputRef}
+              className="snapshot-rename-input"
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onBlur={saveRename}
+              onKeyDown={onKeyDown}
+              onClick={e => e.stopPropagation()}
+            />
+          ) : (
+            <span
+              className="snapshot-name"
+              onClick={startRename}
+              title="Click to rename"
+            >
+              {snap.name || `${snap.date} ${snap.time}`}
+            </span>
+          )}
+          <span className="snapshot-time-sub">{snap.date} {snap.time}</span>
+        </div>
+        <span className="snapshot-count">{snap.sessions.length} sessions</span>
+        <div className="snapshot-actions">
+          <button className="coll-rename-btn" onClick={startRename} title="Rename">✎</button>
+          <button className="restore-all-btn" onClick={() => onRestoreAll(snap)} disabled={restoring}>
+            {restoring ? '⟳' : '▶ Restore'}
+          </button>
+          <button className="snapshot-delete" onClick={() => onDeleteSnapshot(snap.id)}>×</button>
+        </div>
+      </div>
+      <div className="snapshot-sessions">
+        {snap.sessions.map(s => (
+          <div key={s.id} className="snapshot-session-row">
+            <span className="snapshot-session-name">{s.name}</span>
+            <span className="snapshot-session-title">{s.title}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main CollectionsPanel
 // ---------------------------------------------------------------------------
 
@@ -367,26 +443,13 @@ export default function CollectionsPanel({
           {snapshots.length > 0 ? (
             <div className="snapshot-list">
               {snapshots.map(snap => (
-                <div key={snap.id} className="snapshot-entry">
-                  <div className="snapshot-header">
-                    <span className="snapshot-time">{snap.date} {snap.time}</span>
-                    <span className="snapshot-count">{snap.sessions.length} sessions</span>
-                    <div className="snapshot-actions">
-                      <button className="restore-all-btn" onClick={() => onRestoreAll(snap)} disabled={restoring}>
-                        {restoring ? '⟳' : '▶ Restore'}
-                      </button>
-                      <button className="snapshot-delete" onClick={() => onDeleteSnapshot(snap.id)}>×</button>
-                    </div>
-                  </div>
-                  <div className="snapshot-sessions">
-                    {snap.sessions.map(s => (
-                      <div key={s.id} className="snapshot-session-row">
-                        <span className="snapshot-session-name">{s.name}</span>
-                        <span className="snapshot-session-title">{s.title}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                <SnapshotEntry
+                  key={snap.id}
+                  snap={snap}
+                  restoring={restoring}
+                  onRestoreAll={onRestoreAll}
+                  onDeleteSnapshot={onDeleteSnapshot}
+                />
               ))}
             </div>
           ) : (
