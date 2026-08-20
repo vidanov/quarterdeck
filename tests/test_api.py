@@ -1760,6 +1760,14 @@ class TestShell:
             pytest.skip("a shell is already running; refusing to drive it")
         opened = api.shell.open_shell("~")
         assert opened["ok"] is True, opened
+        # open_shell returns immediately (non-blocking by design). Wait for the
+        # shell process to actually start before sending input.
+        ready_deadline = time.time() + api.shell.READY_TIMEOUT
+        while time.time() < ready_deadline:
+            if api.shell.is_alive():
+                break
+            time.sleep(api.shell.READY_POLL)
+        assert api.shell.is_alive(), "Shell did not become alive within timeout"
         try:
             assert api.shell.send_text("echo quarterdeck-shell-probe")["ok"] is True
             deadline = time.time() + 15
