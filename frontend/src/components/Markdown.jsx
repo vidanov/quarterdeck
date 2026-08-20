@@ -1,5 +1,62 @@
 import React from 'react'
 
+// Extensions worth linking — common output files from kiro-cli sessions
+const FILE_EXTS = /\.(md|txt|json|yaml|yml|py|js|jsx|ts|tsx|sh|toml|csv|html|xml|log|pdf|docx|xlsx)$/i
+
+function revealFile(path) {
+  fetch('/api/files/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  }).catch(() => {})
+}
+
+function FileChip({ path }) {
+  const name = path.split('/').pop()
+  return (
+    <button
+      className="md-file-chip"
+      title={`Reveal in Finder: ${path}`}
+      onClick={() => revealFile(path)}
+    >
+      📄 {name}
+    </button>
+  )
+}
+
+// Split a plain text string on absolute file paths.
+// Returns null when no paths found (caller renders the string as-is).
+function splitFilePaths(text) {
+  const segments = []
+  let last = 0
+  let m
+  // Match paths starting with / or ~ that contain at least one more slash
+  const re = /((~|\/)[^\s"')\]`,*<>|]+\/[^\s"')\]`,*<>|]+)/g
+  while ((m = re.exec(text)) !== null) {
+    const path = m[1]
+    // Only linkify if it has a known extension or looks like a real path (depth ≥ 2)
+    const hasExt = FILE_EXTS.test(path)
+    const depth = (path.match(/\//g) || []).length
+    if (!hasExt && depth < 2) continue
+    if (m.index > last) segments.push({ type: 'text', value: text.slice(last, m.index) })
+    segments.push({ type: 'file', value: path })
+    last = m.index + path.length
+  }
+  if (last < text.length) segments.push({ type: 'text', value: text.slice(last) })
+  // Only return segmented array when at least one file was found
+  return segments.some(s => s.type === 'file') ? segments : null
+}
+
+function renderWithFilePaths(text, baseKey) {
+  const parts = splitFilePaths(text)
+  if (!parts) return text
+  return parts.map((seg, i) =>
+    seg.type === 'file'
+      ? <FileChip key={`${baseKey}-fp${i}`} path={seg.value} />
+      : seg.value || null
+  )
+}
+
 export function mdInline(text, keyPrefix = 'i') {
   const out = []
   const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(_[^_\n]+_)|(\[[^\]]+\]\([^)\s]+\))/g
@@ -7,7 +64,9 @@ export function mdInline(text, keyPrefix = 'i') {
   let m
   let n = 0
   while ((m = pattern.exec(text)) !== null) {
-    if (m.index > last) out.push(text.slice(last, m.index))
+    if (m.index > last) {
+      out.push(renderWithFilePaths(text.slice(last, m.index), `${keyPrefix}-${n}-pre`))
+    }
     const tok = m[0]
     const key = `${keyPrefix}-${n++}`
     if (tok.startsWith('`')) {
@@ -17,17 +76,26 @@ export function mdInline(text, keyPrefix = 'i') {
     } else if (tok.startsWith('*') || tok.startsWith('_')) {
       out.push(<em key={key}>{tok.slice(1, -1)}</em>)
     } else {
+      // [label](href)
       const close = tok.indexOf(']')
       const label = tok.slice(1, close)
       const href = tok.slice(close + 2, -1)
-      const safe = /^https?:\/\//i.test(href)
-      out.push(safe
-        ? <a key={key} href={href} target="_blank" rel="noreferrer noopener">{label}</a>
-        : label)
+      const isHttp = /^https?:\/\//i.test(href)
+      const isLocalFile = href.startsWith('/') || href.startsWith('~')
+      if (isHttp) {
+        out.push(<a key={key} href={href} target="_blank" rel="noreferrer noopener">{label}</a>)
+      } else if (isLocalFile) {
+        // Markdown link to a local file — show chip with label as tooltip override
+        out.push(<FileChip key={key} path={href} />)
+      } else {
+        out.push(label)
+      }
     }
     last = m.index + tok.length
   }
-  if (last < text.length) out.push(text.slice(last))
+  if (last < text.length) {
+    out.push(renderWithFilePaths(text.slice(last), `${keyPrefix}-tail`))
+  }
   return out
 }
 
