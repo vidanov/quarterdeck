@@ -238,6 +238,37 @@ body {
   gap: 10px;
   margin-bottom: 8px;
 }
+.snapshot-title-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.snapshot-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px 3px;
+  margin: -1px -3px;
+}
+.snapshot-name:hover { background: var(--gray-bg); }
+.snapshot-time-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.snapshot-rename-input {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--accent, #3b82f6);
+  border-radius: 4px;
+  padding: 1px 5px;
+  outline: none;
+  width: 180px;
+}
 .snapshot-time {
   font-size: 14px;
   font-weight: 600;
