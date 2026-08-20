@@ -25,6 +25,9 @@ export function SessionsProvider({ children }) {
   // Sessions asked to end. Held here so the card can go at once rather than
   // sitting there through a clean quit, which read as closing being broken.
   const [killing, setKilling] = useState(new Set())
+  // Show hidden sessions (captain/bosun) — off by default
+  const [showHidden, setShowHidden] = useState(false)
+  const showHiddenRef = useRef(false)
   const prevStatuses = useRef({})
   const pollMs = useRef(DEFAULT_POLL_MS)
 
@@ -38,7 +41,7 @@ export function SessionsProvider({ children }) {
 
   // Resolves with the list it just read, so a caller that needs the sessions
   // themselves — taking a snapshot — does not have to fetch them again.
-  const refresh = useCallback(() => api.listSessions()
+  const refresh = useCallback(() => api.listSessions(showHiddenRef.current)
     .then(data => {
       const newSessions = data.sessions || []
       setSessions(prev => {
@@ -81,7 +84,16 @@ export function SessionsProvider({ children }) {
         // Pure ghosts that are still _optimistic (server not yet replied) stay
         // at the front; resolved ghosts are invisible placeholders only.
         const visibleGhosts = activeGhosts.filter(g => g._optimistic)
-        return [...visibleGhosts, ...merged]
+        const next = [...visibleGhosts, ...merged]
+        // Bail out: if the session list hasn't materially changed, keep the
+        // same array reference to prevent downstream re-renders (DetailPanel
+        // depends on session identity via props).
+        if (next.length === prev.length && next.every((s, i) => {
+          const p = prev[i]
+          return p && s.id === p.id && s.status === p.status && s.control === p.control
+            && s.title === p.title && s.updated_at === p.updated_at
+        })) return prev
+        return next
       })
       setError(null)
       setLoaded(true)
@@ -184,11 +196,20 @@ export function SessionsProvider({ children }) {
     setSessions(prev => prev.filter(s => s.id !== nonce))
   }, [])
 
+  // Keep ref in sync so the poll callback (which can't depend on showHidden
+  // without recreating the interval) reads the latest value.
+  const toggleShowHidden = useCallback((val) => {
+    const next = typeof val === 'boolean' ? val : !showHiddenRef.current
+    showHiddenRef.current = next
+    setShowHidden(next)
+  }, [])
+
   const value = {
     sessions, error, loaded, refresh, refreshBurst,
     killing, markKilling, unmarkKilling,
     notifiedIds, ackedIds, ack,
     addOptimistic, resolveOptimistic, rejectOptimistic,
+    showHidden, toggleShowHidden,
   }
 
   return <SessionsContext.Provider value={value}>{children}</SessionsContext.Provider>

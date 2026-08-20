@@ -57,6 +57,10 @@ class TmuxError(RuntimeError):
 
 # --- tmux primitives ---
 
+# Cache for tmux_available() — set on first call, never reset (tmux doesn't
+# get uninstalled while the server is running).
+_tmux_available_cache: bool | None = None
+
 def _tmux(*args: str, check: bool = True, timeout: float = 10) -> str:
     """Run a tmux command and return stdout. Raises TmuxError on failure."""
     try:
@@ -73,22 +77,51 @@ def _tmux(*args: str, check: bool = True, timeout: float = 10) -> str:
 
 
 def tmux_available() -> bool:
-    """Check tmux is installed and its server is reachable."""
+    """Check tmux is installed and its server is reachable.
+
+    Result is cached for the process lifetime — tmux does not get uninstalled
+    while the server is running, and the first call can take 50-80 ms on macOS
+    due to process startup cost when the binary is not yet in the kernel's
+    exec cache.
+    """
+    global _tmux_available_cache
+    if _tmux_available_cache is not None:
+        return _tmux_available_cache
     try:
         _tmux("-V")
-        return True
+        _tmux_available_cache = True
     except TmuxError:
-        return False
+        _tmux_available_cache = False
+    return _tmux_available_cache
+
+
+_list_sessions_cache: dict = {}
 
 
 def list_tmux_sessions() -> list[str]:
-    """Names of all live tmux sessions. Empty when no server is running."""
-    # No server running is a normal state, not an error, so check=False here.
+    """Names of all live tmux sessions. Empty when no server is running.
+    
+    Cached for 1 second — the callers (managed_sessions, is_managed) run on
+    every poll cycle; a fresh subprocess call per cycle adds up fast.
+    """
+    import time as _t
+    now = _t.time()
+    cached = _list_sessions_cache.get("data")
+    if cached is not None and (now - _list_sessions_cache.get("ts", 0)) < 1.0:
+        return cached
     out = _tmux("list-sessions", "-F", "#{session_name}", check=False)
-    return [line for line in out.splitlines() if line]
+    result = [line for line in out.splitlines() if line]
+    _list_sessions_cache["data"] = result
+    _list_sessions_cache["ts"] = now
+    return result
 
 
 def session_exists(name: str) -> bool:
+    """True if the named tmux session exists.
+
+    Uses the cached session list from list_tmux_sessions() to avoid a separate
+    subprocess call per session — the list call is already cached at 1s TTL.
+    """
     return name in list_tmux_sessions()
 
 
@@ -1135,16 +1168,32 @@ def resize(session_id: str, cols: int, rows: int) -> dict:
     return {"ok": True, "cols": cols, "rows": rows, "changed": True}
 
 
+# ponytail: TTL cache for capture-pane results; avoids spawning a subprocess on
+# every poll for each managed session. TTL of 0.4s is shorter than the 0.5s
+# poll-busy-ms minimum, so a fast poll still sees fresh output.
+_capture_cache: dict[str, tuple[float, int, str]] = {}  # session_id -> (ts, lines, result)
+_CAPTURE_TTL = 0.4  # seconds
+
 def capture(session_id: str, lines: int = CAPTURE_LINES) -> str:
     """Return the last N lines visible in the session's pane.
 
     This is what the TUI is actually showing, which is how permission prompts
     are detected — unlike the JSONL heuristics, it involves no guessing.
+    Cached for _CAPTURE_TTL seconds to avoid a subprocess fork on every poll cycle.
     """
+    import time as _t
+    now = _t.time()
+    cached = _capture_cache.get(session_id)
+    if cached and (now - cached[0]) < _CAPTURE_TTL and cached[1] >= lines:
+        # Return cached result if it was captured with at least as many lines
+        return cached[2]
     name = tmux_name(session_id)
     if not session_exists(name):
+        _capture_cache.pop(session_id, None)
         return ""
-    return _tmux("capture-pane", "-p", "-t", name, "-S", f"-{lines}", check=False)
+    result = _tmux("capture-pane", "-p", "-t", name, "-S", f"-{lines}", check=False)
+    _capture_cache[session_id] = (now, lines, result)
+    return result
 
 
 # --- lifecycle ---
@@ -1251,7 +1300,12 @@ def reconcile() -> dict:
 
 
 def managed_sessions() -> dict:
-    """Managed session records, annotated with live tmux state."""
+    """Managed session records, annotated with live tmux state.
+
+    pane_dead is computed lazily (only when the detail panel requests it) to
+    avoid N subprocess calls on every list_sessions poll. The grid only needs
+    `alive`; the detail panel that shows the pane can afford a fresh check.
+    """
     live = set(list_tmux_sessions())
     out = {}
     for session_id, entry in load_state()["managed"].items():
@@ -1260,7 +1314,9 @@ def managed_sessions() -> dict:
         out[session_id] = {
             **entry,
             "alive": alive,
-            "dead_pane": pane_dead(name) if alive else False,
+            # pane_dead deferred: would require N list-panes calls per poll.
+            # Read fresh in detail view where it matters.
+            "dead_pane": False,
             "attach": attach_command(session_id),
         }
     return out

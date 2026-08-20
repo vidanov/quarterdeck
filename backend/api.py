@@ -146,11 +146,15 @@ async def lifespan(_app: FastAPI):
         except Exception:
             pass
     threading.Thread(target=_warm_projects_cache, daemon=True, name="projects-warmup").start()
+    threading.Thread(target=_sessions_bg_refresh, daemon=True, name="sessions-bg-refresh").start()
 
     yield
 
     # Shutdown: stop all ACP observer subprocesses cleanly.
     acp_observer.detach_all()
+    # Stop the persistent summary worker subprocess.
+    from . import acp_worker as _acp_worker
+    _acp_worker.shutdown()
 
 
 def _auto_advance_loop():
@@ -210,91 +214,105 @@ def _check_auto_advance(last_seen: dict, summarising: set | None = None):
         return
     settings = _load_settings()
     # auto-advance is per-session, stored as "stack-auto:<session_id>" in settings
-    for turn_file in turns_dir.iterdir():
-        if not turn_file.is_file():
-            continue
-        session_id = turn_file.stem
-        if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", session_id):
-            continue
-        mtime = turn_file.stat().st_mtime
-        if last_seen.get(session_id, 0) >= mtime:
-            continue
-        last_seen[session_id] = mtime
-        # Record duration data for this turn — additive, never raises.
-        # Only fires when the turn file itself is the stop signal (not a .json record
-        # written by this module, which passes the fullmatch guard above).
-        turn_file_size = 0
+    # ponytail: When the directory mtime changes (new file written), scan only
+    # files NOT already tracked in last_seen. Already-seen files can't change
+    # mtime without a write that bumps directory mtime again — so we'll catch
+    # them on a future pass if they change. This reduces from ~1700 stat() calls
+    # to just the handful of NEW turn files per pass.
+    try:
+        dir_mtime = turns_dir.stat().st_mtime
+    except OSError:
+        dir_mtime = 0.0
+    if dir_mtime > last_seen.get("__dir_mtime__", 0):
+        last_seen["__dir_mtime__"] = dir_mtime
         try:
-            turn_file_size = turn_file.stat().st_size
+            entries = list(os.scandir(turns_dir))
         except OSError:
-            pass
-        if turn_file_size < 4096:
-            # Bare stop marks are tiny; skip writing over a real duration record.
-            threading.Thread(
-                target=duration.write_record, args=(session_id,), daemon=True
-            ).start()
-        # Trigger a summary when a NEW stop event fires for a managed session.
-        # concierge-enabled defaults to False — it's heavyweight (starts kiro-cli).
-        # In-flight guard prevents spawning a second thread before the first finishes.
-        # Regenerate if the session has new entries since the last summary.
-        # Only summarise sessions that ended in idle (waiting for user) — not errors.
-        lock_data_s = read_lock(session_id)
-        current_status = detect_status(session_id, lock_data_s) if lock_data_s else "done"
-        if (not settings.get("auto_summary_disabled", False)
-                and tmux.is_managed(session_id)
-                and current_status in ("idle", "done")
-                and (summarising is None or session_id not in summarising)):
-            existing = _read_summary(session_id)
-            # Get current jsonl line count as a cheap proxy for "new content"
-            jsonl_path = SESSIONS_DIR / f"{session_id}.jsonl"
+            entries = []
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            session_id = Path(entry.name).stem
+            if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", session_id):
+                continue
+            # Skip files already tracked — they haven't changed since we last saw them.
+            # A turn file only gets written ONCE (stop hook fires, writes it, done).
+            if session_id in last_seen:
+                continue
             try:
-                current_seq = sum(1 for _ in open(jsonl_path)) if jsonl_path.exists() else 0
-            except Exception:
-                current_seq = 0
-            cached_seq = (existing or {}).get("last_seq", -1)
-            needs_summary = not existing or (current_seq > cached_seq + 2)
-            if needs_summary:
-                if summarising is not None:
-                    summarising.add(session_id)
-                def _run_summary(sid=session_id, seq=current_seq):
-                    try:
-                        _generate_summary_async(sid, last_seq=seq)
-                    finally:
-                        if summarising is not None:
-                            summarising.discard(sid)
-                threading.Thread(target=_run_summary, daemon=True).start()
-        # Only advance if this session has auto-advance on
-        if not settings.get(f"stack-auto:{session_id}"):
-            # Slash queue drains unconditionally — no opt-in needed.
-            # Does NOT require is_managed: the stop hook fires for any session
-            # that installed it, not just Quarterdeck-spawned ones.
-            # Reuse lock_data_s / current_status already fetched above.
-            if (lock_data_s and is_process_alive(lock_data_s.get("pid", 0))
-                    and current_status not in ("awaiting-approval", "thinking")
-                    and tmux.session_exists(tmux.tmux_name(session_id))):
-                sq_item = sq_pop(session_id)
-                if sq_item:
-                    _sq_send_delayed(session_id, sq_item["text"])
-            continue
-        # Safety: do not send into awaiting-approval
-        lock_data = read_lock(session_id)
-        if not lock_data or not is_process_alive(lock_data.get("pid", 0)):
-            continue
-        status = detect_status(session_id, lock_data, tmux.capture(session_id))
-        if status in ("awaiting-approval", "thinking"):
-            continue
-        if not tmux.is_managed(session_id):
-            continue
-        # Slash queue: drain one item per turn, no opt-in needed.
-        # Checked before the task stack so slash commands (e.g. /compact) run
-        # first and the agent is ready before the next task fires.
-        sq_item = sq_pop(session_id)
-        if sq_item:
-            _sq_send_delayed(session_id, sq_item["text"])
-            continue  # one item per turn; let it complete before sending the next
-        item = tmux.stack_pop(session_id)
-        if item:
-            tmux.send_text(session_id, item["text"])
+                st = entry.stat()
+            except OSError:
+                continue
+            mtime = st.st_mtime
+            last_seen[session_id] = mtime
+            turn_file_size = st.st_size
+            if turn_file_size < 4096:
+                # Bare stop marks are tiny; skip writing over a real duration record.
+                threading.Thread(
+                    target=duration.write_record, args=(session_id,), daemon=True
+                ).start()
+            # Trigger a summary when a NEW stop event fires for a managed session.
+            # concierge-enabled defaults to False — it's heavyweight (starts kiro-cli).
+            # In-flight guard prevents spawning a second thread before the first finishes.
+            # Regenerate if the session has new entries since the last summary.
+            # Only summarise sessions that ended in idle (waiting for user) — not errors.
+            lock_data_s = read_lock(session_id)
+            current_status = detect_status(session_id, lock_data_s) if lock_data_s else "done"
+            if (not settings.get("auto_summary_disabled", False)
+                    and tmux.is_managed(session_id)
+                    and current_status in ("idle", "done")
+                    and (summarising is None or session_id not in summarising)):
+                existing = _read_summary(session_id)
+                # Get current jsonl line count as a cheap proxy for "new content"
+                jsonl_path = SESSIONS_DIR / f"{session_id}.jsonl"
+                try:
+                    current_seq = sum(1 for _ in open(jsonl_path)) if jsonl_path.exists() else 0
+                except Exception:
+                    current_seq = 0
+                cached_seq = (existing or {}).get("last_seq", -1)
+                needs_summary = not existing or (current_seq > cached_seq + 2)
+                if needs_summary:
+                    if summarising is not None:
+                        summarising.add(session_id)
+                    def _run_summary(sid=session_id, seq=current_seq):
+                        try:
+                            _generate_summary_async(sid, last_seq=seq)
+                        finally:
+                            if summarising is not None:
+                                summarising.discard(sid)
+                    threading.Thread(target=_run_summary, daemon=True).start()
+            # Only advance if this session has auto-advance on
+            if not settings.get(f"stack-auto:{session_id}"):
+                # Slash queue drains unconditionally — no opt-in needed.
+                # Does NOT require is_managed: the stop hook fires for any session
+                # that installed it, not just Quarterdeck-spawned ones.
+                # Reuse lock_data_s / current_status already fetched above.
+                if (lock_data_s and is_process_alive(lock_data_s.get("pid", 0))
+                        and current_status not in ("awaiting-approval", "thinking")
+                        and tmux.session_exists(tmux.tmux_name(session_id))):
+                    sq_item = sq_pop(session_id)
+                    if sq_item:
+                        _sq_send_delayed(session_id, sq_item["text"])
+                continue
+            # Safety: do not send into awaiting-approval
+            lock_data = read_lock(session_id)
+            if not lock_data or not is_process_alive(lock_data.get("pid", 0)):
+                continue
+            status = detect_status(session_id, lock_data, tmux.capture(session_id))
+            if status in ("awaiting-approval", "thinking"):
+                continue
+            if not tmux.is_managed(session_id):
+                continue
+            # Slash queue: drain one item per turn, no opt-in needed.
+            # Checked before the task stack so slash commands (e.g. /compact) run
+            # first and the agent is ready before the next task fires.
+            sq_item = sq_pop(session_id)
+            if sq_item:
+                _sq_send_delayed(session_id, sq_item["text"])
+                continue  # one item per turn; let it complete before sending the next
+            item = tmux.stack_pop(session_id)
+            if item:
+                tmux.send_text(session_id, item["text"])
 
     # Second pass: drain slash queues for sessions that are already idle but
     # whose queue items were added AFTER the last stop-hook fire.  The turn-file
@@ -710,21 +728,31 @@ def read_metadata(session_id: str) -> dict | None:
         return None
 
 
+# ponytail: per-session mtime+size cache for tail_jsonl; avoids re-reading unchanged files
+# on every poll cycle. Key: session_id, value: (mtime, size, lines_list).
+_tail_cache: dict[str, tuple[float, int, list[str]]] = {}
+
 def tail_jsonl(session_id: str, lines: int = TAIL_LINES) -> list[str]:
-    """Read last N lines from .jsonl file."""
+    """Read last N lines from .jsonl file, skipping the read when the file hasn't changed."""
     jsonl_path = SESSIONS_DIR / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return []
     try:
+        st = jsonl_path.stat()
+        mtime, size = st.st_mtime, st.st_size
+        cached = _tail_cache.get(session_id)
+        if cached and cached[0] == mtime and cached[1] == size:
+            return cached[2][-lines:]
         # Fast tail: read from end
         with open(jsonl_path, "rb") as f:
             f.seek(0, 2)
-            size = f.tell()
             # Read last 64KB max (enough for tail)
             chunk_size = min(size, 65536)
             f.seek(size - chunk_size)
             content = f.read().decode("utf-8", errors="replace")
-            return content.strip().split("\n")[-lines:]
+            result = content.strip().split("\n")
+        _tail_cache[session_id] = (mtime, size, result)
+        return result[-lines:]
     except OSError:
         return []
 
@@ -1576,7 +1604,7 @@ def _ownership_fields(session_id: str) -> dict:
 
 
 _active_profile_cache: tuple[float, str] = (0.0, "")
-_ACTIVE_PROFILE_TTL = 10.0  # seconds
+_ACTIVE_PROFILE_TTL = 60.0  # seconds — profile only changes on explicit switch
 # Timestamp of the last global profile switch. Sessions spawned before this
 # time have an unverified profile label (the running process may be on the
 # old profile). Zero means no switch has occurred this session.
@@ -1628,9 +1656,168 @@ def _delivery_notes(session_id: str, agent_name: str, cwd: str) -> list[str]:
         return []
 
 
+# ── Sessions list cache ──────────────────────────────────────────────────────
+# list_sessions does significant work (tmux calls, file reads, process checks).
+# When multiple clients poll at the same interval and the thread pool is busy,
+
+@app.get("/api/sessions/debug-timing")
+def sessions_debug_timing():
+    """Internal: time each step of list_sessions to find bottlenecks."""
+    import time as _time
+    steps = {}
+    t = _time.time(); tmux.managed_sessions(); steps["managed_sessions"] = round((_time.time()-t)*1000)
+    t = _time.time(); tmux.reap_pendings(); steps["reap_pendings"] = round((_time.time()-t)*1000)
+    t = _time.time(); tmux.sweep_hook_reports(); tmux.sweep_turn_marks(); tmux.sweep_approvals(); tmux.sweep_gates(); steps["sweeps"] = round((_time.time()-t)*1000)
+    lock_files = list(SESSIONS_DIR.glob("*.lock")) if SESSIONS_DIR.exists() else []
+    steps["lock_files"] = len(lock_files)
+    t = _time.time()
+    for lf in lock_files[:3]:
+        sid = lf.stem; lock_data = read_lock(sid); detect_status(sid, lock_data, "")
+    steps["3x_detect_status"] = round((_time.time()-t)*1000)
+    t = _time.time()
+    for lf in lock_files[:3]:
+        _ownership_fields(lf.stem)
+    steps["3x_ownership_fields"] = round((_time.time()-t)*1000)
+    t = _time.time(); _cached_active_profile(); steps["cached_active_profile"] = round((_time.time()-t)*1000)
+    json_files = sorted(SESSIONS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:40]
+    t = _time.time()
+    for jf in json_files[:20]:
+        read_metadata(jf.stem)
+    steps["20x_read_metadata"] = round((_time.time()-t)*1000)
+    return steps
+
+
+# requests queue and each one re-runs the full scan. A 1-second TTL means at
+# most one full scan per second regardless of concurrency, and the UI (polling
+# every 2s) never sees stale data older than 1 tick.
+_sessions_cache: dict = {"data": None, "ts": 0.0}
+_sessions_cache_lock = threading.Lock()
+_SESSIONS_TTL = 2.0  # seconds — matches the frontend's 2-second poll interval
+_SESSIONS_BG_INTERVAL = 2.5  # background refresh — longer than the 2s UI poll to avoid GIL starvation
+
+
+def _invalidate_sessions_cache() -> None:
+    """Call after any operation that changes session state (dispatch, kill, etc.)."""
+    with _sessions_cache_lock:
+        _sessions_cache["ts"] = 0.0
+
+
+_last_sweep_ts: float = 0.0
+_SWEEP_INTERVAL = 30.0  # seconds between directory sweeps (1659 file stats each)
+
+
+def _sweep_if_due() -> None:
+    """Run the directory sweeps at most once per _SWEEP_INTERVAL.
+
+    sweep_turn_marks iterates TURNS_DIR which can have 1000+ files (1 stat each)
+    and takes 100-1800ms when NFS or disk is slow. Running it on every
+    list_sessions poll (every 2 seconds) makes the sessions endpoint 30-60×
+    slower than necessary.
+    """
+    global _last_sweep_ts
+    now = time.time()
+    if now - _last_sweep_ts < _SWEEP_INTERVAL:
+        return
+    _last_sweep_ts = now
+    tmux.sweep_hook_reports()
+    tmux.sweep_turn_marks()
+    tmux.sweep_approvals()
+    tmux.sweep_gates()
+
+
+def _run_sessions_scan() -> dict:
+    """Execute the full sessions scan and return the result dict.
+
+    Separated from list_sessions so it can be called from both the request
+    handler (first call, no cache yet) and the background refresh thread.
+    """
+    # Import here to avoid circular; these are all module-level in api.py.
+    return _do_sessions_scan()
+
+
+def _sessions_bg_refresh() -> None:
+    """Background thread: refresh the sessions cache every ~2 seconds.
+
+    Runs independently of HTTP requests so the cache is always warm and
+    request handlers return the cached result instantly without competing for
+    thread pool capacity with the expensive scan.
+    """
+    import time as _time
+    # Initial delay: let startup complete before first scan.
+    _time.sleep(3)
+    reported_error: set[str] = set()
+    while True:
+        try:
+            result = _do_sessions_scan()
+            with _sessions_cache_lock:
+                _sessions_cache["data"] = result
+                _sessions_cache["ts"] = _time.time()
+        except Exception as exc:
+            key = f"{type(exc).__name__}: {exc}"
+            if key not in reported_error:
+                reported_error.add(key)
+                print(f"[deck] sessions bg-refresh failed: {key}", file=sys.stderr)
+        _time.sleep(_SESSIONS_BG_INTERVAL)
+
+
 @app.get("/api/sessions")
-def list_sessions():
-    """List all active and recent sessions."""
+def list_sessions(show_hidden: bool = False):
+    """List all active and recent sessions.
+
+    Returns the background-refreshed cache instantly. Falls back to a
+    synchronous scan only on the very first request (cache is empty).
+    
+    Sessions whose title starts with any prefix in the "hidden-title-prefixes"
+    setting are filtered out by default. Pass ?show_hidden=1 to include them.
+    """
+    with _sessions_cache_lock:
+        cached = _sessions_cache["data"]
+    if cached is not None:
+        result = cached
+    else:
+        # First call only: populate the cache synchronously.
+        result = _do_sessions_scan()
+        with _sessions_cache_lock:
+            _sessions_cache["data"] = result
+            _sessions_cache["ts"] = time.time()
+    if show_hidden:
+        return result
+    # Filter out sessions matching hidden title prefixes
+    settings = _load_settings()
+    prefixes = settings.get("hidden-title-prefixes", ["You are Bosun"])
+    if not prefixes:
+        return result
+    filtered = [s for s in result.get("sessions", [])
+                if not any(s.get("title", "").startswith(p) for p in prefixes)]
+    return {"sessions": filtered}
+
+
+_json_files_cache: dict = {"ts": 0.0, "dir_mtime": 0.0, "files": []}
+
+def _sorted_json_files() -> list:
+    """Return .json files in SESSIONS_DIR sorted by mtime descending.
+
+    Avoids calling stat() on all 1300+ files every scan by caching the
+    sorted list for 10s. The sort order only matters for RECENT_SESSIONS_LIMIT
+    truncation — a 10s delay before a brand-new session appears in the grid
+    is acceptable (it shows via its .lock file immediately anyway).
+    """
+    now = time.time()
+    cached = _json_files_cache
+    if cached["files"] and (now - cached["ts"]) < 10.0:
+        return cached["files"]
+    files = sorted(
+        SESSIONS_DIR.glob("*.json") if SESSIONS_DIR.exists() else [],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    _json_files_cache["ts"] = now
+    _json_files_cache["files"] = files
+    return files
+
+
+def _do_sessions_scan() -> dict:
+    """Execute the full sessions scan and return {"sessions": [...]}."""
     sessions = []
     seen_ids = set()
     now = time.time()
@@ -1642,15 +1829,9 @@ def list_sessions():
     # survivors already have a session on disk, so one agent yields one card
     # instead of a placeholder plus an unrecognised "foreign" twin.
     tmux.reap_pendings()
-    # An agentSpawn hook can fire after its spawn has already been correlated by
-    # the fallback, leaving a drop nobody will ever claim. Same reasoning as the
-    # pending reap: sweep on listing, not only at startup.
-    tmux.sweep_hook_reports()
-    tmux.sweep_turn_marks()
-    tmux.sweep_approvals()
-    # Gates on real session ids are decisions and stay; only the nonce-keyed
-    # ones from spawns that never correlated expire.
-    tmux.sweep_gates()
+    # Sweeps scan directories with many files (turns: 1000+ items) and can take
+    # 100-1800ms. Run at most once every 30 seconds rather than on every poll.
+    _sweep_if_due()
     gated = tmux.gated_sessions()
     pending_owners = tmux.pending_owners()
     starting_ids = set(pending_owners.values())
@@ -1740,11 +1921,9 @@ def list_sessions():
         })
 
     # Second pass: recent non-active sessions (by modification time)
-    json_files = sorted(
-        SESSIONS_DIR.glob("*.json"),
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )
+    # ponytail: sorting 1300+ files by mtime calls stat() on every file.
+    # Cache the sorted list for 5s and only re-sort when the dir mtime changes.
+    json_files = _sorted_json_files()
     for json_file in json_files[:RECENT_SESSIONS_LIMIT * 2]:
         session_id = json_file.stem
         if session_id in seen_ids:
@@ -2379,47 +2558,13 @@ def _generate_summary_async(session_id: str, last_seq: int | None = None) -> Non
         f"(max 15 words). Reply with only the sentence, nothing else.\n\n{snippet}"
     )
     try:
-        # Run as a separate process so the ACP kiro-cli subprocess cannot
-        # block FastAPI's thread pool or the tmux polling loop.
-        # Pass prompt via stdin to avoid command-line length/encoding issues.
-        # Use python3 explicitly — inside a frozen PyInstaller bundle,
-        # sys.executable points to the frozen binary, not the Python interpreter.
-        script = Path(__file__).parent / "acp_query.py"
-        if not getattr(sys, "frozen", False):
-            python = sys.executable
-        else:
-            # Inside the frozen bundle sys.executable is the app binary.
-            # system python3 is 3.9 on macOS and does not support X|Y union syntax.
-            # Prefer python3.14 (Homebrew), fall back to python3 only if needed.
-            import shutil as _shutil_py
-            python = (
-                _shutil_py.which("python3.14") or
-                _shutil_py.which("python3.13") or
-                _shutil_py.which("python3.12") or
-                _shutil_py.which("python3.11") or
-                "python3"
-            )
-        # When running inside the frozen app bundle, the script lives inside
-        # backend/ which also contains collections.py (a Quarterdeck module).
-        # System python adds the script's directory to sys.path, causing
-        # collections.py to shadow stdlib and crash with a circular import.
-        # Copy both acp_query.py and acp_session.py to /tmp so they run
-        # outside that directory with no bundle path contamination.
-        import shutil as _shutil, os as _os
-        tmp_script = Path("/tmp/qd_acp_query.py")
-        _shutil.copy2(script, tmp_script)
-        _shutil.copy2(script.parent / "acp_session.py", Path("/tmp/acp_session.py"))
-        run_script = tmp_script
-        env = _os.environ.copy()
-        env.pop("PYTHONPATH", None)  # strip any bundle-injected paths
-        r = subprocess.run(
-            [python, str(run_script)],
-            input=prompt,
-            capture_output=True, text=True, timeout=50,
-            cwd=str(Path.home()),
-            env=env,
-        )
-        text = r.stdout.strip().splitlines()[0][:120] if r.returncode == 0 and r.stdout.strip() else ""
+        # Use the persistent ACP worker — one kiro-cli subprocess reused for all
+        # summaries, so no new session files pile up in ~/.kiro/sessions/cli/.
+        # _generate_summary_async already runs in a background thread (called via
+        # threading.Thread in the stop-hook handler), so blocking here is safe.
+        from . import acp_worker
+        text = acp_worker.query(prompt, timeout=50.0)
+        text = text.strip().splitlines()[0][:120] if text.strip() else ""
         if text:
             _write_summary(session_id, text, last_seq=last_seq)
     except Exception:
@@ -2601,7 +2746,14 @@ def resume_session(session_id: str, payload: dict | None = None):
     if not cwd:
         return {"error": "No cwd for session"}
 
-    result = tmux.spawn(cwd, resume_id=session_id, **_spawn_kwargs(payload, session_id))
+    # Send the session name as the first message so kiro inherits context on
+    # restart instead of waiting silently for user input.
+    title = meta_title(meta)
+    kwargs = _spawn_kwargs(payload, session_id)
+    if title and not kwargs.get("task"):
+        kwargs["task"] = title
+
+    result = tmux.spawn(cwd, resume_id=session_id, **kwargs)
     if not result.get("ok"):
         return {"error": result.get("error", "spawn failed")}
     return {"ok": True, "id": session_id, "attach": tmux.attach_command(session_id)}
@@ -2658,7 +2810,14 @@ def takeover_session(session_id: str, payload: dict | None = None):
         except OSError:
             return {"error": "Old process still holds the session lock"}
 
-    result = tmux.spawn(cwd, resume_id=session_id, **_spawn_kwargs(payload, session_id))
+    # Send the session name as the first message so kiro inherits context on
+    # takeover instead of waiting silently for user input.
+    title = meta_title(meta)
+    kwargs = _spawn_kwargs(payload, session_id)
+    if title and not kwargs.get("task"):
+        kwargs["task"] = title
+
+    result = tmux.spawn(cwd, resume_id=session_id, **kwargs)
     if not result.get("ok"):
         return {"error": result.get("error", "spawn failed"), "killed_pid": pid}
     return {
@@ -3947,11 +4106,37 @@ def get_stack(session_id: str):
 
 @app.post("/api/sessions/{session_id}/stack")
 def add_to_stack(session_id: str, payload: dict):
-    """Append an item to the session's task queue."""
+    """Append an item to the session's task queue.
+
+    Accepts optional ``attachments`` in the same shape as ``send_input`` so
+    paste documents are included as reference lines in the queued task text.
+    """
     text = str(payload.get("text", "")).strip()
-    if not text:
+    attachments = payload.get("attachments") or []
+
+    # Build reference lines for any paste attachments (same logic as send_input)
+    parts = []
+    for att in attachments:
+        att_sid = att.get("session_id") or "_unassigned"
+        att_name = att.get("name", "")
+        if not att_name:
+            continue
+        try:
+            att_meta_lines = att.get("lines", 0)
+            att_meta_size = att.get("size_display", "")
+            ref = paste_store.reference_line(att_sid, att_name, att_meta_lines, att_meta_size)
+            parts.append(ref)
+        except Exception:
+            pass
+    if text:
+        parts.append(text)
+
+    full_text = " ".join(p.strip() for p in parts if p.strip())
+    full_text = " ".join(full_text.split())  # collapse whitespace
+
+    if not full_text:
         return {"error": "text required"}
-    item = tmux.stack_add(session_id, text)
+    item = tmux.stack_add(session_id, full_text)
     return {"ok": True, "item": item, "items": tmux.stack_get(session_id)}
 
 
@@ -4194,6 +4379,129 @@ def kill_session(session_id: str, force: bool = False):
     # Clear any stale record left by a pane that died unnoticed.
     tmux.kill(session_id)
     return {"ok": True, "mode": "signal", "pid": pid}
+
+
+@app.post("/api/sessions/{session_id}/restart-here")
+def restart_here(session_id: str):
+    """Archive the current session and spawn a fresh one preserving name, cwd,
+    queue, favourites, and composer history/draft.
+
+    From the user's perspective the session is cleared; the old one is preserved
+    in archive with an 'ARCHIVE <timestamp>' prefix on its name.
+    """
+    from datetime import datetime
+
+    # 1. Read current metadata — title, cwd, and whether session is a favourite.
+    meta = read_metadata(session_id)
+    original_title = meta_title(meta or {"session_id": session_id})
+    cwd = (meta or {}).get("cwd") or str(Path.home())
+
+    # 2. Capture queue items before killing.
+    old_stack = tmux.stack_get(session_id)
+
+    # 3. Check if this session is a favourite (before we archive it).
+    was_favourite = any(f.get("id") == session_id for f in _load_favourites())
+
+    # 4. Capture composer history + draft from prefs before archiving.
+    history_key = f"composer-history:{session_id}"
+    draft_key = f"draft:{session_id}"
+    old_prefs = _load_prefs()
+    old_history = old_prefs.get(history_key)  # list or None
+    old_draft = old_prefs.get(draft_key)       # str or None
+
+    # 5. Rename old session with ARCHIVE prefix.
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    archive_name = f"ARCHIVE {ts} {original_title}" if original_title else f"ARCHIVE {ts}"
+    _set_deck_name(session_id, archive_name)
+
+    # 6a. Build a conversation summary from the old session before killing it.
+    #     Mirrors side_chat_fork: last 20 messages → compact continuation prompt.
+    #     Capped at 4000 chars so the CLI arg stays reasonable.
+    restart_task = " "  # fallback: empty (original behaviour)
+    try:
+        transcript = read_transcript(session_id, after=-1, limit=20)
+        context_lines = []
+        for msg in transcript.get("messages", []):
+            role = msg.get("role", "")
+            text = (msg.get("text") or "").strip()
+            if role and text:
+                context_lines.append(f"[{role.upper()}]: {text[:800]}")
+        if context_lines:
+            context_text = "\n\n".join(context_lines)[-4000:]
+            restart_task = (
+                "This session was restarted. Here is a summary of the previous "
+                "conversation so you have context — do NOT re-execute anything, "
+                "just resume naturally from where we left off.\n\n"
+                f"=== Previous conversation ===\n{context_text}\n=== End ==="
+            )
+    except Exception:
+        pass  # silently fall back to blank task
+
+    # 6b. Force-kill old session inline (must complete before spawn).
+    if tmux.is_managed(session_id):
+        acp_observer.detach(session_id)
+        tmux.kill(session_id, graceful=False)
+
+    # 7. Spawn fresh session — wait=True so we get the new session_id
+    #    synchronously and can apply all metadata without a race.
+    result = tmux.spawn(cwd, task=restart_task, wait=True)
+    if not result.get("ok"):
+        return {"error": result.get("error", "spawn failed")}
+
+    new_session_id = result.get("session_id", "")
+    nonce = result.get("nonce", "")
+
+    def _apply(resolved_id: str) -> None:
+        if not resolved_id:
+            return
+        # Name
+        _set_deck_name(resolved_id, original_title)
+        # Queue
+        if old_stack:
+            tmux.stack_save(resolved_id, old_stack)
+        # Favourites — add new session if old one was starred
+        if was_favourite:
+            with _favourites_lock:
+                favs = _load_favourites()
+                if not any(f.get("id") == resolved_id for f in favs):
+                    new_meta = read_metadata(resolved_id) or {}
+                    favs.append({
+                        "id": resolved_id,
+                        "title": original_title,
+                        "cwd": cwd,
+                        "cwd_display": shorten_path(cwd),
+                        "name": Path(cwd).name,
+                    })
+                    _save_favourites(favs)
+        # Composer history + draft — copy into prefs under new session's keys
+        if old_history is not None or old_draft is not None:
+            with _prefs_lock:
+                prefs = _load_prefs()
+                if old_history is not None:
+                    prefs[f"composer-history:{resolved_id}"] = old_history
+                if old_draft is not None:
+                    prefs[f"draft:{resolved_id}"] = old_draft
+                _atomic_write_json(_CLIENT_PREFS_FILE, prefs)
+
+    if new_session_id:
+        _apply(new_session_id)
+    else:
+        # wait=True didn't resolve (unusual) — fall back to background polling
+        def _wait_and_apply() -> None:
+            import time
+            resolved = nonce and ""
+            for _ in range(150):  # up to 15 s
+                time.sleep(0.1)
+                for sid, info in tmux.load_state().get("managed", {}).items():
+                    if info.get("nonce") == nonce:
+                        resolved = sid
+                        break
+                if resolved:
+                    break
+            _apply(resolved)
+        threading.Thread(target=_wait_and_apply, daemon=True).start()
+
+    return {"ok": True, "new_session_id": new_session_id or nonce, "nonce": nonce}
 
 
 @app.post("/api/sessions/{session_id}/dismiss")
@@ -4592,7 +4900,9 @@ def _active_profile_name() -> str:
     try:
         import sqlite3 as _sqlite3
         # Primary: match by the active CodeWhisperer profile ARN in state table
-        con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=5)
+        # timeout=0.5: the DB is held by 5+ kiro processes; fail fast and return
+        # cached value rather than blocking list_sessions for up to 5 seconds.
+        con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=0.5)
         try:
             row = con.execute(
                 "SELECT value FROM state WHERE key = 'api.codewhisperer.profile'"
@@ -5086,6 +5396,112 @@ def shells_close(shell_id: str):
     return shell.close_named(shell_id)
 
 
+# ── PTY terminal WebSocket ───────────────────────────────────────────────────
+# Real PTY-backed shell for xterm.js — full ANSI/VT100, cursor, colours.
+# GET /api/pty/{shell_id}/ws  (WebSocket upgrade)
+#   - Binary frames FROM server: raw PTY output bytes → xterm.js writes directly
+#   - Text frames FROM client:   JSON {"type":"data","data":"..."} for keystroke input
+#                                JSON {"type":"resize","cols":N,"rows":N} for terminal resize
+#   - Text frames FROM client:   {"type":"open","cwd":"/path"} to open/verify session
+
+from starlette.websockets import WebSocket as StarletteWebSocket, WebSocketDisconnect
+from backend import pty_shell
+
+
+@app.websocket("/api/pty/{shell_id}/ws")
+async def pty_ws(websocket: StarletteWebSocket, shell_id: str):
+    """WebSocket bridge for a PTY shell session.
+
+    Auth: requires X-Local-Token header or 'token' query param (same as REST).
+    """
+    import asyncio
+
+    # Auth check — same local token as REST endpoints.
+    token_hdr = websocket.headers.get("x-local-token", "")
+    token_qp = websocket.query_params.get("token", "")
+    local = auth.read_local_token()
+    if local:
+        import hmac
+        candidate = token_hdr or token_qp
+        if not hmac.compare_digest(candidate, local):
+            await websocket.close(code=4401)
+            return
+
+    await websocket.accept()
+
+    # We push PTY data to the WebSocket from the reader thread using an asyncio queue.
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    def on_data(data: bytes) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, data)
+
+    sess: pty_shell.PtySession | None = None
+
+    async def sender():
+        """Forward PTY output to the WebSocket."""
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            try:
+                await websocket.send_bytes(chunk)
+            except Exception:
+                break
+
+    try:
+        sender_task = asyncio.ensure_future(sender())
+
+        while True:
+            try:
+                msg = await asyncio.wait_for(websocket.receive_json(), timeout=30)
+            except asyncio.TimeoutError:
+                # Send a keep-alive (zero-length frame) so the connection stays open
+                try:
+                    await websocket.send_bytes(b"")
+                except Exception:
+                    break
+                continue
+
+            mtype = msg.get("type", "")
+
+            if mtype == "open":
+                cwd = msg.get("cwd") or str(Path.home())
+                cols = int(msg.get("cols") or 220)
+                rows = int(msg.get("rows") or 50)
+                try:
+                    sess = pty_shell.get_or_create(cwd, cols, rows)
+                    sess.set_on_data(on_data)
+                    await websocket.send_json({"type": "ready", "shell_id": sess.shell_id})
+                except Exception as e:
+                    await websocket.send_json({"type": "error", "error": str(e)})
+
+            elif mtype == "data":
+                raw = msg.get("data", "")
+                if sess and isinstance(raw, str):
+                    sess.write(raw.encode("utf-8", errors="replace"))
+
+            elif mtype == "resize":
+                cols = int(msg.get("cols") or 80)
+                rows = int(msg.get("rows") or 24)
+                if sess:
+                    sess.resize(cols, rows)
+
+            elif mtype == "close":
+                break
+
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if sess:
+            sess.set_on_data(None)
+        queue.put_nowait(None)
+        try:
+            await asyncio.wait_for(sender_task, timeout=1)
+        except Exception:
+            pass
+
+
 @app.get("/api/assist/activity")
 def assist_activity():
     """Get the concierge's current pane activity for live status display."""
@@ -5344,7 +5760,7 @@ def _dump_auth_rows() -> list[dict]:
     """Read all rows from auth_kv as a list of {key, value} dicts."""
     if not _KIRO_AUTH_DB.exists():
         return []
-    con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=5)
+    con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=0.5)  # fail fast — DB is heavily contended
     try:
         rows = con.execute("SELECT key, value FROM auth_kv").fetchall()
         return [{"key": k, "value": v} for k, v in rows]

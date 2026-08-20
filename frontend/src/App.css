@@ -1212,6 +1212,13 @@ body {
   font-size: 13px;
   color: var(--text-dim);
 }
+.card-fav-star {
+  font-size: 12px;
+  color: #f59e0b;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
 .card-kill {
   width: 18px;
   height: 18px;
@@ -2111,6 +2118,14 @@ body.resizing .detail-resize::after { background: var(--accent); }
   min-height: 0;
   overflow: hidden;
 }
+/* xterm.js pane fills available space */
+.xterm-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 6px;
+  background: #ffffff;
+}
 /* live-pane inside shell view fills available space */
 .detail-shell-view .live-pane {
   flex: 1;
@@ -2167,6 +2182,31 @@ body.resizing .detail-resize::after { background: var(--accent); }
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+/* Terminal cursor inside the captured pane — block character with blink animation */
+.shell-cursor-blink {
+  display: inline;
+  background: currentColor;
+  color: transparent;
+  outline: 1px solid currentColor;
+  animation: shell-pane-cursor-blink 1.2s step-end infinite;
+}
+@keyframes shell-pane-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+/* Sticky dead-shell banner — anchored to bottom of pane-wrap when shell has exited */
+.detail-shell-dead-overlay {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(4px);
+  border-top: 1px solid var(--border);
+  z-index: 5;
 }
 /* Transparent overlay captures keystrokes when raw mode is active */
 .detail-shell-raw-overlay {
@@ -2228,8 +2268,16 @@ body.resizing .detail-resize::after { background: var(--accent); }
   color: var(--text);
   font-family: var(--mono);
   font-size: 12px;
+  /* Cursor feedback lives in the tmux pane above — hide the input caret so
+     it doesn't blink in a different place from the real shell cursor. */
+  caret-color: transparent;
 }
-.detail-shell-cmd:focus { outline: none; border-color: var(--accent); }
+.detail-shell-cmd:focus {
+  outline: none;
+  border-color: var(--accent);
+  /* Show caret only when user actively focuses the input field to type */
+  caret-color: var(--accent);
+}
 
 /* ---- CLI binding chip + picker ---- */
 .detail-cli-chip {
@@ -2983,6 +3031,8 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .stats-bar-count { font-size: 11px; color: #64748b; min-width: 80px; text-align: right; }
 .stats-delete-all { font-size: 11px; background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; border-radius: 4px; padding: 2px 8px; cursor: pointer; margin-left: 8px; }
 .stats-delete-all:hover { background: #fee2e2; }
+.stats-select-all { font-size: 11px; background: #f0f9ff; border: 1px solid #bae6fd; color: #0369a1; border-radius: 4px; padding: 2px 8px; cursor: pointer; margin-left: 8px; }
+.stats-select-all:hover { background: #e0f2fe; }
 
 /* Stats period selector */
 .stats-period-bar { display: flex; align-items: center; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -6707,6 +6757,8 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .side-chat-send:not(:disabled):hover { background: #4f46e5; }
 /* Side button active state */
 .detail-side-btn.active { background: #ede9fe; color: var(--accent, #6366f1); border-color: var(--accent, #6366f1); }
+.detail-icon-fav { font-size: 14px; padding: 3px 7px; }
+.detail-icon-fav.active { color: #f59e0b; border-color: #f59e0b; background: #fffbeb; }
 @media (max-width: 700px) {
   .side-chat-panel { height: 280px; }
   .side-chat-body { font-size: 11px; }

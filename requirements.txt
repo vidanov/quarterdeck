@@ -1,6 +1,7 @@
 # Core
 fastapi==0.139.2
 uvicorn==0.51.0
+websockets==14.1
 
 # File watching
 watchdog==6.0.0
