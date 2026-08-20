@@ -1543,7 +1543,7 @@ export default function App() {
                 {/* View mode switcher — cards/list only; visible when not in wall view */}
                 {sessionViewMode !== 'wall' && (
                   <div className="view-mode-btns">
-                    <button className={`view-mode-btn ${sessionViewMode === 'cards' ? 'active' : ''}`}
+                    <button className={`view-mode-btn ${(sessionViewMode === 'cards' || sessionViewMode === null) ? 'active' : ''}`}
                             title="Card view" onClick={() => changeSessionViewMode('cards')}>⊞</button>
                     <button className={`view-mode-btn ${sessionViewMode === 'list' ? 'active' : ''}`}
                             title="List view" onClick={() => changeSessionViewMode('list')}>☰</button>
@@ -1584,7 +1584,7 @@ export default function App() {
               )}
 
               {/* Cards view (default) — needs-you / working split */}
-              {sessionViewMode === 'cards' && (
+              {(sessionViewMode === 'cards' || sessionViewMode === null) && (
                 <>
                   {needsYou.length > 0 && (
                     <>
