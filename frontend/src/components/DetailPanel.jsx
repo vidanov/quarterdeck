@@ -8,6 +8,8 @@ import * as shellsApi from '../api/shells'
 import { usePasteAttachments } from '../hooks/usePasteAttachments'
 import { PasteAttachments } from './PasteAttachments'
 import { DocCard } from './DocCard'
+import XtermPane from './XtermPane'
+import ShellInputBar from './ShellInputBar'
 
 // Error boundary so a transcript rendering crash shows a recovery button
 // instead of a blank white screen with no way out.
@@ -235,7 +237,7 @@ function ContextPct({ pct, onCompact }) {
   )
 }
 
-function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSelect, options, expanded, onToggleExpand, focusMode, onToggleFocus, paneTheme, sessions, onNewSession, fromWall }) {
+function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSelect, options, expanded, onToggleExpand, focusMode, onToggleFocus, paneTheme, sessions, onNewSession, onRestartHere, fromWall, favourites, onToggleFavourite }) {
   const notify = useToast()
   const askConfirm = useConfirm()
   const [detail, setDetail] = useState(null)
@@ -422,7 +424,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       .then(d => {
         if (d.ok) {
           notify('Sent to CLI', 'info')
-          setDraft('')
+          setDraft(''); if (draftRef.current) draftRef.current.value = ''
           setHistory(prev => { const h = [text, ...prev.filter(x => x !== text)].slice(0, HISTORY_LIMIT); writeHistory(session.id, h); return h })
           setHistoryIndex(-1)
         } else if (d.busy) {
@@ -538,9 +540,11 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     }).catch(() => {})
   }, [session?.id])
 
-  // Poll active shell pane — faster in raw mode for responsive feel
+  // Poll active shell pane — only when shell view is visible.
+  // In raw mode poll faster for responsive feel, but NEVER resurrect 150ms
+  // on load — require the user to have the shell tab open.
   useEffect(() => {
-    if (!activeShellId) return
+    if (!activeShellId || effectiveView !== 'shell') return
     let active = true
     const poll = () => shellsApi.getShellPane(activeShellId)
       .then(d => { if (!active) return; setShellSt(d); setShellPane(d.pane || '') })
@@ -548,7 +552,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     poll()
     const iv = setInterval(poll, shellRawMode ? 150 : 1200)
     return () => { active = false; clearInterval(iv) }
-  }, [activeShellId, shellRawMode])
+  }, [activeShellId, shellRawMode, effectiveView])
 
   // Auto-scroll shell pane
   useEffect(() => {
@@ -909,35 +913,48 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     }
   }, [])
 
+  // Keep a ref to the latest session prop so the seed reads current fields
+  // without making the effect depend on the full object (which changes identity
+  // every poll tick via SessionsContext).
+  const sessionRef = useRef(session)
+  sessionRef.current = session
+
   useEffect(() => {
     if (!session) return
+    const s = sessionRef.current
     // Seed detail immediately from the card-level data we already have.
     // This gives the panel something to render (title, status, path, summary)
     // while the real fetch — which includes the full transcript — completes.
     // The real fetch overwrites this within ~200ms on a local connection.
     setDetail(prev => {
-      if (prev?.id === session.id) return prev   // already have real data, keep it
+      if (prev?.id === s.id) return prev   // already have real data, keep it
       return {
-        id: session.id,
-        title: session.title,
-        cwd: session.cwd,
-        status: session.status,
-        control: session.control,
-        summary: session.summary,
-        last_message: session.last_message,
-        last_output: session.last_output,
-        model: session.model,
-        effort: session.effort,
-        kiro_profile: session.kiro_profile,
-        agent: session.agent,
+        id: s.id,
+        title: s.title,
+        cwd: s.cwd,
+        status: s.status,
+        control: s.control,
+        summary: s.summary,
+        last_message: s.last_message,
+        last_output: s.last_output,
+        model: s.model,
+        effort: s.effort,
+        kiro_profile: s.kiro_profile,
+        agent: s.agent,
         output: null,   // not yet loaded — transcript shows loading state
         _seeded: true,
       }
     })
     const prevOutputLen = { current: 0 }
+    const lastDetailJson = { current: '' }
     const fetchDetail = () => {
       api.getSession(session.id)
         .then(d => {
+          // Skip setState when payload hasn't actually changed — avoids a
+          // full DetailPanel re-render (2600 lines) on every poll tick.
+          const sig = `${d.status}|${d.control}|${(d.output||[]).length}|${d.last_output||''}`
+          if (sig === lastDetailJson.current) return
+          lastDetailJson.current = sig
           const newLen = (d.output || []).length
           setDetail(d)
           if (newLen > prevOutputLen.current) {
@@ -951,11 +968,13 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     fetchDetail()
     const interval = setInterval(fetchDetail, 2000)
     return () => clearInterval(interval)
-  }, [session])
+  }, [session?.id])
 
   // Reset per-session UI state when switching sessions.
   useEffect(() => {
-    setDraft(localStorage.getItem(`draft:${session?.id}`) || ''); setRenaming(false); setPane(''); setEcho(''); setPrompting(false)
+    const restored = localStorage.getItem(`draft:${session?.id}`) || ''
+    setDraft(restored); if (draftRef.current) draftRef.current.value = restored
+    setRenaming(false); setPane(''); setEcho(''); setPrompting(false)
     // Or the next session's first prompt would be suppressed by this one's answer.
     answeredPromptRef.current = 0
     followPaneRef.current = true; setAtBottom(true)
@@ -1038,10 +1057,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     // asking for exactly the visible rows showed roughly two percent of a
     // session that had 771 lines of history behind it.
     const wanted = Math.max((paneRows || 0) * 6, PANE_SCROLLBACK)
+    let lastPaneText = ''
     const load = () => api.getPane(session.id, wanted)
       .then(d => {
         if (!alive) return
-        setPane(d.pane || '')
+        const newPane = d.pane || ''
+        if (newPane !== lastPaneText) { lastPaneText = newPane; setPane(newPane) }
         // A capture taken before kiro-cli had finished redrawing still shows the
         // menu, so an answered prompt would flash back for one poll. Ignore
         // `awaiting_prompt` briefly after answering — but only briefly: a prompt
@@ -1336,21 +1357,24 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   const submitDraft = (e) => {
     if (e) e.preventDefault()
-    if (!draft.trim() && attachments.length === 0) return
+    // Read from DOM ref — draft state is not updated on every keystroke
+    const text = draftRef.current ? draftRef.current.value : draft
+    if (!text.trim() && attachments.length === 0) return
     // Route to CLI when in CLI send mode and a CLI is bound and idle
     if (cliSendMode && cliStatus?.bound) {
-      sendToCli(draft)
+      sendToCli(text)
       return
     }
-    sendText(draft)
+    sendText(text)
     // Newest first, deduped against the immediately preceding entry
-    if (draft.trim()) {
-      const next = (history[0] === draft ? history : [draft, ...history]).slice(0, HISTORY_LIMIT)
+    if (text.trim()) {
+      const next = (history[0] === text ? history : [text, ...history]).slice(0, HISTORY_LIMIT)
       setHistory(next)
       writeHistory(session.id, next)  // write immediately — don't rely on effect timing
     }
     setHistoryIndex(-1)
     setDraft('')
+    if (draftRef.current) draftRef.current.value = ''
   }
 
   // Persist draft per session — write to both localStorage and backend prefs
@@ -1358,10 +1382,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   useEffect(() => {
     if (!session?.id) return
     const key = `draft:${session.id}`
-    if (draft) {
-      localStorage.setItem(key, draft)
+    // Read from DOM ref — draft state is only updated on empty/non-empty flip
+    const text = draftRef.current ? draftRef.current.value : draft
+    if (text) {
+      localStorage.setItem(key, text)
       fetch('/api/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [key]: draft }) }).catch(() => {})
+        body: JSON.stringify({ [key]: text }) }).catch(() => {})
     } else {
       localStorage.removeItem(key)
       // Only clear from backend after initialization — don't overwrite a saved
@@ -1380,7 +1406,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       setHistory(fromBackend || readHistory(session.id))
       // After seeding localStorage from backend, reload draft too
       const savedDraft = localStorage.getItem(`draft:${session.id}`) || ''
-      setDraft(savedDraft)
+      setDraft(savedDraft); if (draftRef.current) draftRef.current.value = savedDraft
       preDraftRef.current = ''
       draftInitializedRef.current = true
     })
@@ -1403,9 +1429,11 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     if (next < -1 || next >= history.length) return
     e.preventDefault()
     // Save the current draft before the first recall so ↓ back to -1 restores it
-    if (historyIndex === -1 && direction > 0) preDraftRef.current = draft
+    if (historyIndex === -1 && direction > 0) preDraftRef.current = draftRef.current ? draftRef.current.value : draft
     setHistoryIndex(next)
-    setDraft(next === -1 ? preDraftRef.current : history[next])
+    const recalled = next === -1 ? preDraftRef.current : history[next]
+    setDraft(recalled)
+    if (draftRef.current) draftRef.current.value = recalled
   }
 
   // Button-triggered history recall (no keyboard event available)
@@ -1432,7 +1460,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         }
       }
       setDraft(prefix)
-      if (draftRef.current) { draftRef.current.focus() }
+      if (draftRef.current) { draftRef.current.value = prefix; draftRef.current.focus() }
       return
     }
     queueOrSend(cmd.cmd)
@@ -1505,14 +1533,32 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           {control === 'acp' && (
             <span className="detail-acp-badge" title="Input routed via ACP — no tmux pane needed">◉ ACP</span>
           )}
-          {/* Expand/fullscreen — prominent, always present */}
+          {/* Favourite — always present */}
+          {onToggleFavourite && (() => {
+            const isFav = (favourites || []).some(f => f.id === session.id)
+            return (
+              <button className={`detail-icon detail-icon-fav${isFav ? ' active' : ''}`}
+                      title={isFav ? 'Remove from favourites' : 'Add to favourites'}
+                      onClick={() => onToggleFavourite(session)}>
+                {isFav ? '★' : '☆'}
+              </button>
+            )
+          })()}
+          {/* Expand/fullscreen — always present */}
           <button className="detail-icon detail-icon-expand" onClick={onToggleExpand}
                   title={expanded ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}>
             {expanded ? '⤡' : '⤢'}
           </button>
+          {/* Items below hidden for foreign/archived sessions — no input possible */}
+          {control !== 'foreign' && control !== 'archived' && (<>
           {/* Correction — icon only */}
           <button className="detail-correct detail-icon" title="Log a correction — agent did something wrong"
                   onClick={logCorrection}>⚑</button>
+          {/* Restart here — archive this session, start fresh with same name + queue */}
+          {control === 'managed' && onRestartHere && (
+            <button className="detail-icon" title="Restart here — archive this session and start a fresh one with the same name and queue"
+                    onClick={() => onRestartHere(session.id)}>↺</button>
+          )}
           {/* Side chat — keep label, it's a mode */}
           <button className={`detail-switch detail-side-btn${sideChatOpen ? ' active' : ''}`}
                   title={sideChatOpen ? 'Close side chat' : 'Open side chat — ask questions about this session without polluting its context'}
@@ -1594,13 +1640,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     ＋ New session
                   </button>
                 )}
-                {onNewSession && session?.cwd && (
-                  <button className="detail-overflow-item"
-                          title={`Start a fresh session in ${session.cwd}`}
-                          onClick={() => onNewSession(session.cwd)}>
-                    ↺ Restart here
-                  </button>
-                )}
                 {onToggleFocus && !expanded && (
                   <button className="detail-overflow-item" onClick={onToggleFocus}>
                     {focusMode ? '◧ Exit focus' : '▣ Focus mode'}
@@ -1609,6 +1648,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </div>
             )}
           </div>
+          </>)}
           <button className="detail-close" onClick={onClose}>✕</button>
         </div>
       </div>
@@ -2113,103 +2153,36 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </button>
             </div>
           ) : (
-            <div className={`detail-shell-view terminal terminal-live pane-${paneTheme}`}>
-              <pre className="live-metric" ref={shellMetricRef} aria-hidden="true">{'M'.repeat(CELL_SAMPLE)}</pre>
-              {!shellSt?.alive && (
+            <div className={`detail-shell-view terminal terminal-live pane-${paneTheme}`} style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+              {!shellSt?.alive && !shellSt?.exists && (
                 <div className="detail-shell-open-row">
-                  <span className="detail-shell-hint">{shellSt?.exists ? '⚠ Shell exited.' : 'Shell not found.'}</span>
+                  <span className="detail-shell-hint">Shell not found.</span>
                   <button className="detail-shell-open-btn" disabled={shellBusy}
                           onClick={() => openShellForCwd(session?.cwd)}>Restart</button>
                 </div>
               )}
-              {(shellSt?.alive || shellPane) && (
-                <div className="detail-shell-pane-wrap">
-                  <pre className="live-pane" ref={shellPaneRef}>{shellPane ? shellPane.replace(/(\n\s*)+$/, '\n') : '…'}</pre>
-                  {shellRawMode && shellSt?.alive && (
-                    <div
-                      ref={shellRawRef}
-                      className="detail-shell-raw-overlay"
-                      tabIndex={0}
-                      onKeyDown={e => {
-                        const key = keyEventToTmux(e)
-                        if (!key) return
-                        if (key === 'Escape') {
-                          const now = Date.now()
-                          if (now - shellLastEscRef.current < 500) {
-                            setShellRaw(false)
-                            shellLastEscRef.current = 0
-                            return
-                          }
-                          shellLastEscRef.current = now
-                        } else {
-                          shellLastEscRef.current = 0
-                        }
-                        e.preventDefault()
-                        e.stopPropagation()
-                        // Optimistic echo for printable single chars
-                        if (key.length === 1 && key !== '\n') {
-                          setShellPane(prev => {
-                            const trimmed = (prev || '').replace(/(\n\s*)+$/, '')
-                            return trimmed + key
-                          })
-                        } else if (key === 'Enter') {
-                          setShellPane(prev => (prev || '').replace(/(\n\s*)+$/, '') + '\n')
-                        } else if (key === 'BSpace') {
-                          setShellPane(prev => {
-                            const trimmed = (prev || '').replace(/(\n\s*)+$/, '')
-                            return trimmed.slice(0, -1)
-                          })
-                        }
-                        // Fire-and-forget — 150ms poll picks up result
-                        shellsApi.shellRawKey(activeShellId, key).catch(() => {})
-                      }}
-                      onBlur={() => {
-                        setTimeout(() => {
-                          if (shellRawMode && shellRawRef.current) shellRawRef.current.focus()
-                        }, 50)
-                      }}
-                    />
-                  )}
+              {!shellSt?.alive && shellSt?.exists && (
+                <div className="detail-shell-open-row">
+                  <span className="detail-shell-hint">⚠ Shell exited.</span>
+                  <button className="detail-shell-open-btn" disabled={shellBusy}
+                          onClick={() => openShellForCwd(session?.cwd)}>Restart</button>
                 </div>
               )}
-              {shellSt?.alive && (
-                <div className="detail-shell-input-row">
-                  {shellRawMode ? (
-                    <div className="detail-shell-raw-wrap">
-                      <span className="detail-shell-raw-hint">⌨ Raw mode — Esc×2 to exit<span className="detail-shell-raw-active-dot" /></span>
-                      <button className="detail-shell-raw-exit"
-                              onClick={() => setShellRaw(false)}
-                              title="Exit raw mode">✕ Exit raw</button>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="detail-shell-keys">
-                        {[['Tab','Tab'],['Up','↑'],['Down','↓'],['C-c','^C'],['C-d','^D'],['C-l','^L']].map(([key, label]) => (
-                          <button key={key} className="composer-chip composer-key" disabled={shellBusy}
-                                  onClick={() => shellsApi.shellKey(activeShellId, key)
-                                    .then(() => shellsApi.getShellPane(activeShellId)
-                                      .then(d => { setShellSt(d); setShellPane(d.pane || '') }))}>
-                            {label}
-                          </button>
-                        ))}
-                        <button className="composer-chip composer-key detail-shell-raw-btn"
-                                title="Raw terminal mode — all keyboard shortcuts work"
-                                onClick={() => setShellRaw(true)}>
-                          ⌨ Raw
-                        </button>
-                      </div>
-                      <form className="detail-shell-form"
-                            onSubmit={e => { e.preventDefault(); shellSend(shellCmd) }}>
-                        <input className="detail-shell-cmd" value={shellCmd} spellCheck={false}
-                               autoCapitalize="off" autoCorrect="off"
-                               placeholder="Type a shell command…"
-                               onChange={e => setShellCmd(e.target.value)} />
-                        <button className="dispatch-btn" type="submit" disabled={shellBusy || !shellCmd.trim()}>↩</button>
-                      </form>
-                    </>
-                  )}
-                </div>
-              )}
+              <XtermPane
+                shellId={activeShellId}
+                cwd={session?.cwd || '~'}
+                active={effectiveView === 'shell'}
+                localToken={window._qdLocalToken || ''}
+                onReady={() => { setShellSt(st => st ? { ...st, alive: true } : st) }}
+                onDead={() => { setShellSt(st => st ? { ...st, alive: false } : st) }}
+                cmdToSend={shellCmd || null}
+                onCmdSent={() => setShellCmd('')}
+              />
+              <ShellInputBar
+                disabled={!shellSt?.alive}
+                onSend={(text) => setShellCmd(text)}
+                onKey={(seq) => setShellCmd(seq)}
+              />
             </div>
           )}
         </div>
@@ -2277,7 +2250,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                           onMouseMove={e => setChipPreview(p => p ? { ...p, x: e.clientX, y: e.clientY } : p)}
                           onMouseLeave={() => setChipPreview(null)}
                           onClick={() => {
-                            setDraft(prev => prev ? `${prev}\n${s.path}` : s.path)
+                            const newVal = (draftRef.current?.value || draft) ? `${draftRef.current?.value || draft}\n${s.path}` : s.path
+                            setDraft(newVal)
+                            if (draftRef.current) draftRef.current.value = newVal
                             dismissedScreenshots.current.add(s.name)
                             setPendingScreenshots(prev => prev.filter(x => x.name !== s.name))
                             setChipPreview(null)
@@ -2323,8 +2298,17 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 ref={draftRef}
                 className="composer-input"
                 rows={expanded ? 3 : 2}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                defaultValue={draft}
+                spellCheck={false}
+                autoCorrect="off"
+                autoCapitalize="off"
+                onInput={(e) => {
+                  // Only sync state when empty/non-empty flips — avoids re-rendering
+                  // DetailPanel on every keystroke (the controlled-input lag).
+                  const empty = !e.target.value.trim()
+                  const wasEmpty = !draft.trim()
+                  if (empty !== wasEmpty) setDraft(e.target.value)
+                }}
                 onPaste={onPasteAttachment}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) submitDraft(e)
@@ -2332,8 +2316,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   if (e.key === 'ArrowDown') recallHistory(e, -1)
                   if (e.key === 'Escape') {
                     e.preventDefault()
-                    if (draft) setDraft('')   // first Esc clears what you typed
-                    else respond('Escape')    // then it reaches the session
+                    if (draftRef.current?.value) {
+                      draftRef.current.value = ''
+                      setDraft('')
+                    } else respond('Escape')
                   }
                   if (e.key === 'x' && e.ctrlKey) {
                     e.preventDefault()
@@ -2342,7 +2328,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 }}
                 placeholder="Reply to this session…  (Enter to send, Shift+Enter for a new line)"
               />
-              <button className="dispatch-btn" type="submit" disabled={!draft.trim() || sending}>
+              <button className="dispatch-btn" type="submit" disabled={(!draft.trim() && attachments.filter(a => !a.uploading).length === 0) || sending}>
                 {sending ? '…' : cliSendMode && cliStatus?.bound ? '↗ CLI' : '↗ Send'}
               </button>
               {/* CLI send mode toggle — only for foreign sessions with a bound CLI */}
@@ -2360,11 +2346,18 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
               <button className="queue-btn" type="button"
                       title="Add to task queue instead of sending now"
-                      disabled={!draft.trim()}
+                      disabled={!draft.trim() && attachments.filter(a => !a.uploading).length === 0}
                       onClick={() => {
-                        if (!draft.trim()) return
-                        api.addStackItem(session.id, draft).then(d => {
-                          if (d.ok) { setStack(d.items); setDraft('') }
+                        const text = draftRef.current ? draftRef.current.value : draft
+                        const readyAtts = attachments.filter(a => !a.uploading)
+                        if (!text.trim() && readyAtts.length === 0) return
+                        api.addStackItem(session.id, text, readyAtts).then(d => {
+                          if (d.ok) {
+                            setStack(d.items)
+                            setDraft('')
+                            if (draftRef.current) draftRef.current.value = ''
+                            clearAttachments()
+                          }
                         }).catch(() => {})
                       }}>
                 + Queue
@@ -2563,6 +2556,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <input
                 className="side-chat-input"
                 value={sideChatDraft}
+                spellCheck={false}
+                autoCorrect="off"
+                autoCapitalize="off"
                 onChange={e => { setSideChatDraft(e.target.value); setSideChatHistoryIdx(-1) }}
                 onPaste={onSideChatPaste}
                 onKeyDown={e => {

@@ -585,6 +585,9 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
         className="launcher-input"
         value={task}
         rows={2}
+        spellCheck={false}
+        autoCorrect="off"
+        autoCapitalize="off"
         onChange={(e) => setTask(e.target.value)}
         onPaste={onLaunchPaste}
         onKeyDown={(e) => {

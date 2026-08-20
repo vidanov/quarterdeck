@@ -49,7 +49,7 @@ import { QuickCreate, CommandBar, NewSessionLauncher } from './components/Launch
 import Markdown from './components/Markdown'
 import { PasteAttachments, PasteTileCompact } from './components/PasteAttachments'
 import { usePasteAttachments } from './hooks/usePasteAttachments'
-import { timeAgo, showPath, STATUS_CONFIG } from './utils'
+import { timeAgo, showPath, STATUS_CONFIG, loadHistoryFromPrefs } from './utils'
 
 function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
   const notify = useToast()
@@ -198,7 +198,7 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
   )
 }
 
-function WallTile({ s, cfg, isLive, isWaiting, focused, onFocus, onOpenFull, onRestart, onKill, held, onRespondApproval }) {
+function WallTile({ s, cfg, isLive, isWaiting, focused, onFocus, onOpenFull, onRestart, onKill, held, onRespondApproval, isFavourite }) {
   const [renaming, setRenaming] = React.useState(false)
   const [nameDraft, setNameDraft] = React.useState('')
   const [confirmKill, setConfirmKill] = React.useState(false)
@@ -224,7 +224,7 @@ function WallTile({ s, cfg, isLive, isWaiting, focused, onFocus, onOpenFull, onR
          onClick={onFocus}
          role="button" tabIndex={0}
          onKeyDown={e => e.key === 'Enter' && onFocus()}>
-      <div className="wall-tile-status" style={{ color: cfg.color }}>{cfg.label}{s.stalled ? ' ⚠' : ''}</div>
+      <div className="wall-tile-status" style={{ color: cfg.color }}>{cfg.label}{s.stalled ? ' ⚠' : ''}{isFavourite ? ' ★' : ''}</div>
       {renaming ? (
         <input
           className="wall-tile-rename-input"
@@ -286,6 +286,7 @@ export default function App() {
     killing, markKilling, unmarkKilling,
     notifiedIds, ackedIds, ack: handleAckSession,
     addOptimistic, resolveOptimistic, rejectOptimistic,
+    showHidden: showCaptain, toggleShowHidden: toggleShowCaptain,
   } = useSessions()
   const [selected, setSelected] = useState(null)
 
@@ -319,8 +320,14 @@ export default function App() {
   const [controlFilter, setControlFilter] = useState(() => localStorage.getItem('control-filter') || 'managed')
   const [statusFilter, setStatusFilter] = useState(() => localStorage.getItem('status-filter') || null)
   const [sessionViewMode, setSessionViewMode] = useState(() => {
-    const v = localStorage.getItem('session-view-mode') || 'wall'
-    return ['cards', 'list', 'wall'].includes(v) ? v : 'wall'
+    const isMobile = window.innerWidth <= 768
+    const deviceKey = isMobile ? 'session-view-mode-mobile' : 'session-view-mode-desktop'
+    // Prefer device-specific key; fall back to legacy key for existing installs.
+    // If localStorage is empty (WKWebView cleared it on app restart), return null
+    // so the backend hydration can set the correct value before we render.
+    const v = localStorage.getItem(deviceKey) || localStorage.getItem('session-view-mode')
+    if (!v) return null  // defer to backend hydration
+    return ['cards', 'list', 'wall'].includes(v) ? v : null
   })
   const [cwdSuggestion, setCwdSuggestion] = useState(null)
   const { pendingApprovals, heldBySession, respondApproval, dismissAll } = useApprovals()
@@ -329,6 +336,7 @@ export default function App() {
     const next = paneTheme === 'dark' ? 'light' : 'dark'
     setPaneThemeApp(next)
     localStorage.setItem('pane-theme', next)
+    settingsApi.saveSettings({ 'pane-theme': next }).catch(() => {})
   }
 
   // Working sessions are collapsed by default: the point of the view is what
@@ -339,14 +347,49 @@ export default function App() {
     setShowWorking(v)
     if (v) localStorage.setItem('show-working', '1')
     else localStorage.removeItem('show-working')
+    settingsApi.saveSettings({ 'show-working': v ? '1' : '0' }).catch(() => {})
   }
-  const changeControlFilter = (v) => { setControlFilter(v); localStorage.setItem('control-filter', v) }
-  const changeStatusFilter = (v) => { setStatusFilter(v); if (v) localStorage.setItem('status-filter', v); else localStorage.removeItem('status-filter') }
+  const changeControlFilter = (v) => {
+    setControlFilter(v)
+    localStorage.setItem('control-filter', v)
+    // Filters are mutually exclusive — clear status when picking a control filter
+    setStatusFilter(null)
+    localStorage.removeItem('status-filter')
+    settingsApi.saveSettings({ 'control-filter': v, 'status-filter': '' }).catch(() => {})
+  }
+  const changeStatusFilter = (v) => {
+    setStatusFilter(v)
+    if (v) {
+      localStorage.setItem('status-filter', v)
+      // Filters are mutually exclusive — reset control filter when picking a status filter
+      setControlFilter('all')
+      localStorage.setItem('control-filter', 'all')
+      settingsApi.saveSettings({ 'status-filter': v, 'control-filter': 'all' }).catch(() => {})
+    } else {
+      localStorage.removeItem('status-filter')
+      settingsApi.saveSettings({ 'status-filter': '' }).catch(() => {})
+    }
+  }
   const changeSessionViewMode = (v) => {
     // Remember the last non-wall mode so wall exit restores it
     if (v !== 'wall') localStorage.setItem('session-view-mode-flat', v)
     setSessionViewMode(v)
     localStorage.setItem('session-view-mode', v)
+    // Also persist to device-specific key so Settings can show separate defaults
+    const isMobile = window.innerWidth <= 768
+    const deviceKey = isMobile ? 'session-view-mode-mobile' : 'session-view-mode-desktop'
+    localStorage.setItem(deviceKey, v)
+    settingsApi.saveSettings({ 'session-view-mode': v }).catch(() => {})
+  }
+  // Handler for Settings panel: sets default for a specific device type
+  const handleChangeViewDefault = (device, v) => {
+    const key = device === 'mobile' ? 'session-view-mode-mobile' : 'session-view-mode-desktop'
+    localStorage.setItem(key, v)
+    // Apply immediately if the current device matches
+    const isMobile = window.innerWidth <= 768
+    if ((device === 'mobile') === isMobile) {
+      changeSessionViewMode(v)
+    }
   }
   const toggleWall = () => {
     if (sessionViewMode === 'wall') {
@@ -371,7 +414,9 @@ export default function App() {
   }
 
   const [showHidden, setShowHidden] = useState(() => localStorage.getItem('show-hidden') === '1')
-  const changeShowHidden = (v) => { setShowHidden(v); if (v) localStorage.setItem('show-hidden', '1'); else localStorage.removeItem('show-hidden') }
+  const changeShowHidden = (v) => { setShowHidden(v); if (v) localStorage.setItem('show-hidden', '1'); else localStorage.removeItem('show-hidden'); settingsApi.saveSettings({ 'show-hidden': v ? '1' : '0' }).catch(() => {}) }
+  const [showCrew, setShowCrew] = useState(() => localStorage.getItem('show-crew') !== '0')
+  const changeShowCrew = (v) => { setShowCrew(v); localStorage.setItem('show-crew', v ? '1' : '0'); settingsApi.saveSettings({ 'show-crew': v ? '1' : '0' }).catch(() => {}) }
   const [activeProfileName, setActiveProfileName] = useState('')
   const openFull = useCallback((session) => {
     selectSession(session)
@@ -626,6 +671,55 @@ export default function App() {
       if (d['last-session-id']) {
         lastSessionIdRef.current = d['last-session-id']
         localStorage.setItem('last-session-id', d['last-session-id'])
+      }
+      // Restore grid settings that localStorage loses on WKWebView restart
+      if (d['control-filter']) {
+        setControlFilter(d['control-filter'])
+        localStorage.setItem('control-filter', d['control-filter'])
+      }
+      if (d['status-filter']) {
+        setStatusFilter(d['status-filter'])
+        localStorage.setItem('status-filter', d['status-filter'])
+      } else if (d['status-filter'] === '') {
+        setStatusFilter(null)
+        localStorage.removeItem('status-filter')
+      }
+      if (d['session-view-mode']) {
+        const v = d['session-view-mode']
+        if (['cards', 'list', 'wall'].includes(v)) {
+          setSessionViewMode(v)
+          localStorage.setItem('session-view-mode', v)
+        }
+      } else {
+        // No backend setting — apply device default now (deferred from useState)
+        const isMobile = window.innerWidth <= 768
+        const deviceKey = isMobile ? 'session-view-mode-mobile' : 'session-view-mode-desktop'
+        const v = localStorage.getItem(deviceKey) || (isMobile ? 'cards' : 'wall')
+        setSessionViewMode(v)
+      }
+      if (d['show-working'] !== undefined) {
+        const v = d['show-working'] === '1'
+        setShowWorking(v)
+        if (v) localStorage.setItem('show-working', '1')
+        else localStorage.removeItem('show-working')
+      }
+      if (d['show-hidden'] !== undefined) {
+        const v = d['show-hidden'] === '1'
+        setShowHidden(v)
+        if (v) localStorage.setItem('show-hidden', '1')
+        else localStorage.removeItem('show-hidden')
+      }
+      if (d['show-crew'] !== undefined) {
+        const v = d['show-crew'] !== '0'
+        setShowCrew(v)
+        localStorage.setItem('show-crew', v ? '1' : '0')
+      }
+      if (d['pane-theme']) {
+        const v = d['pane-theme']
+        if (v === 'dark' || v === 'light') {
+          setPaneThemeApp(v)
+          localStorage.setItem('pane-theme', v)
+        }
       }
     }).catch(() => {}).finally(() => setSettingsLoaded(true))
   }, [])
@@ -914,6 +1008,24 @@ export default function App() {
       .finally(() => fetchSessions())
   }
 
+  const handleRestartHere = async (sessionId) => {
+    const d = await api.restartHere(sessionId)
+      .catch(() => ({ error: 'Network error' }))
+    if (d.error) { notify(d.error, 'error'); return }
+    notify('Session archived — fresh session started', 'info')
+    fetchSessions()
+    // Refresh favourites — backend may have added the new session if old was starred
+    collectionsApi.getFavourites().then(fd => setFavourites(fd.favourites || [])).catch(() => {})
+    const newId = d.new_session_id
+    if (newId && newId.length > 8) {
+      // Seed localStorage with transferred composer history + draft from backend prefs,
+      // then switch to the new session so DetailPanel mounts with history already in place.
+      loadHistoryFromPrefs(newId).catch(() => {}).finally(() => {
+        setTimeout(() => selectSession(newId), 800)
+      })
+    }
+  }
+
   const handleTakeover = async (session) => {
     const ok = await askConfirm(
       'Take over this session?',
@@ -1012,6 +1124,24 @@ export default function App() {
       if (next.has(id)) next.delete(id); else next.add(id)
       return next
     })
+  }
+
+  const handleSelectAllArchive = (results, allSelected) => {
+    if (allSelected) {
+      // Deselect all current results
+      setArchiveSelected(prev => {
+        const next = new Set(prev)
+        results.forEach(s => next.delete(s.id))
+        return next
+      })
+    } else {
+      // Select all current results
+      setArchiveSelected(prev => {
+        const next = new Set(prev)
+        results.forEach(s => next.add(s.id))
+        return next
+      })
+    }
   }
 
   const handleToggleProject = (name) => {
@@ -1119,6 +1249,8 @@ export default function App() {
     // Hide machine-owned workers unless showHidden is on. Defaults: if
     // visible is undefined (old server), treat as true for safety.
     if (s.visible === false && !showHidden) return false
+    // Hide crew sessions when showCrew is off.
+    if (s.control === 'crew' && !showCrew) return false
     return true
   })
 
@@ -1167,11 +1299,19 @@ export default function App() {
       // Group cards have no single control value — show in all views.
       s._isGroupCard))
 
+  // Annotate with is_favourite so cards can show the star and sort to top.
+  const favSet = new Set(favourites.map(f => f.id))
+  const shownActiveWithFav = shownActive.map(s => ({ ...s, is_favourite: favSet.has(s.id) }))
+
   // A working agent needs nothing from you, so it does not deserve the same
   // real estate as one that is stopped waiting. Cards for what needs you; one
   // line each for what does not.
-  const { needsYou, working } = partitionByAttention(shownActive, heldBySession)
-  const visibleSessionIds = shownActive.filter(s => s.id && !s.nonce).map(s => s.id)
+  const { needsYou: needsYouRaw, working: workingRaw } = partitionByAttention(shownActiveWithFav, heldBySession)
+  // Starred sessions float to the top within each partition.
+  const sortFav = arr => [...arr.filter(({s}) => s.is_favourite), ...arr.filter(({s}) => !s.is_favourite)]
+  const needsYou = sortFav(needsYouRaw)
+  const working = sortFav(workingRaw)
+  const visibleSessionIds = shownActiveWithFav.filter(s => s.id && !s.nonce).map(s => s.id)
 
   // Dock badge — update when needsYou count changes
   const prevBadgeRef = useRef(-1)
@@ -1219,7 +1359,7 @@ export default function App() {
           <ProfilePill visibleSessionIds={visibleSessionIds}
                        onProfileSwitch={() => settingsApi.getOptions().then(setOptions).catch(() => {})}
                        onCurrentProfile={setActiveProfileName} />
-          {view === 'active' && !focusMode && <WallToggleBtn />}
+          {view === 'active' && !focusMode && null /* view switch moved to Settings → General → Grid */}
           <button className={`gear-btn ${view === 'settings' ? 'active' : ''}`}
                   onClick={() => changeView(view === 'settings' ? 'active' : 'settings')}
                   title="Settings">⚙</button>
@@ -1371,7 +1511,7 @@ export default function App() {
                     ['managed', 'Managed'],
                     ['foreign', 'Foreign'],
                     ['crew', 'Crew'],
-                  ].map(([key, label]) => {
+                  ].filter(([key]) => key !== 'crew' || showCrew).map(([key, label]) => {
                     const n = key === 'all' ? active.length : active.filter(s => s.control === key).length
                     return (
                       <button key={key}
@@ -1391,14 +1531,24 @@ export default function App() {
                       ⏸ Waiting <span className="control-filter-count">{active.filter(s => s.status === 'awaiting-approval').length}</span>
                     </button>
                   )}
+                  {showHidden && (
+                  <button
+                    className={`status-chip ${showCaptain ? 'active' : ''}`}
+                    onClick={() => { toggleShowCaptain(); setTimeout(fetchSessions, 100) }}
+                    title={showCaptain ? 'Showing captain/subagent sessions — click to hide' : 'Captain sessions hidden — click to show'}>
+                    🧭 Captain
+                  </button>
+                  )}
                 </div>
-                {/* View mode switcher — cards/list only; wall toggle lives in the header */}
-                <div className="view-mode-btns">
-                  <button className={`view-mode-btn ${sessionViewMode === 'cards' ? 'active' : ''}`}
-                          title="Card view" onClick={() => changeSessionViewMode('cards')}>⊞</button>
-                  <button className={`view-mode-btn ${sessionViewMode === 'list' ? 'active' : ''}`}
-                          title="List view" onClick={() => changeSessionViewMode('list')}>☰</button>
-                </div>
+                {/* View mode switcher — cards/list only; visible when not in wall view */}
+                {sessionViewMode !== 'wall' && (
+                  <div className="view-mode-btns">
+                    <button className={`view-mode-btn ${sessionViewMode === 'cards' ? 'active' : ''}`}
+                            title="Card view" onClick={() => changeSessionViewMode('cards')}>⊞</button>
+                    <button className={`view-mode-btn ${sessionViewMode === 'list' ? 'active' : ''}`}
+                            title="List view" onClick={() => changeSessionViewMode('list')}>☰</button>
+                  </div>
+                )}
               </div>
               {/* One prompt box at a time. The launcher is the quick line with
                   its options unfolded — showing both left two "what should the
@@ -1417,7 +1567,7 @@ export default function App() {
               >+</button>
 
               {/* List view — flat compact rows */}
-              {sessionViewMode === 'list' && shownActive.length > 0 && (
+              {sessionViewMode === 'list' && shownActiveWithFav.length > 0 && (
                 <ListView
                   needsYou={needsYou}
                   working={working}
@@ -1457,7 +1607,7 @@ export default function App() {
                         </ul>
                       ) : (
                         <div className="cards">
-                          {needsYou.map(({ s, a }) => <SessionCard key={s.id} session={s} attention={a} onClick={selectSession} onOpenFull={openFull} isSelected={selected?.id === s.id} onKill={handleKillSession} onRestart={handleRestartSession} onCancelPending={handleCancelPending} onTakeover={handleTakeover} onAck={handleAckSession} notified={notifiedIds.has(s.id)} acked={ackedIds.has(s.id)} ending={killing.has(s.id)} held={heldBySession.get(s.id)} onRespondApproval={respondApproval} onRespondPrompt={respondPrompt} onSendText={sendToSession} onCorrect={handleCorrectSession} />)}
+                          {needsYou.map(({ s, a }) => <SessionCard key={s.id} session={s} attention={a} onClick={selectSession} onOpenFull={openFull} isSelected={selected?.id === s.id} onKill={handleKillSession} onRestart={handleRestartSession} onCancelPending={handleCancelPending} onTakeover={handleTakeover} onAck={handleAckSession} notified={notifiedIds.has(s.id)} acked={ackedIds.has(s.id)} ending={killing.has(s.id)} held={heldBySession.get(s.id)} onRespondApproval={respondApproval} onRespondPrompt={respondPrompt} onSendText={sendToSession} onCorrect={handleCorrectSession} isFavourite={s.is_favourite} />)}
                         </div>
                       )}
                     </>
@@ -1502,7 +1652,7 @@ export default function App() {
                 </>
               )}
 
-              {shownActive.length === 0 && (
+              {shownActiveWithFav.length === 0 && (
                 <div className="empty">
                   {!sessionsLoaded
                     ? 'Loading…'
@@ -1511,7 +1661,7 @@ export default function App() {
                       : <>No {controlFilter} sessions. <button className="link-btn" onClick={() => changeControlFilter('all')}>Show all {active.length}</button></>}
                 </div>
               )}
-              {shownActive.length > 0 && sessionViewMode === 'cards' && needsYou.length === 0 && (
+              {shownActiveWithFav.length > 0 && sessionViewMode === 'cards' && needsYou.length === 0 && (
                 <div className="empty empty-calm">
                   Nothing needs you. {working.length} agent{working.length === 1 ? '' : 's'} working.
                 </div>
@@ -1529,6 +1679,7 @@ export default function App() {
               onBatchDelete={handleBatchDelete}
               onDeleteArchive={handleDeleteArchive}
               onRenameArchive={handleRenameArchive}
+              onSelectAllArchive={handleSelectAllArchive}
               favourites={favourites}
               onToggleFavourite={handleToggleFavourite}
               onLaunchFavourite={handleLaunchFavourite}
@@ -1764,7 +1915,7 @@ export default function App() {
             </div>
           )}
           {view === 'settings' && (
-            <SettingsPanel options={options} paneTheme={paneTheme} onTogglePaneTheme={togglePaneTheme} showHidden={showHidden} onChangeShowHidden={changeShowHidden} />
+            <SettingsPanel options={options} paneTheme={paneTheme} onTogglePaneTheme={togglePaneTheme} showHidden={showHidden} onChangeShowHidden={changeShowHidden} showCrew={showCrew} onChangeShowCrew={changeShowCrew} sessionViewMode={sessionViewMode} onChangeViewDefault={handleChangeViewDefault} />
           )}
           {view === 'stacks' && (
             <div className="stacks-panel">
@@ -1789,7 +1940,7 @@ export default function App() {
         {selected && <DetailPanel session={sessions.find(s => s.id === selected.id) || selected} onClose={() => { 
           if (returnView) { changeSessionViewMode(returnView); setReturnView(null) }
           selectSession(null); setFocusMode(false)
-        }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActive} onNewSession={(cwd) => { if (expanded) setExpanded(false); setLauncherOpen(true); if (cwd) setLauncherCwd(cwd) }} fromWall={returnView === 'wall'} />}
+        }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActiveWithFav} onNewSession={(cwd) => { if (expanded) setExpanded(false); setLauncherOpen(true); if (cwd) setLauncherCwd(cwd) }} onRestartHere={handleRestartHere} fromWall={returnView === 'wall'} favourites={favourites} onToggleFavourite={handleToggleFavourite} />}
         {/* Wall / ambient view overlay — big tiles, interactive, full screen */}
         {sessionViewMode === 'wall' && (() => {
           const wallSendInput = () => {
@@ -1802,7 +1953,7 @@ export default function App() {
             // Keep sheet open so user can see response arrive — don't close
           }
           const focusedLive = wallFocused
-            ? (shownActive.find(s => s.id === wallFocused.id) || wallFocused)
+            ? (shownActiveWithFav.find(s => s.id === wallFocused.id) || wallFocused)
             : null
           return (
             <div className="wall-overlay">
@@ -1814,14 +1965,14 @@ export default function App() {
                     { key: 'thinking', label: 'thinking', filter: s => s.status === 'thinking' || s.status === 'running' },
                     { key: 'waiting', label: 'waiting', filter: s => s.status === 'awaiting-approval' },
                   ].map(({ key, label, filter }) => {
-                    const count = shownActive.filter(filter).length
+                    const count = shownActiveWithFav.filter(filter).length
                     return count > 0 ? (
                       <span key={key} className={`wall-stat wall-stat-${key}`}>{count} {label}</span>
                     ) : null
                   })}
                 </div>
                 <div className="wall-header-actions">
-                  <ProfilePill visibleSessionIds={shownActive.map(s => s.id)}
+                  <ProfilePill visibleSessionIds={shownActiveWithFav.map(s => s.id)}
                           onProfileSwitch={() => settingsApi.getOptions().then(setOptions).catch(() => {})}
                           onCurrentProfile={setActiveProfileName} />
                   <button className="wall-new" title="New session (⌘↩)"
@@ -1836,11 +1987,11 @@ export default function App() {
                   <NewSessionLauncher options={options} onDispatch={handleDispatch} onCancel={() => setLauncherOpen(false)} />
                 </div>
               )}
-              {shownActive.length === 0 ? (
+              {shownActiveWithFav.length === 0 ? (
                 <div className="wall-empty">No active sessions</div>
               ) : wallGrouped ? (() => {
                 // Group by collection; sessions in no collection go to "Other"
-                const sessionIdSet = new Set(shownActive.map(s => s.id))
+                const sessionIdSet = new Set(shownActiveWithFav.map(s => s.id))
                 // Build column list: one per non-snapshot collection, plus "Other"
                 const colMap = new Map() // colId -> { name, sessions: [] }
                 for (const c of wallCollections) {
@@ -1851,20 +2002,20 @@ export default function App() {
                   for (const m of (c.members || [])) {
                     const sid = m.session_id || m.id
                     if (sid && sessionIdSet.has(sid)) {
-                      colMap.get(c.id).sessions.push(shownActive.find(s => s.id === sid))
+                      colMap.get(c.id).sessions.push(shownActiveWithFav.find(s => s.id === sid))
                       assigned.add(sid)
                     }
                   }
                 }
                 // Sessions not in any collection → "Other" column
-                const unassigned = shownActive.filter(s => !assigned.has(s.id))
+                const unassigned = shownActiveWithFav.filter(s => !assigned.has(s.id))
                 const columns = [...colMap.values()].filter(c => c.sessions.length > 0)
                 if (unassigned.length > 0) columns.push({ name: 'Other', sessions: unassigned })
                 // Fallback: no collections defined → group by folder
                 const fallback = columns.length === 0
                 if (fallback) {
                   const seen = new Map()
-                  for (const s of shownActive) {
+                  for (const s of shownActiveWithFav) {
                     const key = s.folder || s.cwd || '—'
                     if (!seen.has(key)) seen.set(key, [])
                     seen.get(key).push(s)
@@ -1876,7 +2027,7 @@ export default function App() {
                   const isLive = s.status === 'thinking' || s.status === 'running'
                   const isWaiting = s.status === 'awaiting-approval'
                   return (
-                    <WallTile key={s.id} s={s} cfg={cfg} isLive={isLive} isWaiting={isWaiting}
+                    <WallTile key={s.id} s={s} cfg={cfg} isLive={isLive} isWaiting={isWaiting} isFavourite={s.is_favourite}
                               focused={wallFocused?.id === s.id}
                               onFocus={() => {
                                 if (window.innerWidth <= 768) {
@@ -1911,12 +2062,12 @@ export default function App() {
                 )
               })() : (
                 <div className="wall-grid">
-                  {shownActive.map(s => {
+                  {shownActiveWithFav.map(s => {
                     const cfg = STATUS_CONFIG[s.status] || STATUS_CONFIG.idle
                     const isLive = s.status === 'thinking' || s.status === 'running'
                     const isWaiting = s.status === 'awaiting-approval'
                     return (
-                      <WallTile key={s.id} s={s} cfg={cfg} isLive={isLive} isWaiting={isWaiting}
+                      <WallTile key={s.id} s={s} cfg={cfg} isLive={isLive} isWaiting={isWaiting} isFavourite={s.is_favourite}
                                 focused={wallFocused?.id === s.id}
                                 onFocus={() => {
                                   if (window.innerWidth <= 768) {
@@ -1972,6 +2123,9 @@ export default function App() {
                         placeholder="Reply…"
                         value={wallInput}
                         rows={2}
+                        spellCheck={false}
+                        autoCorrect="off"
+                        autoCapitalize="off"
                         onChange={e => setWallInput(e.target.value)}
                         onPaste={onWallPaste}
                         onKeyDown={e => {

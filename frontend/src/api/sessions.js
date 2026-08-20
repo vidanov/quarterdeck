@@ -1,7 +1,7 @@
 // Sessions: listing, driving, and the queue attached to each one.
 import { getJSON, postJSON, patchJSON, post, del } from './client'
 
-export const listSessions = () => getJSON('/api/sessions')
+export const listSessions = (showHidden) => getJSON(`/api/sessions${showHidden ? '?show_hidden=1' : ''}`)
 export const getSession = (id) => getJSON(`/api/sessions/${id}`)
 
 // `lines` is deliberately far more than fits on screen — tmux keeps scrollback
@@ -40,7 +40,8 @@ export const setTrust = (id, minutes = 30) => postJSON(`/api/sessions/${id}/trus
 export const revokeTrust = (id) => del(`/api/sessions/${id}/trust`)
 
 export const getStack = (id) => getJSON(`/api/sessions/${id}/stack`)
-export const addStackItem = (id, text) => postJSON(`/api/sessions/${id}/stack`, { text })
+export const addStackItem = (id, text, attachments = []) =>
+  postJSON(`/api/sessions/${id}/stack`, { text, attachments })
 export const editStackItem = (id, itemId, text) =>
   patchJSON(`/api/sessions/${id}/stack/${itemId}`, { text })
 export const deleteStackItem = (id, itemId) => del(`/api/sessions/${id}/stack/${itemId}`)
@@ -68,6 +69,7 @@ export const deleteSlashQueueItem = (id, itemId) => del(`/api/sessions/${id}/sla
 
 export const summarize = (id) => postJSON(`/api/sessions/${id}/summarize`, {})
 export const dismissSession = (id) => post(`/api/sessions/${id}/dismiss`)
+export const restartHere = (id) => post(`/api/sessions/${id}/restart-here`)
 
 // Corrections
 export const addCorrection = (id, payload = {}) => postJSON(`/api/sessions/${id}/corrections`, payload)

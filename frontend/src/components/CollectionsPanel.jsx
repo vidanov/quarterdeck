@@ -307,6 +307,7 @@ export default function CollectionsPanel({
   onBatchDelete,
   onDeleteArchive,
   onRenameArchive,
+  onSelectAllArchive,
   // Favourites props
   favourites,
   onToggleFavourite,
@@ -435,6 +436,14 @@ export default function CollectionsPanel({
           <div className="archive-section">
             <h3 className="archive-title">
               All Sessions ({archiveTotal})
+              {archiveResults.length > 0 && (() => {
+                const allSelected = archiveResults.every(s => archiveSelected.has(s.id))
+                return (
+                  <button className="stats-select-all" onClick={() => onSelectAllArchive && onSelectAllArchive(archiveResults, allSelected)}>
+                    {allSelected ? 'Deselect all' : `Select all ${archiveResults.length}`}
+                  </button>
+                )
+              })()}
               {archiveSelected.size > 0 && (
                 <button className="stats-delete-all" onClick={onBatchDelete}>
                   Delete {archiveSelected.size} selected

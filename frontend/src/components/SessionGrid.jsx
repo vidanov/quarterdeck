@@ -120,6 +120,7 @@ function CardReply({ session, held, onRespondApproval, onRespondPrompt, onSendTe
         )}
         <input className="card-reply-input" value={text} disabled={busy}
                placeholder="Reply…" onClick={stop}
+               spellCheck={false} autoCorrect="off" autoCapitalize="off"
                onChange={(e) => { setText(e.target.value); setHistoryIndex(-1) }}
                onPaste={onCardPaste}
                onKeyDown={(e) => {
@@ -136,7 +137,7 @@ function CardReply({ session, held, onRespondApproval, onRespondPrompt, onSendTe
   return null
 }
 
-function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onRestart, onCancelPending, onTakeover, onAck, notified, acked, ending, attention, held, onRespondApproval, onRespondPrompt, onSendText, onCorrect }) {
+function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onRestart, onCancelPending, onTakeover, onAck, notified, acked, ending, attention, held, onRespondApproval, onRespondPrompt, onSendText, onCorrect, isFavourite }) {
   const cfg = STATUS_CONFIG[session.status] || STATUS_CONFIG.done
   const ctrl = CONTROL_LABEL[session.control]
   const openTimer = useRef(null)
@@ -239,6 +240,7 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
           {attention ? attention.action : cfg.label}
         </span>
         <div className="card-header-right">
+          {isFavourite && <span className="card-fav-star" title="Favourite">★</span>}
           <span className="card-time">{timeAgo(session.updated_at)}</span>
           {session.trust_until && session.trust_until * 1000 > Date.now() && (
             <span className="card-trust" title="Trust TTL active — tool calls auto-allowed">
@@ -465,6 +467,7 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
         setSelectedCwd('')
       }}>
         <input className="quick-create-input" value={task} onChange={(e) => { setTask(e.target.value); setQcHistIdx(-1) }}
+               spellCheck={false} autoCorrect="off" autoCapitalize="off"
                onKeyDown={handleKeyDown}
                placeholder={selectedCwd ? `In ${selectedCwd.split('/').pop()}…` : where ? `New session in ${where}…` : 'New session…'} />
         <button className="quick-create-btn" type="submit" disabled={!task.trim()}>▶</button>

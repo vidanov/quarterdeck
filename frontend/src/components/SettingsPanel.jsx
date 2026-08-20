@@ -1370,13 +1370,73 @@ function ProfileSettings() {
   )
 }
 
-function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onChangeShowHidden }) {
+function HiddenPrefixesSettings() {
+  const notify = useToast()
+  const [prefixes, setPrefixes] = React.useState('')
+  const [loaded, setLoaded] = React.useState(false)
+
+  React.useEffect(() => {
+    settingsApi.getSettings().then(s => {
+      const val = s['hidden-title-prefixes']
+      setPrefixes(Array.isArray(val) ? val.join(', ') : 'You are Bosun')
+      setLoaded(true)
+    }).catch(() => setLoaded(true))
+  }, [])
+
+  const save = (value) => {
+    setPrefixes(value)
+    const list = value.split(',').map(s => s.trim()).filter(Boolean)
+    settingsApi.saveSettings({ 'hidden-title-prefixes': list })
+      .then(() => notify('Saved', 'success'))
+      .catch(() => notify('Could not save', 'error'))
+  }
+
+  if (!loaded) return null
+  return (
+    <>
+      <h3 className="settings-title">Hidden session prefixes</h3>
+      <p className="cleanup-hint">
+        Sessions whose title starts with any of these prefixes are hidden from the
+        grid by default. Use the 🧭 Captain button in the toolbar to reveal them.
+        Comma-separated.
+      </p>
+      <div className="settings-row">
+        <input
+          className="settings-text-input"
+          style={{ flex: 1 }}
+          value={prefixes}
+          placeholder="You are Bosun"
+          onChange={e => setPrefixes(e.target.value)}
+          onBlur={e => save(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') save(e.target.value) }}
+        />
+      </div>
+    </>
+  )
+}
+
+function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onChangeShowHidden, showCrew, onChangeShowCrew, sessionViewMode, onChangeViewDefault }) {
   const notify = useToast()
   const askConfirm = useConfirm()
   const [tab, setTab] = useState('remote')
   const [hooks, setHooks] = useState(null)
   const [busy, setBusy] = useState(false)
   const [defaults, setDefaults] = useState({ model: '', effort: '', agent: '', handoffTerminal: 'terminal' })
+  // View defaults — kept in state so changing the other-device select re-renders
+  const [viewDefaults, setViewDefaults] = useState(() => ({
+    desktop: localStorage.getItem('session-view-mode-desktop') || null,
+    mobile:  localStorage.getItem('session-view-mode-mobile')  || null,
+  }))
+
+  // Keep viewDefaults in sync: when the active view changes (e.g. user switches
+  // view then opens Settings), update the current-device slot so the select
+  // reflects the current value rather than a stale initial snapshot.
+  useEffect(() => {
+    if (!sessionViewMode) return
+    const isMobile = window.innerWidth <= 768
+    const device = isMobile ? 'mobile' : 'desktop'
+    setViewDefaults(prev => prev[device] === sessionViewMode ? prev : { ...prev, [device]: sessionViewMode })
+  }, [sessionViewMode])
 
   const loadHooks = () =>
     settingsApi.getHooksStatus().then(setHooks).catch(() => {})
@@ -1526,12 +1586,51 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
           <PollSettings />
           <RetentionSettings />
           <h3 className="settings-title">Grid</h3>
+          {(() => {
+            // Show the *saved default* for each device (from state, not live view).
+            // Falls back to sessionViewMode for the current device on first use.
+            const isMobile = window.innerWidth <= 768
+            const desktopVal = ['cards','list','wall'].includes(viewDefaults.desktop) ? viewDefaults.desktop
+              : (!isMobile ? (sessionViewMode || 'wall') : 'wall')
+            const mobileVal  = ['cards','list','wall'].includes(viewDefaults.mobile)  ? viewDefaults.mobile
+              : (isMobile  ? (sessionViewMode || 'cards') : 'cards')
+            const handleChange = (device, v) => {
+              setViewDefaults(prev => ({ ...prev, [device]: v }))
+              onChangeViewDefault && onChangeViewDefault(device, v)
+            }
+            return (<>
           <div className="settings-row">
-            <span className="settings-label">Show hidden sessions</span>
+            <span className="settings-label">Default view — desktop</span>
+            <select className="launcher-select"
+                    value={desktopVal}
+                    onChange={e => handleChange('desktop', e.target.value)}>
+              <option value="wall">Wall</option>
+              <option value="cards">Cards</option>
+              <option value="list">List</option>
+            </select>
+          </div>
+          <div className="settings-row">
+            <span className="settings-label">Default view — mobile</span>
+            <select className="launcher-select"
+                    value={mobileVal}
+                    onChange={e => handleChange('mobile', e.target.value)}>
+              <option value="wall">Wall</option>
+              <option value="cards">Cards</option>
+              <option value="list">List</option>
+            </select>
+          </div>
+            </>)
+          })()}
+          <p className="cleanup-hint">
+            The view that opens on load. Changes apply immediately on the current device.
+            Desktop and mobile can have different defaults.
+          </p>
+          <div className="settings-row">
+            <span className="settings-label">Show Captain sessions</span>
             <button
               className={`settings-toggle ${showHidden ? 'on' : 'off'}`}
               onClick={() => onChangeShowHidden && onChangeShowHidden(!showHidden)}
-              title="Show machine-owned worker sessions as individual cards (default: grouped)">
+              title="Show machine-owned captain/worker sessions as individual cards (default: grouped)">
               {showHidden ? 'on' : 'off'}
             </button>
           </div>
@@ -1539,6 +1638,19 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
             Worker sessions owned by KiroCrew or another orchestrator are normally
             collapsed into a group card. Turn this on to see them individually.
           </p>
+          <div className="settings-row">
+            <span className="settings-label">Show Crew sessions</span>
+            <button
+              className={`settings-toggle ${showCrew ? 'on' : 'off'}`}
+              onClick={() => onChangeShowCrew && onChangeShowCrew(!showCrew)}
+              title="Show KiroCrew sessions in the grid (default: on)">
+              {showCrew ? 'on' : 'off'}
+            </button>
+          </div>
+          <p className="cleanup-hint">
+            Turn off to hide all Crew-controlled sessions from the grid and the Crew filter button.
+          </p>
+          <HiddenPrefixesSettings />
         </>
       )}
 

@@ -465,6 +465,7 @@ def main():
         script = f"""
 (function() {{
   const _localToken = {token_literal};
+  window._qdLocalToken = _localToken;
   const _origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {{
     init = init ? Object.assign({{}}, init) : {{}};

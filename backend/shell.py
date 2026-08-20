@@ -93,7 +93,11 @@ def list_shells() -> list[dict]:
 
 
 def open_for(cwd: str) -> dict:
-    """Open (or return existing) shell for a given cwd."""
+    """Open (or return existing) shell for a given cwd.
+
+    Returns as soon as the tmux session is created — no blocking poll.
+    The frontend's pane-polling loop detects readiness within its next tick.
+    """
     if not tmux.tmux_available():
         return {"ok": False, "error": "tmux not installed — brew install tmux"}
     target, error = _resolve_cwd(cwd)
@@ -118,7 +122,8 @@ def open_for(cwd: str) -> dict:
         except tmux.TmuxError as e:
             return {"ok": False, "error": str(e)}
 
-    _wait_ready_named(name)
+    # Return immediately — no blocking wait. The pane poll loop in the frontend
+    # picks up the output within its next interval (≤1200 ms).
     return {"ok": True, "ready": True, **_shell_status(name, sid)}
 
 
@@ -185,14 +190,61 @@ def close_named(shell_id: str) -> dict:
 
 
 def get_pane_named(shell_id: str, lines: int = 40) -> dict:
+    """Full shell state — cached for 0.4s to avoid 4 subprocess forks per poll.
+    
+    At 150ms raw-mode polling this means at most 1 real fetch per 2-3 polls
+    instead of 4 forks * 6.7 polls/sec = 27 forks/sec.
+    """
+    now = time.time()
+    cached = _get_pane_cache.get(shell_id)
+    if cached and (now - cached[0]) < 0.4:
+        return cached[1]
+    result = _get_pane_named_uncached(shell_id, lines)
+    _get_pane_cache[shell_id] = (now, result)
+    return result
+
+_get_pane_cache: dict = {}
+
+
+def _get_pane_named_uncached(shell_id: str, lines: int = 40) -> dict:
     name = _tmux_name(shell_id)
-    alive = tmux.session_exists(name) and not tmux.pane_dead(name)
-    pane = capture_named(shell_id, lines) if alive or tmux.session_exists(name) else ""
-    return {"pane": pane, **_shell_status(name, shell_id)}
+    exists = tmux.session_exists(name)
+    alive = exists and not tmux.pane_dead(name)
+    pane = ""
+    if alive or exists:
+        pane = tmux._tmux("capture-pane", "-p", "-t", name, "-S", f"-{lines}", check=False)
+    cursor_x, cursor_y, pane_height = -1, -1, 0
+    cwd = ""
+    if alive:
+        # Single display-message for cwd + cursor — one fork instead of two.
+        raw = tmux._tmux(
+            "display-message", "-p", "-t", name,
+            "#{pane_current_path}\t#{cursor_x}\t#{cursor_y}\t#{pane_height}", check=False
+        ).strip()
+        try:
+            parts = raw.split("\t")
+            cwd = parts[0]
+            cursor_x, cursor_y = int(parts[1]), int(parts[2])
+            pane_height = int(parts[3])
+        except (IndexError, ValueError):
+            pass
+    home = str(Path.home())
+    st = {
+        "shell_id": shell_id,
+        "tmux_session": name,
+        "alive": alive,
+        "exists": exists,
+        "cwd": cwd,
+        "cwd_short": cwd.replace(home, "~") if cwd else "",
+        "attach": f"tmux attach -t {shlex.quote(name)}",
+    }
+    return {"pane": pane, "cursor_x": cursor_x, "cursor_y": cursor_y,
+            "pane_height": pane_height, **st}
 
 
 def _shell_status(name: str, shell_id: str) -> dict:
-    alive = tmux.session_exists(name) and not tmux.pane_dead(name)
+    exists = tmux.session_exists(name)
+    alive = exists and not tmux.pane_dead(name)
     cwd = ""
     if alive:
         cwd = tmux._tmux("display-message", "-p", "-t", name,
@@ -202,7 +254,7 @@ def _shell_status(name: str, shell_id: str) -> dict:
         "shell_id": shell_id,
         "tmux_session": name,
         "alive": alive,
-        "exists": tmux.session_exists(name),
+        "exists": exists,
         "cwd": cwd,
         "cwd_short": cwd.replace(home, "~") if cwd else "",
         "attach": f"tmux attach -t {shlex.quote(name)}",
@@ -254,8 +306,8 @@ def open_shell(cwd: str = "~") -> dict:
                        "set-option -w window-size latest", check=False)
         except tmux.TmuxError as e:
             return {"ok": False, "error": str(e)}
-    ready = _wait_ready(timeout=READY_TIMEOUT)
-    return {"ok": True, "ready": ready, **status()}
+    # Return immediately — frontend poll detects readiness.
+    return {"ok": True, "ready": True, **status()}
 
 
 def _wait_ready(timeout: float = READY_TIMEOUT) -> bool:
