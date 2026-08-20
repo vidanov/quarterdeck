@@ -422,6 +422,11 @@ class TestKill:
         assert "error" in r.json()
 
 
+def _signals_sent(killed) -> list:
+    """Real signals from a patched os.kill, ignoring the `0` liveness probes."""
+    return [call.args[1] for call in killed.call_args_list if call.args[1] != 0]
+
+
 class TestSafeDeletion:
     @staticmethod
     def _write_session(sessions_dir: Path, session_id: str, cwd: Path):
@@ -432,23 +437,92 @@ class TestSafeDeletion:
             json.dumps({"kind": "Prompt"}) + "\n"
         )
 
-    def test_running_session_is_refused_and_left_intact(self, tmp_path):
+    def test_a_live_session_is_killed_before_its_files_go(self, tmp_path):
+        # The contract changed: delete used to refuse while the process was up,
+        # which made the button silently do nothing for an idle managed session
+        # sitting at its prompt. It now ends the session first.
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
         self._write_session(sessions_dir, "live", tmp_path / "project")
-        (sessions_dir / "live.lock").write_text(json.dumps({"pid": os.getpid()}))
-        favourites = tmp_path / "favourites.json"
-        favourites.write_text(json.dumps([{"id": "live"}]))
-
+        (sessions_dir / "live.lock").write_text(json.dumps({"pid": 4242}))
+        # Alive, and positively identified as the session — so killable. The
+        # lock disappears on the second look, as it would once kiro-cli exits.
+        active = iter([True, False])
         with patch.object(api, "SESSIONS_DIR", sessions_dir), \
-             patch.object(api, "FAVOURITES_FILE", favourites):
+             patch.object(api, "is_process_alive", side_effect=lambda pid: next(active, False)), \
+             patch.object(api, "_pid_looks_like_kiro", return_value=True), \
+             patch.object(api.tmux, "is_managed", return_value=False), \
+             patch.object(api, "_remove_favourites") as unstarred, \
+             patch.object(api.os, "kill") as killed:
             result = api.delete_session("live")
 
+        assert _signals_sent(killed) == [api.signal.SIGTERM]
+        assert result["ok"] is True
+        assert not (sessions_dir / "live.json").exists()
+        assert not (sessions_dir / "live.jsonl").exists()
+        unstarred.assert_called_once_with({"live"})
+
+    def test_a_reused_pid_is_never_signalled(self, tmp_path):
+        # The lock names a live pid that is not kiro — the session died and the
+        # kernel handed its number to something else. Killing it would take out
+        # a stranger's process; this is exactly how the suite killed itself,
+        # with its own pid in the lock and a guard that assumed the best.
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        self._write_session(sessions_dir, "stale", tmp_path / "project")
+        (sessions_dir / "stale.lock").write_text(json.dumps({"pid": os.getpid()}))
+
+        with patch.object(api, "SESSIONS_DIR", sessions_dir), \
+             patch.object(api, "_remove_favourites"), \
+             patch.object(api.os, "kill") as killed:
+            result = api.delete_session("stale")
+
+        assert _signals_sent(killed) == [], "a stranger's process must not be signalled"
+        # A stale lock is not a running session, so the files do go.
+        assert result["ok"] is True
+        assert not (sessions_dir / "stale.json").exists()
+
+    def test_an_unidentifiable_process_is_left_alone_and_the_delete_refused(self, tmp_path):
+        # `ps` could not answer. Refusing is recoverable — the user ends the
+        # session and tries again; signalling on a guess is not.
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        self._write_session(sessions_dir, "unknown", tmp_path / "project")
+        (sessions_dir / "unknown.lock").write_text(json.dumps({"pid": 4242}))
+
+        with patch.object(api, "SESSIONS_DIR", sessions_dir), \
+             patch.object(api, "is_process_alive", return_value=True), \
+             patch.object(api, "_pid_looks_like_kiro", return_value=None), \
+             patch.object(api.tmux, "is_managed", return_value=False), \
+             patch.object(api.os, "kill") as killed:
+            result = api.delete_session("unknown")
+
+        assert _signals_sent(killed) == []
         assert result["code"] == "session_active"
-        assert (sessions_dir / "live.json").exists()
-        assert (sessions_dir / "live.jsonl").exists()
-        assert (sessions_dir / "live.lock").exists()
-        assert json.loads(favourites.read_text()) == [{"id": "live"}]
+        assert (sessions_dir / "unknown.json").exists()
+
+    def test_the_pid_check_identifies_kiro_and_nothing_else(self):
+        import subprocess
+        from unittest.mock import MagicMock
+
+        def ps(cmd):
+            return patch.object(subprocess, "run",
+                                return_value=MagicMock(stdout=cmd))
+
+        with ps("kiro-cli chat --resume-id abc"):
+            assert api._pid_looks_like_kiro(1) is True
+        with ps("tmux: server"):
+            assert api._pid_looks_like_kiro(1) is True
+        # Python is the case that mattered: the old guard let it through
+        # because kiro-cli can run under an interpreter.
+        with ps("/usr/bin/python3 -m pytest tests"):
+            assert api._pid_looks_like_kiro(1) is False
+        with ps("node /some/language-server.js"):
+            assert api._pid_looks_like_kiro(1) is False
+        with ps(""):
+            assert api._pid_looks_like_kiro(1) is False
+        with patch.object(subprocess, "run", side_effect=OSError):
+            assert api._pid_looks_like_kiro(1) is None
 
     def test_archived_session_files_and_favourite_are_deleted(self, tmp_path):
         sessions_dir = tmp_path / "sessions"
@@ -507,9 +581,14 @@ class TestSafeDeletion:
         project.mkdir()
         self._write_session(sessions_dir, "archived", project)
         self._write_session(sessions_dir, "live", project / "nested")
-        (sessions_dir / "live.lock").write_text(json.dumps({"pid": os.getpid()}))
+        (sessions_dir / "live.lock").write_text(json.dumps({"pid": 4242}))
 
+        # A pid is only the session when `ps` says so, so a fixture that wants
+        # a live session has to say which pid that is — writing os.getpid() now
+        # describes a stale lock, which is a different test.
         with patch.object(api, "SESSIONS_DIR", sessions_dir), \
+             patch.object(api, "is_process_alive", return_value=True), \
+             patch.object(api, "_pid_looks_like_kiro", return_value=True), \
              patch.object(api, "FAVOURITES_FILE", tmp_path / "favourites.json"):
             result = api.delete_project_sessions({"cwd": str(project)})
 
@@ -1278,9 +1357,11 @@ class TestProjectDeletePreview:
         sessions_dir.mkdir()
         project = tmp_path / "project"
         TestSafeDeletion._write_session(sessions_dir, "live", project)
-        (sessions_dir / "live.lock").write_text(json.dumps({"pid": os.getpid()}))
+        (sessions_dir / "live.lock").write_text(json.dumps({"pid": 4242}))
 
-        with patch.object(api, "SESSIONS_DIR", sessions_dir):
+        with patch.object(api, "SESSIONS_DIR", sessions_dir), \
+             patch.object(api, "is_process_alive", return_value=True), \
+             patch.object(api, "_pid_looks_like_kiro", return_value=True):
             preview = api.preview_project_deletion({"cwd": str(project)})
 
         assert preview["active_sessions"] == ["live"]
@@ -1549,6 +1630,9 @@ class TestPendingCollapse:
         with patch("backend.api.tmux.pending_owners", return_value={"n1": target}), \
              patch("backend.api.tmux.managed_sessions", return_value={}), \
              patch("backend.api.tmux.reap_pendings", return_value=[]):
+            # The first call above warmed the cache, so without this the second
+            # is served from it and the patches never run.
+            api._invalidate_sessions_cache()
             sessions = client.get("/api/sessions").json()["sessions"]
         match = [s for s in sessions if s["id"] == target]
         assert match and match[0]["control"] == "starting"
