@@ -142,3 +142,27 @@ def clear_local_token_for_api_tests(request):
     with patch.object(auth, "read_local_token", return_value=""), \
          patch.object(auth, "_local_token_cache", ""):
         yield
+
+
+# ---------------------------------------------------------------------------
+# Sessions cache — every test starts from a cold one.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def cold_sessions_cache():
+    """Drop the /api/sessions cache before each test.
+
+    The listing is served from a background-refreshed cache, so without this a
+    test's patches never run: it gets the scan a previous test left behind and
+    asserts against someone else's state. Using the production invalidator
+    rather than reaching into the dict means these tests also fail if
+    invalidation stops working — which it had, silently, when it cleared only
+    the timestamp and the read path never looked at one.
+    """
+    try:
+        from backend import api
+    except ImportError:
+        yield
+        return
+    api._invalidate_sessions_cache()
+    yield

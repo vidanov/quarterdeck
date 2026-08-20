@@ -1690,15 +1690,29 @@ def sessions_debug_timing():
 # requests queue and each one re-runs the full scan. A 1-second TTL means at
 # most one full scan per second regardless of concurrency, and the UI (polling
 # every 2s) never sees stale data older than 1 tick.
-_sessions_cache: dict = {"data": None, "ts": 0.0}
+# `dir` records which SESSIONS_DIR produced `data`: a scan of one directory is
+# not an answer about another, and without it the first scan is served for every
+# later caller whatever they are asking about.
+_sessions_cache: dict = {"data": None, "ts": 0.0, "dir": None}
 _sessions_cache_lock = threading.Lock()
-_SESSIONS_TTL = 2.0  # seconds — matches the frontend's 2-second poll interval
 _SESSIONS_BG_INTERVAL = 2.5  # background refresh — longer than the 2s UI poll to avoid GIL starvation
+# How old a cached scan may be before a request pays for a fresh one. Longer
+# than the refresh interval, so while the background thread is alive no request
+# ever scans; if that thread dies, requests fall back to scanning themselves
+# instead of serving one scan forever.
+_SESSIONS_TTL = _SESSIONS_BG_INTERVAL * 2
 
 
 def _invalidate_sessions_cache() -> None:
-    """Call after any operation that changes session state (dispatch, kill, etc.)."""
+    """Call after any operation that changes session state (dispatch, kill, etc.).
+
+    Drops the data, not just the timestamp. Zeroing `ts` alone did nothing,
+    because the read path returned any non-None `data` without looking at its
+    age — so a dispatch or a kill went on showing the pre-change list until the
+    background thread happened to refresh it.
+    """
     with _sessions_cache_lock:
+        _sessions_cache["data"] = None
         _sessions_cache["ts"] = 0.0
 
 
@@ -1752,6 +1766,7 @@ def _sessions_bg_refresh() -> None:
             with _sessions_cache_lock:
                 _sessions_cache["data"] = result
                 _sessions_cache["ts"] = _time.time()
+                _sessions_cache["dir"] = str(SESSIONS_DIR)
         except Exception as exc:
             key = f"{type(exc).__name__}: {exc}"
             if key not in reported_error:
@@ -1770,16 +1785,22 @@ def list_sessions(show_hidden: bool = False):
     Sessions whose title starts with any prefix in the "hidden-title-prefixes"
     setting are filtered out by default. Pass ?show_hidden=1 to include them.
     """
+    now = time.time()
     with _sessions_cache_lock:
         cached = _sessions_cache["data"]
-    if cached is not None:
+        usable = (cached is not None
+                  and _sessions_cache["dir"] == str(SESSIONS_DIR)
+                  and now - _sessions_cache["ts"] < _SESSIONS_TTL)
+    if usable:
         result = cached
     else:
-        # First call only: populate the cache synchronously.
+        # No cache yet, a cache belonging to another directory, or one old
+        # enough that the refresher is evidently not running.
         result = _do_sessions_scan()
         with _sessions_cache_lock:
             _sessions_cache["data"] = result
             _sessions_cache["ts"] = time.time()
+            _sessions_cache["dir"] = str(SESSIONS_DIR)
     if show_hidden:
         return result
     # Filter out sessions matching hidden title prefixes
@@ -1792,7 +1813,9 @@ def list_sessions(show_hidden: bool = False):
     return {"sessions": filtered}
 
 
-_json_files_cache: dict = {"ts": 0.0, "dir_mtime": 0.0, "files": []}
+# `dir` for the same reason the sessions cache carries one: a listing of one
+# directory must never be handed back as a listing of another.
+_json_files_cache: dict = {"ts": 0.0, "dir_mtime": 0.0, "files": [], "dir": None}
 
 def _sorted_json_files() -> list:
     """Return .json files in SESSIONS_DIR sorted by mtime descending.
@@ -1804,7 +1827,8 @@ def _sorted_json_files() -> list:
     """
     now = time.time()
     cached = _json_files_cache
-    if cached["files"] and (now - cached["ts"]) < 10.0:
+    if (cached["files"] and cached["dir"] == str(SESSIONS_DIR)
+            and (now - cached["ts"]) < 10.0):
         return cached["files"]
     files = sorted(
         SESSIONS_DIR.glob("*.json") if SESSIONS_DIR.exists() else [],
@@ -1813,6 +1837,7 @@ def _sorted_json_files() -> list:
     )
     _json_files_cache["ts"] = now
     _json_files_cache["files"] = files
+    _json_files_cache["dir"] = str(SESSIONS_DIR)
     return files
 
 
@@ -4531,8 +4556,43 @@ def dismiss_session(session_id: str):
 SESSION_FILE_EXTENSIONS = (".json", ".jsonl", ".lock", ".history")
 
 
+# What a kiro session's own process looks like in `ps`. The lock records the
+# pid of kiro-cli itself, which is `kiro-cli chat …` — under tmux, under a login
+# shell, or exec'd from a prelude, all of which leave the binary's name in the
+# command line.
+KIRO_PROCESS_MARKERS = ("kiro-cli", "kiro ", "/kiro", "tmux")
+
+
+def _pid_looks_like_kiro(pid: int) -> bool | None:
+    """Whether this pid is the kiro session it claims to be.
+
+    True / False when `ps` answers, None when it could not be asked — the three
+    cases have to stay distinct, because "no answer" must not be read as "yes,
+    kill it".
+    """
+    try:
+        import subprocess as _sp
+        r = _sp.run(["ps", "-p", str(pid), "-o", "command="],
+                    capture_output=True, text=True, timeout=2)
+    except Exception:
+        return None
+    cmd = r.stdout.strip().lower()
+    if not cmd:
+        return False  # exited between the liveness check and this one
+    return any(marker in cmd for marker in KIRO_PROCESS_MARKERS)
+
+
 def _session_is_active(session_id: str) -> bool:
-    """Conservatively decide whether deleting session files is unsafe."""
+    """Conservatively decide whether deleting session files is unsafe.
+
+    Identification is positive: the pid has to look like kiro. It used to be a
+    deny-list of GUI apps with an explicit "never skip Python/tmux/shell", which
+    meant any live pid that was not Safari or Slack counted as the session —
+    and since delete now kills before deleting, a stale lock holding a reused
+    pid got that process a SIGTERM. The test suite proved it by signalling
+    itself: the lock named `os.getpid()`, the guard said "could be kiro", and
+    pytest killed its own process at 14%.
+    """
     lock_path = SESSIONS_DIR / f"{session_id}.lock"
     if not lock_path.exists():
         return False
@@ -4544,26 +4604,13 @@ def _session_is_active(session_id: str) -> bool:
         return True
     if not is_process_alive(pid):
         return False
-    # PID is alive — verify it's actually a kiro/tmux process, not an
-    # unrelated process that inherited a reused PID.
-    try:
-        import subprocess as _sp
-        r = _sp.run(["ps", "-p", str(pid), "-o", "command="],
-                    capture_output=True, text=True, timeout=2)
-        cmd = r.stdout.strip().lower()
-        if not cmd:
-            return False  # gone between checks
-        # Only allow deletion when the process is positively identified as
-        # something that cannot be a kiro session: GUI apps, system daemons, etc.
-        # Never skip Python/tmux/shell — kiro-cli runs under those.
-        definitely_not_kiro = any(
-            x in cmd for x in ("safari", "chrome", "firefox", "slack", "zoom",
-                               "xcode", "finder", "/applications/")
-        )
-        if definitely_not_kiro:
-            return False
-    except Exception:
-        pass  # conservative: assume active
+    looks_like_kiro = _pid_looks_like_kiro(pid)
+    if looks_like_kiro is False:
+        # Alive, but it is not this session — the session died and the kernel
+        # handed its pid to something else. The lock is stale, so the files are
+        # safe to remove, and the process it names is safe from us.
+        return False
+    # True, or unknown because ps could not be asked. Both mean: leave it alone.
     return True
 
 
@@ -4624,15 +4671,26 @@ def delete_session(session_id: str, payload: dict = None):
         # Kill the session so its files become deletable.
         acp_observer.detach(session_id)
         if tmux.is_managed(session_id):
+            # Keyed by session id, so it can only reach a pane we own.
             tmux.kill(session_id, graceful=False)
         else:
             lock_data = read_lock(session_id)
             pid = (lock_data or {}).get("pid")
-            if pid:
+            # Signal only a pid positively identified as this session. An
+            # unidentified one is either a reused pid or a `ps` we could not
+            # run, and neither is worth killing a stranger's process over — the
+            # delete below is refused instead, which is the recoverable failure.
+            if pid and _pid_looks_like_kiro(pid) is True:
                 try:
                     os.kill(pid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
                     pass
+            else:
+                return {
+                    "error": "Session is active and could not be identified; "
+                             "end it yourself before deleting",
+                    "code": "session_active",
+                }
         # Give the process a moment to release its lock file.
         import time as _time
         for _ in range(10):
