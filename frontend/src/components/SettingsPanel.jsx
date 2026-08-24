@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef } from 'react'
 import { errorOf } from '../api/client'
 import * as settingsApi from '../api/settings'
 import * as profilesApi from '../api/profiles'
+import * as denyApi from '../api/denyPatterns'
+import * as secretsApi from '../api/secrets'
+import * as scriptsApi from '../api/scripts'
 import { useToast } from '../state/ToastContext'
 import { useConfirm } from '../state/ConfirmContext'
 
@@ -1415,6 +1418,657 @@ function HiddenPrefixesSettings() {
   )
 }
 
+export const DEFAULT_COMPOSER_CHIPS = [
+  { label: "What's up?", mode: 'send', prompt: 'Where are we? Read the project docs and tell me what is done and what is next.' },
+  { label: 'What next?', mode: 'send', prompt: 'What should we do next and why? Name one concrete task.' },
+  { label: "What's blocked?", mode: 'send', prompt: 'What is currently blocked or waiting? Check the docs and any open steering tasks.' },
+  { label: 'Refactor', mode: 'send', prompt: 'Read the code and name the refactor worth doing most — what is carrying too much, and what would you split out?' },
+  { label: 'Write a task', mode: 'paste', prompt: 'Add a task: ' },
+]
+
+export const CHIP_MODES = ['send', 'paste']
+
+export const validChip = (c) => c && typeof c.label === 'string' && c.label.trim()
+  && typeof c.prompt === 'string' && CHIP_MODES.includes(c.mode)
+
+function ComposerChipsSettings() {
+  const notify = useToast()
+  const [chips, setChips] = React.useState(null)
+
+  React.useEffect(() => {
+    settingsApi.getSettings().then(s => {
+      const v = s['composer-chips']
+      setChips(Array.isArray(v) && v.length ? v.filter(validChip) : DEFAULT_COMPOSER_CHIPS)
+    }).catch(() => setChips(DEFAULT_COMPOSER_CHIPS))
+  }, [])
+
+  const persist = (list) => {
+    settingsApi.saveSettings({ 'composer-chips': list })
+      .catch(() => notify('Could not save', 'error'))
+  }
+
+  const update = (next) => { setChips(next); persist(next) }
+
+  const setChip = (i, patch) => update(chips.map((x, j) => j === i ? { ...x, ...patch } : x))
+
+  const move = (i, dir) => {
+    const next = [...chips]
+    const j = i + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[i], next[j]] = [next[j], next[i]]
+    update(next)
+  }
+
+  if (!chips) return null
+  return (
+    <>
+      <h3 className="settings-title">Composer chips</h3>
+      <p className="cleanup-hint">
+        Buttons above the input composer. <strong>send</strong> fires immediately;{' '}
+        <strong>paste</strong> drops the text in the box for you to finish.
+      </p>
+      <div className="chip-list">
+        {chips.map((c, i) => (
+          <div className="chip-row" key={i}>
+            <div className="chip-row-top">
+              <input className="chip-label" value={c.label} placeholder="label"
+                onChange={e => setChip(i, { label: e.target.value })} />
+              <select className="chip-mode" value={c.mode}
+                onChange={e => setChip(i, { mode: e.target.value })}>
+                {CHIP_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <button className="chip-move" title="Move up" disabled={i === 0}
+                onClick={() => move(i, -1)}>↑</button>
+              <button className="chip-move" title="Move down" disabled={i === chips.length - 1}
+                onClick={() => move(i, 1)}>↓</button>
+              <button className="chip-del" title="Remove"
+                onClick={() => update(chips.filter((_, j) => j !== i))}>×</button>
+            </div>
+            <textarea className="chip-prompt" rows={2} value={c.prompt}
+              placeholder="Prompt text sent or pasted when clicked"
+              onChange={e => setChip(i, { prompt: e.target.value })} />
+          </div>
+        ))}
+      </div>
+      <div className="settings-row" style={{ marginTop: 8, gap: 6 }}>
+        <button className="launcher-btn" onClick={() => update([...chips, { label: 'New chip', prompt: '', mode: 'send' }])}>
+          + Add chip
+        </button>
+        <button className="launcher-btn" onClick={() => update(DEFAULT_COMPOSER_CHIPS)} title="Restore defaults">
+          Reset
+        </button>
+      </div>
+    </>
+  )
+}
+
+function ScriptsSettings() {
+  const notify = useToast()
+  const { askConfirm } = useConfirm()
+  const [folders, setFolders] = React.useState([])
+  const [cwd, setCwd] = React.useState('')
+  const [scripts, setScripts] = React.useState(null)
+  const [imports, setImports] = React.useState(null)
+  const [showImports, setShowImports] = React.useState(false)
+  const [importing, setImporting] = React.useState(null)
+  // Add form state
+  const [name, setName] = React.useState('')
+  const [command, setCommand] = React.useState('')
+  const [description, setDescription] = React.useState('')
+  const [confirm, setConfirm] = React.useState(false)
+  const [adding, setAdding] = React.useState(false)
+
+  React.useEffect(() => {
+    settingsApi.getSettings().then(s => {
+      const pinned = s['pinned-folders'] || []
+      const cwds = pinned.map(f => ({ label: f.folder || f.cwd, cwd: f.cwd }))
+      setFolders(cwds)
+      if (cwds.length > 0 && !cwd) setCwd(cwds[0].cwd)
+    }).catch(() => {})
+  }, [])
+
+  const load = (targetCwd) => {
+    const target = targetCwd || cwd
+    if (!target) { setScripts([]); return }
+    scriptsApi.listScripts(target)
+      .then(d => setScripts(d.scripts || []))
+      .catch(() => setScripts([]))
+  }
+
+  React.useEffect(() => {
+    if (cwd) { load(cwd); setShowImports(false); setImports(null) }
+    else setScripts([])
+  }, [cwd])
+
+  const handleAdd = () => {
+    if (!name.trim() || !command.trim() || !cwd) return
+    setAdding(true)
+    scriptsApi.addScript(cwd, name.trim(), command.trim(), description.trim(), confirm)
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        setName(''); setCommand(''); setDescription(''); setConfirm(false)
+        load()
+      })
+      .catch(() => notify('Could not add script', 'error'))
+      .finally(() => setAdding(false))
+  }
+
+  const handleDelete = async (script) => {
+    const ok = await askConfirm(
+      `Delete script "${script.name}"?`,
+      'This cannot be undone.',
+      'Delete'
+    )
+    if (!ok) return
+    scriptsApi.deleteScript(script.id, cwd)
+      .then(d => {
+        if (d.ok) setScripts(prev => prev.filter(s => s.id !== script.id))
+        else notify('Could not delete', 'error')
+      })
+      .catch(() => notify('Could not delete', 'error'))
+  }
+
+  const handleLoadImports = () => {
+    if (!cwd) return
+    setImporting(null)
+    scriptsApi.detectImports(cwd)
+      .then(d => { setImports(d.imports || []); setShowImports(true) })
+      .catch(() => notify('Could not detect imports', 'error'))
+  }
+
+  const handleImport = (imp) => {
+    setImporting(imp.name)
+    scriptsApi.addScript(cwd, imp.name, imp.command, imp.description || '', false)
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        load()
+        setImports(prev => prev ? prev.filter(i => i.name !== imp.name) : prev)
+      })
+      .catch(() => notify('Could not import', 'error'))
+      .finally(() => setImporting(null))
+  }
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && e.target.tagName !== 'TEXTAREA') {
+      e.preventDefault(); handleAdd()
+    }
+  }
+
+  // Filter out already-added scripts from imports list
+  const addedCommands = new Set((scripts || []).map(s => s.command))
+  const filteredImports = (imports || []).filter(i => !addedCommands.has(i.command))
+
+  return (
+    <div className="scripts-settings">
+      <h3 className="settings-title">Folder scripts</h3>
+      <p className="cleanup-hint">
+        Named shell commands bound to a project. Run them one-click from the toolbar
+        — no LLM session needed.
+      </p>
+
+      {folders.length === 0 ? (
+        <p className="cleanup-hint" style={{ color: '#94a3b8' }}>
+          Pin a project folder in Settings → General to add scripts for it.
+        </p>
+      ) : (
+        <>
+          <div className="settings-row" style={{ marginBottom: 12 }}>
+            <span className="settings-label">Project</span>
+            <select
+              className="launcher-select"
+              value={cwd}
+              onChange={e => setCwd(e.target.value)}
+            >
+              {folders.map(f => (
+                <option key={f.cwd} value={f.cwd}>{f.label}</option>
+              ))}
+            </select>
+            <button
+              className="settings-btn"
+              style={{ marginLeft: 8 }}
+              onClick={handleLoadImports}
+              title="Import targets from Makefile or package.json"
+            >↓ Import</button>
+          </div>
+
+          {/* Import suggestions */}
+          {showImports && filteredImports.length > 0 && (
+            <div className="script-import-list">
+              <p className="cleanup-hint" style={{ marginBottom: 6 }}>
+                Detected in {cwd.split('/').pop()}:
+              </p>
+              {filteredImports.map(imp => (
+                <div key={imp.name} className="script-import-row">
+                  <span className="script-import-source">{imp.source}</span>
+                  <span className="script-import-name">{imp.name}</span>
+                  <span className="script-import-cmd">{imp.command}</span>
+                  <button
+                    className="settings-btn settings-btn-primary"
+                    style={{ padding: '2px 10px', fontSize: 11 }}
+                    onClick={() => handleImport(imp)}
+                    disabled={importing === imp.name}
+                  >{importing === imp.name ? '…' : '+ Add'}</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {showImports && filteredImports.length === 0 && (
+            <p className="cleanup-hint" style={{ color: '#64748b', marginBottom: 8 }}>
+              No new targets found (all already added, or no Makefile/package.json).
+            </p>
+          )}
+
+          {/* Script list */}
+          {scripts === null ? (
+            <p className="cleanup-hint" style={{ color: '#64748b' }}>Loading…</p>
+          ) : scripts.length === 0 ? (
+            <p className="cleanup-hint" style={{ color: '#64748b' }}>No scripts yet.</p>
+          ) : (
+            <div className="scripts-list">
+              {scripts.map(s => (
+                <div key={s.id} className="script-row">
+                  <span className="script-row-name">{s.name}</span>
+                  <code className="script-row-cmd">{s.command}</code>
+                  {s.confirm && (
+                    <span className="script-confirm-badge" title="Asks before running">⚠</span>
+                  )}
+                  <button
+                    className="secret-delete"
+                    onClick={() => handleDelete(s)}
+                    title={`Delete "${s.name}"`}
+                  >×</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add form */}
+          <div className="script-add-form">
+            <div className="script-add-row">
+              <input
+                className="deny-input"
+                placeholder="Name"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                onKeyDown={handleKeyDown}
+                style={{ width: 110 }}
+              />
+              <input
+                className="deny-input"
+                placeholder="shell command"
+                value={command}
+                onChange={e => setCommand(e.target.value)}
+                onKeyDown={handleKeyDown}
+                style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}
+              />
+            </div>
+            <div className="script-add-row" style={{ marginTop: 4 }}>
+              <input
+                className="deny-input"
+                placeholder="Description (optional)"
+                value={description}
+                onChange={e => setDescription(e.target.value)}
+                onKeyDown={handleKeyDown}
+                style={{ flex: 1 }}
+              />
+              <label className="script-confirm-label">
+                <input
+                  type="checkbox"
+                  checked={confirm}
+                  onChange={e => setConfirm(e.target.checked)}
+                  style={{ marginRight: 4 }}
+                />
+                Confirm before run
+              </label>
+              <button
+                className="deny-add-btn"
+                onClick={handleAdd}
+                disabled={adding || !name.trim() || !command.trim()}
+              >{adding ? '…' : 'Add'}</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function SecretsSettings() {
+  const notify = useToast()
+  const { askConfirm } = useConfirm()
+  const [folders, setFolders] = React.useState([])
+  const [cwd, setCwd] = React.useState('')
+  const [secrets, setSecrets] = React.useState(null) // null = loading
+  const [name, setName] = React.useState('')
+  const [value, setValue] = React.useState('')
+  const [adding, setAdding] = React.useState(false)
+  const [showValue, setShowValue] = React.useState(false)
+
+  // Load pinned folders from settings as cwd source
+  React.useEffect(() => {
+    settingsApi.getSettings().then(s => {
+      const pinned = (s['pinned-folders'] || [])
+      const cwds = pinned.map(f => ({ label: f.folder || f.cwd, cwd: f.cwd }))
+      setFolders(cwds)
+      if (cwds.length > 0 && !cwd) setCwd(cwds[0].cwd)
+    }).catch(() => {})
+  }, [])
+
+  const load = (targetCwd) => {
+    const target = targetCwd || cwd
+    if (!target) { setSecrets([]); return }
+    secretsApi.listSecrets(target)
+      .then(d => setSecrets(d.secrets || []))
+      .catch(() => setSecrets([]))
+  }
+
+  React.useEffect(() => {
+    if (cwd) load(cwd)
+    else setSecrets([])
+  }, [cwd])
+
+  const handleAdd = () => {
+    if (!name.trim() || !value.trim() || !cwd) return
+    setAdding(true)
+    secretsApi.addSecret(cwd, name.trim(), value.trim())
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        setName(''); setValue(''); setShowValue(false); load()
+      })
+      .catch(() => notify('Could not add secret', 'error'))
+      .finally(() => setAdding(false))
+  }
+
+  const handleDelete = async (secretName) => {
+    const ok = await askConfirm(
+      `Delete secret ${secretName}?`,
+      'This removes it from the keychain. Any running session using it will continue until restarted.',
+      'Delete'
+    )
+    if (!ok) return
+    secretsApi.deleteSecret(cwd, secretName)
+      .then(d => {
+        if (d.ok) setSecrets(prev => prev.filter(s => s.name !== secretName))
+        else notify('Could not remove', 'error')
+      })
+      .catch(() => notify('Could not remove', 'error'))
+  }
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAdd() }
+  }
+
+  return (
+    <div className="secrets-settings">
+      <h3 className="settings-title">Per-project secrets</h3>
+      <p className="cleanup-hint">
+        Secret values are stored in the macOS keychain, never on disk.
+        Names are injected as environment variables when a session starts in that folder.
+      </p>
+
+      {folders.length === 0 ? (
+        <p className="cleanup-hint" style={{ color: '#94a3b8' }}>
+          Pin a project folder in Settings → General to add secrets for it.
+        </p>
+      ) : (
+        <>
+          <div className="settings-row" style={{ marginBottom: 12 }}>
+            <span className="settings-label">Project</span>
+            <select
+              className="launcher-select"
+              value={cwd}
+              onChange={e => setCwd(e.target.value)}
+            >
+              {folders.map(f => (
+                <option key={f.cwd} value={f.cwd}>{f.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Secret list */}
+          {secrets === null ? (
+            <p className="cleanup-hint" style={{ color: '#64748b' }}>Loading…</p>
+          ) : secrets.length === 0 ? (
+            <p className="cleanup-hint" style={{ color: '#64748b' }}>No secrets for this project yet.</p>
+          ) : (
+            <div className="secrets-list">
+              {secrets.map(s => (
+                <div key={s.name} className="secret-row">
+                  <span className="secret-name">{s.name}</span>
+                  <span className="secret-value-masked">••••••••</span>
+                  <span className="secret-date">
+                    {s.updated_at
+                      ? new Date(s.updated_at).toLocaleDateString([], { month: 'short', day: 'numeric' })
+                      : s.created_at
+                        ? new Date(s.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' })
+                        : ''}
+                  </span>
+                  <button
+                    className="secret-delete"
+                    onClick={() => handleDelete(s.name)}
+                    title={`Delete ${s.name}`}
+                  >×</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add form */}
+          <div className="secrets-add-row">
+            <input
+              className="deny-input"
+              placeholder="NAME"
+              value={name}
+              onChange={e => setName(e.target.value.toUpperCase().replace(/\s/g, '_'))}
+              onKeyDown={handleKeyDown}
+              style={{ width: 120, fontFamily: 'monospace', textTransform: 'uppercase' }}
+            />
+            <div className="secret-value-wrap">
+              <input
+                className="deny-input"
+                placeholder="value"
+                type={showValue ? 'text' : 'password'}
+                value={value}
+                onChange={e => setValue(e.target.value)}
+                onKeyDown={handleKeyDown}
+                style={{ flex: 1, minWidth: 160 }}
+              />
+              <button
+                className="secret-reveal-btn"
+                onClick={() => setShowValue(v => !v)}
+                title={showValue ? 'Hide' : 'Show'}
+                type="button"
+              >{showValue ? '🙈' : '👁'}</button>
+            </div>
+            <button
+              className="deny-add-btn"
+              onClick={handleAdd}
+              disabled={adding || !name.trim() || !value.trim()}
+            >
+              {adding ? '…' : 'Add'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function DenyPatternsSettings() {
+  const notify = useToast()
+  const [patterns, setPatterns] = React.useState(null)
+  const [packs, setPacks] = React.useState(null)
+  const [tool, setTool] = React.useState('execute_bash')
+  const [pattern, setPattern] = React.useState('')
+  const [note, setNote] = React.useState('')
+  const [adding, setAdding] = React.useState(false)
+  const [installing, setInstalling] = React.useState(null) // pack id being installed
+  const [removing, setRemoving] = React.useState(null) // pack id being removed
+
+  const load = () => {
+    denyApi.listPatterns()
+      .then(d => setPatterns(d.patterns || []))
+      .catch(() => setPatterns([]))
+    denyApi.listPacks()
+      .then(d => setPacks(d.packs || []))
+      .catch(() => setPacks([]))
+  }
+
+  React.useEffect(() => { load() }, [])
+
+  const handleAdd = () => {
+    if (!pattern.trim()) return
+    setAdding(true)
+    denyApi.addPattern(tool, pattern.trim(), note.trim())
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        setPattern(''); setNote(''); load()
+      })
+      .catch(() => notify('Could not add pattern', 'error'))
+      .finally(() => setAdding(false))
+  }
+
+  const handleToggle = (id, currentEnabled) => {
+    denyApi.setEnabled(id, !currentEnabled)
+      .then(d => {
+        if (d.ok) setPatterns(prev => prev.map(p => p.id === id ? { ...p, enabled: !currentEnabled } : p))
+        else notify('Could not update', 'error')
+      })
+      .catch(() => notify('Could not update', 'error'))
+  }
+
+  const handleDelete = (id) => {
+    denyApi.deletePattern(id)
+      .then(d => {
+        if (d.ok) setPatterns(prev => prev.filter(p => p.id !== id))
+        else notify('Could not remove', 'error')
+      })
+      .catch(() => notify('Could not remove', 'error'))
+  }
+
+  const handleInstallPack = (packId) => {
+    setInstalling(packId)
+    denyApi.installPack(packId)
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        notify(`Pack installed — ${d.added} added, ${d.skipped} already present`, 'success')
+        load()
+      })
+      .catch(() => notify('Could not install pack', 'error'))
+      .finally(() => setInstalling(null))
+  }
+
+  const handleRemovePack = (packId) => {
+    setRemoving(packId)
+    denyApi.removePack(packId)
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        notify(`Pack removed — ${d.removed} pattern${d.removed !== 1 ? 's' : ''} deleted`, 'success')
+        load()
+      })
+      .catch(() => notify('Could not remove pack', 'error'))
+      .finally(() => setRemoving(null))
+  }
+
+  const autoIds = new Set(['auto-secrets-fs', 'auto-secrets-echo'])
+
+  if (patterns === null) return null
+
+  return (
+    <>
+      {/* Packs section */}
+      {packs && packs.length > 0 && (
+        <div className="deny-packs">
+          <h3 className="settings-title">Ready-to-use packs</h3>
+          {packs.map(pack => (
+            <div key={pack.id} className="deny-pack-row">
+              <div className="deny-pack-info">
+                <span className="deny-pack-name">{pack.name}</span>
+                <span className="deny-pack-desc">{pack.description}</span>
+              </div>
+              <div className="deny-pack-right">
+                {pack.installed === pack.total
+                  ? <span className="deny-pack-installed">✓ {pack.total} installed</span>
+                  : pack.installed > 0
+                    ? <span className="deny-pack-count">{pack.installed}/{pack.total} installed</span>
+                    : null
+                }
+                {pack.installed > 0 && (
+                  <button className="deny-pack-remove-btn" disabled={removing === pack.id}
+                    title="Remove all patterns from this pack"
+                    onClick={() => handleRemovePack(pack.id)}>
+                    {removing === pack.id ? '…' : 'Remove'}
+                  </button>
+                )}
+                <button className="launcher-btn" disabled={installing === pack.id}
+                  onClick={() => handleInstallPack(pack.id)}>
+                  {installing === pack.id ? '…' : pack.installed === pack.total ? 'Re-install' : 'Install'}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <h3 className="settings-title" style={{ marginTop: 16 }}>Active patterns</h3>
+      <p className="cleanup-hint">
+        Regex patterns matched against <code>execute_bash</code> (or other tool) input
+        during <code>preToolUse</code>. Matching calls are blocked automatically — no approval
+        prompt, no agent continuation. Case-insensitive. Toggle to disable without deleting.
+      </p>
+      {patterns.length > 0 ? (
+        <ul className="deny-list">
+          {patterns.map(p => {
+            const isAuto = autoIds.has(p.id)
+            const enabled = p.enabled !== false
+            return (
+              <li key={p.id} className={`deny-item${isAuto ? ' deny-auto' : ''}${!enabled ? ' deny-disabled' : ''}`}>
+                <button className={`deny-toggle ${enabled ? 'deny-toggle-on' : 'deny-toggle-off'}`}
+                  title={enabled ? 'Click to disable' : 'Click to enable'}
+                  onClick={() => !isAuto && handleToggle(p.id, enabled)}
+                  disabled={isAuto}
+                  style={isAuto ? { cursor: 'default' } : {}}>
+                  {enabled ? '●' : '○'}
+                </button>
+                <span className="deny-tool">{p.tool || 'execute_bash'}</span>
+                <code className="deny-pattern">{p.pattern}</code>
+                {p.note && <span className="deny-note">{p.note}</span>}
+                {isAuto
+                  ? <span className="deny-auto-label">auto</span>
+                  : <button className="deny-delete" onClick={() => handleDelete(p.id)} title="Remove">×</button>
+                }
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
+        <p className="cleanup-hint">No patterns yet — only the defaults will fire when secrets are stored.</p>
+      )}
+
+      <h3 className="settings-title" style={{ marginTop: 16 }}>Add pattern</h3>
+      <div className="deny-add-row">
+        <select className="launcher-select deny-tool-select" value={tool}
+          onChange={e => setTool(e.target.value)}>
+          <option value="execute_bash">execute_bash</option>
+          <option value="fs_write">fs_write</option>
+          <option value="fs_read">fs_read</option>
+          <option value="*">any tool</option>
+        </select>
+        <input className="settings-text-input deny-pattern-input" placeholder="regex pattern"
+          value={pattern} onChange={e => setPattern(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleAdd() }} />
+        <input className="settings-text-input deny-note-input" placeholder="note (optional)"
+          value={note} onChange={e => setNote(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleAdd() }} />
+        <button className="launcher-btn" onClick={handleAdd}
+          disabled={adding || !pattern.trim()}>
+          {adding ? '…' : 'Add'}
+        </button>
+      </div>
+    </>
+  )
+}
+
 function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onChangeShowHidden, showCrew, onChangeShowCrew, sessionViewMode, onChangeViewDefault }) {
   const notify = useToast()
   const askConfirm = useConfirm()
@@ -1503,7 +2157,10 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
   const TABS = [
     { id: 'remote',   label: 'Remote' },
     { id: 'general',  label: 'General' },
+    { id: 'chips',    label: 'Chips' },
     { id: 'hooks',    label: 'Hooks' },
+    { id: 'scripts',  label: 'Scripts' },
+    { id: 'security', label: 'Security' },
     { id: 'advanced', label: 'Advanced' },
   ]
 
@@ -1654,6 +2311,10 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
         </>
       )}
 
+      {tab === 'chips' && (
+        <ComposerChipsSettings />
+      )}
+
       {tab === 'hooks' && (
         <>
           <h3 className="settings-title">Kiro hooks</h3>
@@ -1734,6 +2395,17 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
           )}
           <ConciergeSettings options={options} />
           <AuditSettings />
+        </>
+      )}
+
+      {tab === 'scripts' && (
+        <ScriptsSettings />
+      )}
+
+      {tab === 'security' && (
+        <>
+          <SecretsSettings />
+          <DenyPatternsSettings />
         </>
       )}
 

@@ -37,3 +37,6 @@ docs/.DS_Store
 crew-sessions.oracle.md
 build-stamp.json
 backend/build-stamp.json
+
+# Parked reference repos — local only, not committed
+reference/

@@ -2,11 +2,14 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from
 import { createPortal } from 'react-dom'
 import { errorOf } from '../api/client'
 import * as api from '../api/sessions'
+import * as secretsApi from '../api/secrets'
 import * as settingsApi from '../api/settings'
 import * as cliApi from '../api/cli'
+import { useCLI } from '../hooks/useCLI'
 import * as shellsApi from '../api/shells'
 import { usePasteAttachments } from '../hooks/usePasteAttachments'
 import { PasteAttachments } from './PasteAttachments'
+import SideChat from './SideChat'
 import { DocCard } from './DocCard'
 import XtermPane from './XtermPane'
 import ShellInputBar from './ShellInputBar'
@@ -107,6 +110,373 @@ function StackItem({ item, index, count, sessionId, setStack, onDelete, onMove }
       <button className="stack-delete" onClick={() => onDelete(item.id)} title="Remove">×</button>
     </li>
   )
+}
+
+// ── Composer chips — import shared defs from SettingsPanel ───────────────
+import { DEFAULT_COMPOSER_CHIPS, CHIP_MODES, validChip } from './SettingsPanel.jsx'
+import { getProjectSettings, saveProjectSettings } from '../api/projectSettings.js'
+
+// Parse a pasted block into [{name, value}] pairs.
+// Handles: KEY=VALUE, export KEY=VALUE, KEY="VALUE", AWS credentials file format,
+// JSON {"key":"value"}, and dotenv style.
+function parseSecretBlock(text) {
+  const results = []
+  const lines = text.split('\n')
+  // Try JSON first
+  try {
+    const obj = JSON.parse(text.trim())
+    if (typeof obj === 'object' && !Array.isArray(obj)) {
+      for (const [k, v] of Object.entries(obj)) {
+        if (typeof v === 'string' && v) results.push({ name: k.toUpperCase().replace(/[^A-Z0-9_]/g, '_'), value: v })
+      }
+      if (results.length) return results
+    }
+  } catch {}
+  // AWS credentials file: aws_access_key_id = VALUE
+  for (const line of lines) {
+    const awsMatch = line.match(/^\s*(aws_[a-z_]+)\s*=\s*(.+)$/)
+    if (awsMatch) {
+      results.push({ name: awsMatch[1].toUpperCase(), value: awsMatch[2].trim() })
+      continue
+    }
+    // export KEY=VALUE or KEY=VALUE (with optional quotes)
+    const envMatch = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']?([^"'\n]+)["']?\s*$/)
+    if (envMatch) {
+      results.push({ name: envMatch[1].toUpperCase(), value: envMatch[2].trim() })
+    }
+  }
+  return results
+}
+
+// ── ChipsPanel modal — per-project chips editor ───────────────────────────
+function ChipsPanel({ cwd, onClose }) {
+  const notify = useToast()
+  const [projectChips, setProjectChips] = React.useState(null)
+  const [includeGlobal, setIncludeGlobal] = React.useState(true)
+  const [globalChips, setGlobalChips] = React.useState(DEFAULT_COMPOSER_CHIPS)
+
+  React.useEffect(() => {
+    getProjectSettings(cwd).then(s => {
+      const v = s['composer-chips']
+      setProjectChips(Array.isArray(v) ? v.filter(validChip) : [])
+      setIncludeGlobal(s['chips-include-global'] !== false)
+    }).catch(() => setProjectChips([]))
+  }, [cwd])
+
+  React.useEffect(() => {
+    settingsApi.getSettings().then(s => {
+      const v = s['composer-chips']
+      if (Array.isArray(v) && v.length) setGlobalChips(v.filter(validChip))
+    }).catch(() => {})
+  }, [])
+
+  React.useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  const save = (chips, include) => {
+    saveProjectSettings(cwd, { 'composer-chips': chips, 'chips-include-global': include })
+      .catch(() => notify('Could not save', 'error'))
+  }
+
+  const updateChips = (next) => { setProjectChips(next); save(next, includeGlobal) }
+  const updateInclude = (v) => { setIncludeGlobal(v); save(projectChips || [], v) }
+
+  const setChip = (i, patch) => updateChips((projectChips || []).map((x, j) => j === i ? { ...x, ...patch } : x))
+  const move = (i, dir) => {
+    const next = [...(projectChips || [])]
+    const j = i + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[i], next[j]] = [next[j], next[i]]
+    updateChips(next)
+  }
+
+  const chips = projectChips || []
+
+  return (
+    <div className="secrets-modal-overlay" onClick={onClose}>
+      <div className="secrets-modal-box chips-panel-box" onClick={e => e.stopPropagation()}>
+        <div className="secrets-modal-header">
+          <span className="secrets-modal-title">🧩 Project Chips</span>
+          <button className="secrets-modal-close" onClick={onClose}>✕</button>
+        </div>
+        <p className="secrets-hint">
+          Starter chips shown above the composer for this project.
+          When empty, global chips from <strong>Settings → Chips</strong> are used.
+        </p>
+
+        <div className="chips-panel-include-row">
+          <label className="chips-panel-include-label">
+            <input type="checkbox" checked={includeGlobal}
+              onChange={e => updateInclude(e.target.checked)} />
+            {' '}Include global chips after project chips
+          </label>
+        </div>
+
+        {chips.length === 0 && (
+          <p className="project-chips-hint" style={{ marginBottom: 12 }}>
+            No project chips yet — global chips will be shown.{' '}
+            Add one below to override.
+          </p>
+        )}
+
+        <div className="chip-list">
+          {chips.map((c, i) => (
+            <div className="chip-row" key={i}>
+              <div className="chip-row-top">
+                <input className="chip-label" value={c.label} placeholder="label"
+                  onChange={e => setChip(i, { label: e.target.value })} />
+                <select className="chip-mode" value={c.mode}
+                  onChange={e => setChip(i, { mode: e.target.value })}>
+                  {CHIP_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <button className="chip-move" title="Move up" disabled={i === 0}
+                  onClick={() => move(i, -1)}>↑</button>
+                <button className="chip-move" title="Move down" disabled={i === chips.length - 1}
+                  onClick={() => move(i, 1)}>↓</button>
+                <button className="chip-del" title="Remove"
+                  onClick={() => updateChips(chips.filter((_, j) => j !== i))}>×</button>
+              </div>
+              <textarea className="chip-prompt" rows={2} value={c.prompt}
+                placeholder="Prompt text"
+                onChange={e => setChip(i, { prompt: e.target.value })} />
+            </div>
+          ))}
+        </div>
+
+        <div className="settings-row" style={{ marginTop: 10, gap: 6 }}>
+          <button className="launcher-btn"
+            onClick={() => updateChips([...chips, { label: 'New chip', prompt: '', mode: 'send' }])}>
+            + Add chip
+          </button>
+          {chips.length > 0 && (
+            <button className="launcher-btn" onClick={() => updateChips([])}>
+              Clear (use global only)
+            </button>
+          )}
+        </div>
+
+        {globalChips.length > 0 && (
+          <div className="chips-panel-global-preview">
+            <div className="secrets-section-label" style={{ marginBottom: 6 }}>
+              Global chips {includeGlobal ? '(will appear after project chips)' : '(not included)'}
+            </div>
+            <div className="secrets-chips-row">
+              {globalChips.map((c, i) => (
+                <span key={i} className={`secrets-chip-btn ${includeGlobal ? '' : 'chip-excluded'}`}
+                  title={c.prompt}>{c.label}</span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Per-project composer chips editor ────────────────────────────────────
+function ProjectChipsSettings({ cwd, chips, onChange }) {
+  const setChip = (i, patch) => onChange(chips.map((x, j) => j === i ? { ...x, ...patch } : x))
+
+  const move = (i, dir) => {
+    const next = [...chips]
+    const j = i + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[i], next[j]] = [next[j], next[i]]
+    onChange(next)
+  }
+
+  return (
+    <div className="project-chips-editor">
+      <p className="project-chips-hint">
+        Project chips appear instead of global chips when this project is open.
+        Leave empty to use global chips.
+      </p>
+      <div className="chip-list chip-list-compact">
+        {chips.map((c, i) => (
+          <div className="chip-row" key={i}>
+            <div className="chip-row-top">
+              <input className="chip-label" value={c.label} placeholder="label"
+                onChange={e => setChip(i, { label: e.target.value })} />
+              <select className="chip-mode" value={c.mode}
+                onChange={e => setChip(i, { mode: e.target.value })}>
+                {CHIP_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <button className="chip-move" title="Move up" disabled={i === 0}
+                onClick={() => move(i, -1)}>↑</button>
+              <button className="chip-move" title="Move down" disabled={i === chips.length - 1}
+                onClick={() => move(i, 1)}>↓</button>
+              <button className="chip-del" title="Remove"
+                onClick={() => onChange(chips.filter((_, j) => j !== i))}>×</button>
+            </div>
+            <textarea className="chip-prompt" rows={2} value={c.prompt}
+              placeholder="Prompt text"
+              onChange={e => setChip(i, { prompt: e.target.value })} />
+          </div>
+        ))}
+      </div>
+      <div className="settings-row" style={{ marginTop: 6, gap: 6 }}>
+        <button className="launcher-btn" onClick={() => onChange([...chips, { label: 'New chip', prompt: '', mode: 'send' }])}>
+          + Add chip
+        </button>
+        {chips.length > 0 && (
+          <button className="launcher-btn" onClick={() => onChange([])} title="Clear project chips, use global">
+            Clear (use global)
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SecretsPanel({ cwd, onClose, modal, children }) {
+  const notify = useToast()
+  const [secrets, setSecrets] = React.useState(null)
+  const [name, setName] = React.useState('')
+  const [value, setValue] = React.useState('')
+  const [showValue, setShowValue] = React.useState(false)
+  const [saving, setSaving] = React.useState(false)
+  const [pasteText, setPasteText] = React.useState('')
+  const [parsed, setParsed] = React.useState([])   // [{name, value}] from paste
+  const [savingBatch, setSavingBatch] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!cwd) return
+    secretsApi.listSecrets(cwd).then(d => setSecrets(d.secrets || [])).catch(() => setSecrets([]))
+  }, [cwd])
+
+  React.useEffect(() => {
+    if (!modal || !onClose) return
+    const handler = (e) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [modal, onClose])
+
+  const reload = () => secretsApi.listSecrets(cwd).then(d => setSecrets(d.secrets || [])).catch(() => {})
+
+  const handleAdd = () => {
+    if (!name.trim() || !value.trim()) return
+    setSaving(true)
+    secretsApi.setSecret(cwd, name.trim(), value.trim())
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        setName(''); setValue(''); setShowValue(false)
+        reload()
+      })
+      .catch(() => notify('Could not save', 'error'))
+      .finally(() => setSaving(false))
+  }
+
+  const handlePasteChange = (text) => {
+    setPasteText(text)
+    setParsed(text.trim() ? parseSecretBlock(text) : [])
+  }
+
+  const handleSaveBatch = () => {
+    if (!parsed.length) return
+    setSavingBatch(true)
+    Promise.all(parsed.map(p => secretsApi.setSecret(cwd, p.name, p.value)))
+      .then(() => { setPasteText(''); setParsed([]); reload(); notify(`${parsed.length} secrets saved`, 'info') })
+      .catch(() => notify('Some secrets could not be saved', 'error'))
+      .finally(() => setSavingBatch(false))
+  }
+
+  const handleDelete = (secretName) => {
+    secretsApi.deleteSecret(cwd, secretName)
+      .then(d => {
+        if (d.ok) setSecrets(prev => prev.filter(s => s.name !== secretName))
+        else notify('Could not remove', 'error')
+      })
+      .catch(() => notify('Could not remove', 'error'))
+  }
+
+  const existingNames = new Set((secrets || []).map(s => s.name))
+
+  const content = (
+    <div className="secrets-modal-box" onClick={e => e.stopPropagation()}>
+      <div className="secrets-modal-header">
+        <span className="secrets-modal-title">🔑 Project Secrets</span>
+        <button className="secrets-modal-close" onClick={onClose}>✕</button>
+      </div>
+      <p className="secrets-hint">Injected as env vars at session start. Values in macOS keychain — agent cannot read them.</p>
+
+      {/* Existing secrets */}
+      {secrets === null ? (
+        <div className="secrets-loading">Loading…</div>
+      ) : secrets.length > 0 && (
+        <ul className="secrets-list">
+          {secrets.map(s => (
+            <li key={s.name} className="secrets-row">
+              <code className="secrets-name">{s.name}</code>
+              <span className="secrets-value">••••••</span>
+              <button className="secrets-delete" title="Remove" onClick={() => handleDelete(s.name)}>×</button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="secrets-add-section">
+        <div className="secrets-section-label">Add secret</div>
+
+        {/* Smart paste */}
+        <textarea
+          className="secrets-paste-area"
+          placeholder={'Paste credentials block, .env lines, or JSON:\nexport AWS_ACCESS_KEY_ID=AKIA...\nAWS_SECRET_ACCESS_KEY=abc...\n{"OPENAI_API_KEY":"sk-..."}'}
+          value={pasteText}
+          onChange={e => handlePasteChange(e.target.value)}
+          rows={4}
+        />
+        {parsed.length > 0 && (
+          <div className="secrets-parsed-preview">
+            <span className="secrets-parsed-label">Detected {parsed.length} secret{parsed.length > 1 ? 's' : ''}:</span>
+            {parsed.map(p => (
+              <span key={p.name} className={`secrets-parsed-item ${existingNames.has(p.name) ? 'will-overwrite' : ''}`}
+                    title={existingNames.has(p.name) ? 'Will overwrite existing' : ''}>
+                {p.name}{existingNames.has(p.name) ? ' ↺' : ''}
+              </span>
+            ))}
+            <button className="secrets-save-btn" disabled={savingBatch} onClick={handleSaveBatch}>
+              {savingBatch ? '…' : `Save ${parsed.length}`}
+            </button>
+            <button className="secrets-cancel-btn" onClick={() => { setPasteText(''); setParsed([]) }}>Clear</button>
+          </div>
+        )}
+
+        {/* Manual single entry */}
+        <div className="secrets-manual-row">
+          <input className="secrets-input" placeholder="NAME" value={name} autoFocus={!pasteText}
+                 onChange={e => setName(e.target.value.toUpperCase().replace(/\s/g, '_'))}
+                 onKeyDown={e => e.key === 'Enter' && document.querySelector('.secrets-input-value')?.focus()} />
+          <div className="secrets-value-wrap">
+            <input className="secrets-input secrets-input-value" placeholder="value"
+                   type={showValue ? 'text' : 'password'}
+                   value={value} onChange={e => setValue(e.target.value)}
+                   onKeyDown={e => { if (e.key === 'Enter') handleAdd() }} />
+            <button type="button" className="secrets-eye-btn" title={showValue ? 'Hide' : 'Show'}
+                    onClick={() => setShowValue(v => !v)}>
+              {showValue ? '🙈' : '👁'}
+            </button>
+          </div>
+          <button className="secrets-save-btn" disabled={saving || !name.trim() || !value.trim()} onClick={handleAdd}>
+            {saving ? '…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  if (modal) {
+    return (
+      <div className="secrets-modal-overlay" onClick={onClose}>
+        {content}
+      </div>
+    )
+  }
+
+  if (children) return children({ toggleBtn: null, body: content })
+  return content
 }
 
 function TaskStack({ sessionId, stack, setStack, canSend }) {
@@ -240,6 +610,8 @@ function ContextPct({ pct, onCompact }) {
 function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSelect, options, expanded, onToggleExpand, focusMode, onToggleFocus, paneTheme, sessions, onNewSession, onRestartHere, fromWall, favourites, onToggleFavourite }) {
   const notify = useToast()
   const askConfirm = useConfirm()
+  // xterm.js requires canvas — doesn't work in mobile browsers
+  const isMobileBrowser = window.innerWidth <= 768 || navigator.maxTouchPoints > 1
   const [detail, setDetail] = useState(null)
   // Mirrors the derived view below. Kept because the pane-poll and auto-scroll
   // Which terminal `Hand off` uses. Configurable in Settings → General; the
@@ -367,58 +739,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const dismissedScreenshots = useRef(new Set()) // names dismissed this session
   const [autoAdvance, setAutoAdvance] = useState(false)
 
-  // --- CLI binding state ---
-  const [cliStatus, setCliStatus] = useState(null) // null | {bound, tmux_session, cwd, status}
-  const [cliBindOpen, setCliBindOpen] = useState(false) // show bind picker
-  const [cliInstances, setCliInstances] = useState([]) // available CLI panes
-  const [cliSendMode, setCliSendMode] = useState(false) // send to CLI instead of session
-
-  // Poll CLI status when a session is open
-  useEffect(() => {
-    if (!session?.id) return
-    let active = true
-    const poll = () => {
-      cliApi.getCLIStatus(session.id)
-        .then(d => { if (active) setCliStatus(d) })
-        .catch(() => {})
-    }
-    poll()
-    const iv = setInterval(poll, 5000)
-    return () => { active = false; clearInterval(iv) }
-  }, [session?.id])
-
-  const openCliBinder = () => {
-    // Auto-bind to this session's own CLI pane (kiro-{uuid}) if it exists.
-    // Only fall back to the picker when that pane isn't in tmux.
-    const naturalTmux = `kiro-${session.id}`
-    cliApi.bindCLI(session.id, naturalTmux)
-      .then(d => {
-        if (d.ok) {
-          cliApi.getCLIStatus(session.id).then(setCliStatus)
-        } else {
-          // Natural pane not found — open the full picker as fallback
-          cliApi.listCLI()
-            .then(r => { setCliInstances(r.instances || []); setCliBindOpen(true) })
-            .catch(() => {})
-        }
-      })
-      .catch(() => {
-        cliApi.listCLI()
-          .then(r => { setCliInstances(r.instances || []); setCliBindOpen(true) })
-          .catch(() => {})
-      })
-  }
-  const bindCli = (tmuxSession) => {
-    cliApi.bindCLI(session.id, tmuxSession)
-      .then(d => {
-        if (d.ok) { setCliBindOpen(false); cliApi.getCLIStatus(session.id).then(setCliStatus) }
-        else notify(d.error || 'Bind failed', 'error')
-      })
-  }
-  const unbindCli = () => {
-    cliApi.unbindCLI(session.id)
-      .then(() => { setCliStatus({ bound: false, status: 'unbound' }); setCliSendMode(false) })
-  }
+  // --- CLI binding ---
+  const {
+    cliStatus, cliSendMode, setCLISendMode,
+    openCliBinder, cliBindOpen, setCliBindOpen,
+    cliInstances, bindCli, unbindCli,
+  } = useCLI(session?.id, notify)
   const sendToCli = (text) => {
     cliApi.sendToCLI(session.id, text)
       .then(d => {
@@ -461,9 +787,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   // that finds messages===null (which caused an infinite retry storm on error).
   const transcriptLoadedFor = useRef(null)
 
-  // Side chat state
-  const [sideChatOpen, setSideChatOpen] = useState(false)
+  const sideChatRef = useRef(null)
   const [overflowOpen, setOverflowOpen] = useState(false)
+  const [secretsModalOpen, setSecretsModalOpen] = useState(false)
+  const [chipsModalOpen, setChipsModalOpen] = useState(false)
+  // Merged starter chips shown above composer: project chips (+ global if includeGlobal), or global only
+  const [starterChips, setStarterChips] = useState([])
   // Close overflow menu when clicking outside it
   useEffect(() => {
     if (!overflowOpen) return
@@ -473,25 +802,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [overflowOpen])
-  const [sideChatLines, setSideChatLines] = useState([])
-  const [sideChatThinking, setSideChatThinking] = useState(false)
-  const [sideChatDraft, setSideChatDraft] = useState('')
-  // Side chat paste attachments — content is inlined (not file-referenced) since
-  // the side chat endpoint sends to an LLM, not to the agent's fs_read path.
-  const {
-    attachments: sideChatAttachments,
-    onPaste: onSideChatPaste,
-    removeAttachment: removeSideChatAttachment,
-    clearAttachments: clearSideChatAttachments,
-  } = usePasteAttachments({ sessionId: session?.id })
-  const [sideChatOpening, setSideChatOpening] = useState(false)
-  const [sideChatChipsOpen, setSideChatChipsOpen] = useState(false)
-  const [sideChatHistory, setSideChatHistory] = useState(() => {
-    try { const r = JSON.parse(localStorage.getItem(`side-chat-history:${session.id}`) || '[]'); return Array.isArray(r) ? r : [] } catch { return [] }
-  })
-  const [sideChatHistoryIdx, setSideChatHistoryIdx] = useState(-1)
-  const sideChatPollRef = useRef(null)
-  const sideChatBottomRef = useRef(null)
 
   // Derived from detail (once loaded) or the session prop while loading.
   // Declared here — before any effect — so every effect can reference them.
@@ -705,36 +1015,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     setViewOverride(null)  // clear any manual pin when switching sessions
     setCorrections([])     // clear stale corrections before the fetch for the new session
     // Close side chat when switching sessions
-    setSideChatOpen(false)
-    setSideChatLines([])
-    setSideChatDraft('')
+    sideChatRef.current?.close()
   }, [session.id])
-
-  // Side chat poll loop
-  useEffect(() => {
-    if (!sideChatOpen) {
-      if (sideChatPollRef.current) { clearInterval(sideChatPollRef.current); sideChatPollRef.current = null }
-      return
-    }
-    const poll = () => {
-      fetch(`/api/sessions/${session.id}/side-chat/poll`)
-        .then(r => r.json())
-        .then(d => {
-          if (!d.alive) return
-          setSideChatThinking(!!d.thinking)
-          if (d.lines && d.lines.length) setSideChatLines(d.lines)
-        })
-        .catch(() => {})
-    }
-    poll()
-    sideChatPollRef.current = setInterval(poll, 1500)
-    return () => { clearInterval(sideChatPollRef.current); sideChatPollRef.current = null }
-  }, [sideChatOpen, session.id])
-
-  // Auto-scroll side chat to bottom
-  useEffect(() => {
-    if (sideChatBottomRef.current) sideChatBottomRef.current.scrollIntoView({ behavior: 'smooth' })
-  }, [sideChatLines])
 
   // Auto-open chips only when awaiting approval — user needs keys then.
   // Don't auto-open during thinking/running: it eats vertical space and the
@@ -786,9 +1068,15 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     const activeNow = isWorking
     const wasActive = prevActiveRef.current
     prevActiveRef.current = activeNow
-    if (wasActive && !activeNow && effectiveView === 'transcript' && messagesRef.current !== null) {
-      const after = transcriptMaxSeq.current
-      api.getMessages(session.id, after, 200).then(d => {
+    if (wasActive && !activeNow) {
+      // Final fetch: always run when the session goes idle, regardless of
+      // whether the transcript view is active or messages were pre-loaded.
+      // This closes the race where the last answer lands in the JSONL after
+      // the incremental poller last ran but before status changed to idle.
+      // If the transcript was never loaded (live-pane view), fetch everything;
+      // otherwise fetch only what's new since transcriptMaxSeq.
+      const after = messagesRef.current !== null ? transcriptMaxSeq.current : -1
+      api.getMessages(session.id, after, 2000).then(d => {
         const newMsgs = d.messages || []
         if (!newMsgs.length) return
         setMessages(prev => {
@@ -1276,50 +1564,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     }
   }
 
-  const openSideChat = () => {
-    if (sideChatOpen) { setSideChatOpen(false); return }
-    setSideChatOpening(true)
-    fetch(`/api/sessions/${session.id}/side-chat/open`, { method: 'POST' })
-      .then(r => r.json())
-      .then(d => {
-        if (d.error) { notify(`Side chat: ${d.error}`, 'error'); return }
-        setSideChatOpen(true)
-        setSideChatLines([])
-      })
-      .catch(() => notify('Side chat unavailable', 'error'))
-      .finally(() => setSideChatOpening(false))
-  }
-
-  const sendSideChat = (e) => {
-    e.preventDefault()
-    const typedText = sideChatDraft.trim()
-    const readyAtts = sideChatAttachments.filter(a => !a.uploading)
-    if (!typedText && readyAtts.length === 0) return
-    setSideChatDraft('')
-    clearSideChatAttachments()
-    setSideChatHistoryIdx(-1)
-    // Inline attachment content for side chat (goes to LLM, not agent fs_read)
-    const parts = readyAtts.map(a => a.preview ?? '').filter(Boolean)
-    if (typedText) parts.push(typedText)
-    const text = parts.join('\n\n')
-    if (!text.trim()) return
-    // Prepend to history (newest first), cap at 50
-    const newHistory = [text, ...sideChatHistory.filter(h => h !== text)].slice(0, 50)
-    setSideChatHistory(newHistory)
-    try { localStorage.setItem(`side-chat-history:${session.id}`, JSON.stringify(newHistory)) } catch {}
-    setSideChatThinking(true)
-    fetch(`/api/sessions/${session.id}/side-chat/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    }).catch(() => {})
-  }
-
-  const closeSideChat = () => {
-    setSideChatOpen(false)
-    fetch(`/api/sessions/${session.id}/side-chat/close`, { method: 'POST' }).catch(() => {})
-  }
-
   // Drop the echo once the pane actually shows it, so it is not duplicated.
   useEffect(() => {
     if (!echo || effectiveView !== 'pane') return
@@ -1354,6 +1598,52 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     )
     if (found) setEcho('')
   }, [messages])
+
+  // Load merged starter chips (project chips + optionally global) for this session's cwd
+  useEffect(() => {
+    if (!session?.cwd) return
+    let cancelled = false
+
+    const loadChips = () => {
+      if (cancelled) return
+      Promise.all([
+        settingsApi.getSettings(),
+        getProjectSettings(session.cwd),
+      ]).then(([globalSettings, projectSettings]) => {
+        if (cancelled) return
+        const globalChips = Array.isArray(globalSettings['composer-chips']) && globalSettings['composer-chips'].length
+          ? globalSettings['composer-chips'].filter(validChip)
+          : DEFAULT_COMPOSER_CHIPS.filter(validChip)
+        const projectChips = Array.isArray(projectSettings['composer-chips'])
+          ? projectSettings['composer-chips'].filter(validChip)
+          : []
+        const includeGlobal = projectSettings['chips-include-global'] !== false
+        // If project has chips: show them + optionally global
+        // If no project chips: only show global if includeGlobal is explicitly true
+        //   (default true when never set, false when user turned it off)
+        const hasProjectSetting = 'chips-include-global' in projectSettings
+        if (projectChips.length) {
+          setStarterChips(includeGlobal ? [...projectChips, ...globalChips] : projectChips)
+        } else if (!hasProjectSetting || includeGlobal) {
+          // No project chips and global not explicitly excluded — show global
+          setStarterChips(globalChips)
+        } else {
+          // User explicitly turned off global chips and has no project chips
+          setStarterChips([])
+        }
+      }).catch(() => {})
+    }
+
+    loadChips()
+    // Reload whenever the window regains focus — catches edits made in Settings tab
+    window.addEventListener('focus', loadChips)
+    document.addEventListener('visibilitychange', loadChips)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', loadChips)
+      document.removeEventListener('visibilitychange', loadChips)
+    }
+  }, [session?.cwd, chipsModalOpen])
 
   const submitDraft = (e) => {
     if (e) e.preventDefault()
@@ -1487,7 +1777,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.done
   const title = detail?.title || session.title
 
-  return (
+  return (<>
     <div className={`detail-panel ${expanded ? 'detail-expanded' : ''} ${fromWall ? 'detail-from-wall' : ''}`}
          style={expanded ? undefined : { width }}>
       {!expanded && (
@@ -1560,12 +1850,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     onClick={() => onRestartHere(session.id)}>↺</button>
           )}
           {/* Side chat — keep label, it's a mode */}
-          <button className={`detail-switch detail-side-btn${sideChatOpen ? ' active' : ''}`}
-                  title={sideChatOpen ? 'Close side chat' : 'Open side chat — ask questions about this session without polluting its context'}
-                  onClick={openSideChat}
-                  disabled={sideChatOpening}>
-            {sideChatOpening ? '…' : '◎ Side'}
-          </button>
+          <SideChat
+            ref={sideChatRef}
+            sessionId={session.id}
+            notify={notify}
+            respond={respond}
+            runCommand={runCommand}
+            options={options}
+          />
           {/* CLI binding chip — only for foreign sessions (manually started kiro-cli).
               Managed sessions already accept input directly via the composer. */}
           {control === 'foreign' && (() => {
@@ -1643,6 +1935,16 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 {onToggleFocus && !expanded && (
                   <button className="detail-overflow-item" onClick={onToggleFocus}>
                     {focusMode ? '◧ Exit focus' : '▣ Focus mode'}
+                  </button>
+                )}
+                {session.cwd && (
+                  <button className="detail-overflow-item" onClick={() => setSecretsModalOpen(true)}>
+                    🔑 Secrets
+                  </button>
+                )}
+                {session.cwd && (
+                  <button className="detail-overflow-item" onClick={() => setChipsModalOpen(true)}>
+                    🧩 Chips
                   </button>
                 )}
               </div>
@@ -1808,13 +2110,15 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')} title="Always show transcript">transcript</button>
               </div>
             )}
-            <button className={`detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
-                    onClick={() => {
-                      if (viewOverride === 'shell') { setViewOverride(null); return }
-                      setViewOverride('shell')
-                      if (!activeShellId) openShellForCwd(session?.cwd)
-                    }}
-                    title="Open terminal shell for this project">⌨ shell</button>
+            {!isMobileBrowser && (
+              <button className={`detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
+                      onClick={() => {
+                        if (viewOverride === 'shell') { setViewOverride(null); return }
+                        setViewOverride('shell')
+                        if (!activeShellId) openShellForCwd(session?.cwd)
+                      }}
+                      title="Open terminal shell for this project">⌨ shell</button>
+            )}
             {session.context_pct != null && session.context_pct !== '' && (
               <ContextPct pct={session.context_pct} onCompact={() => queueOrSend('/compact')} />
             )}
@@ -2168,16 +2472,22 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                           onClick={() => openShellForCwd(session?.cwd)}>Restart</button>
                 </div>
               )}
-              <XtermPane
-                shellId={activeShellId}
-                cwd={session?.cwd || '~'}
-                active={effectiveView === 'shell'}
-                localToken={window._qdLocalToken || ''}
-                onReady={() => { setShellSt(st => st ? { ...st, alive: true } : st) }}
-                onDead={() => { setShellSt(st => st ? { ...st, alive: false } : st) }}
-                cmdToSend={shellCmd || null}
-                onCmdSent={() => setShellCmd('')}
-              />
+              {isMobileBrowser ? (
+                <div className="shell-mobile-unavailable">
+                  Terminal shell is not available in mobile browsers.
+                </div>
+              ) : (
+                <XtermPane
+                  shellId={activeShellId}
+                  cwd={session?.cwd || '~'}
+                  active={effectiveView === 'shell'}
+                  localToken={window._qdLocalToken || ''}
+                  onReady={() => { setShellSt(st => st ? { ...st, alive: true } : st) }}
+                  onDead={() => { setShellSt(st => st ? { ...st, alive: false } : st) }}
+                  cmdToSend={shellCmd || null}
+                  onCmdSent={() => setShellCmd('')}
+                />
+              )}
               <ShellInputBar
                 disabled={!shellSt?.alive}
                 onSend={(text) => setShellCmd(text)}
@@ -2285,6 +2595,29 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </div>,
               document.body
             )}
+            {starterChips.length > 0 && (
+              <div className="starter-chips">
+                {starterChips.map((c, i) => (
+                  <button key={i} type="button" className="starter-chip"
+                    title={c.prompt}
+                    onClick={() => {
+                      if (c.mode === 'send') {
+                        if (draftRef.current) draftRef.current.value = c.prompt
+                        setDraft(c.prompt)
+                        setTimeout(() => submitDraft(null), 0)
+                      } else {
+                        const cur = draftRef.current?.value || draft
+                        const next = cur ? `${cur}\n${c.prompt}` : c.prompt
+                        if (draftRef.current) draftRef.current.value = next
+                        setDraft(next)
+                        draftRef.current?.focus()
+                      }
+                    }}>
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            )}
             <form className="composer-row" onSubmit={submitDraft}>
               {attachments.length > 0 && (
                 <PasteAttachments attachments={attachments} onRemove={removeAttachment} />
@@ -2339,7 +2672,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   title={cliSendMode
                     ? `Sending to CLI (${cliStatus.tmux_session}) — click to send to session instead`
                     : `Click to send to CLI (${cliStatus.tmux_session}) instead of this session`}
-                  onClick={() => setCliSendMode(v => !v)}>
+                  onClick={() => setCLISendMode(v => !v)}>
                   {cliStatus.status === 'idle' ? '🟢' : cliStatus.status === 'thinking' ? '🟡' : '⚪'} CLI
                 </button>
               )}
@@ -2497,97 +2830,16 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         )}
       </div>
       </div>{/* detail-footer */}
-      {sideChatOpen && (
-        <div className="side-chat-panel">
-          <div className="side-chat-header">
-            <span className="side-chat-title">◎ Side Chat <span className="side-chat-subtitle">— ask questions without touching the session</span></span>
-            <div className="side-chat-header-actions">
-              <button className="side-chat-fork" title="Fork to standalone session — dispatches a new session with this conversation as context"
-                      onClick={() => {
-                        fetch(`/api/sessions/${session.id}/side-chat/fork`, { method: 'POST' })
-                          .then(r => r.json())
-                          .then(d => {
-                            if (d.error) { notify(`Fork failed: ${d.error}`, 'error'); return }
-                            setSideChatOpen(false)
-                            notify('Forked to new session')
-                          })
-                          .catch(() => notify('Fork failed', 'error'))
-                      }}>
-                ⑂ Fork
-              </button>
-              <button className="side-chat-close" onClick={closeSideChat} title="Close side chat">✕</button>
-            </div>
-          </div>
-          <div className="side-chat-body">
-            {sideChatLines.length === 0 && !sideChatThinking && (
-              <div className="side-chat-empty">Starting up — context is being injected…</div>
-            )}
-            {sideChatLines.map((line, i) => (
-              <div key={i} className="side-chat-line">{line}</div>
-            ))}
-            {sideChatThinking && <div className="side-chat-thinking">◔ thinking…</div>}
-            <div ref={sideChatBottomRef} />
-          </div>
-          <div className="side-chat-compose-wrap">
-            {sideChatChipsOpen && (
-              <div className="side-chat-chips">
-                <button type="button" className="composer-chip composer-key"
-                        title="Send Escape" onClick={() => { respond('Escape'); setSideChatChipsOpen(false) }}>esc</button>
-                <button type="button" className="composer-chip composer-key"
-                        title="Send Ctrl+C" onClick={() => { respond('C-c'); setSideChatChipsOpen(false) }}>ctrl-c</button>
-                <button type="button" className="composer-chip composer-key"
-                        title="Send Enter" onClick={() => { respond('Enter'); setSideChatChipsOpen(false) }}>↵</button>
-                {(options.commands || []).map(c => (
-                  <button key={c.cmd} type="button" className="composer-chip"
-                          title={c.hint}
-                          onClick={() => { runCommand(c); setSideChatChipsOpen(false) }}>
-                    {c.label}{c.needs_arg ? '…' : ''}
-                  </button>
-                ))}
-              </div>
-            )}
-            <form className="side-chat-compose" onSubmit={sendSideChat}>
-              {sideChatAttachments.length > 0 && (
-                <PasteAttachments attachments={sideChatAttachments} onRemove={removeSideChatAttachment} />
-              )}
-              <button type="button" className={`side-chat-chips-toggle${sideChatChipsOpen ? ' active' : ''}`}
-                      title={sideChatChipsOpen ? 'Hide controls' : 'Show controls & commands'}
-                      onClick={() => setSideChatChipsOpen(v => !v)}>⌃</button>
-              <input
-                className="side-chat-input"
-                value={sideChatDraft}
-                spellCheck={false}
-                autoCorrect="off"
-                autoCapitalize="off"
-                onChange={e => { setSideChatDraft(e.target.value); setSideChatHistoryIdx(-1) }}
-                onPaste={onSideChatPaste}
-                onKeyDown={e => {
-                  if (e.key === 'ArrowUp') {
-                    if (!sideChatHistory.length) return
-                    const next = Math.min(sideChatHistoryIdx + 1, sideChatHistory.length - 1)
-                    e.preventDefault()
-                    setSideChatHistoryIdx(next)
-                    setSideChatDraft(sideChatHistory[next])
-                  } else if (e.key === 'ArrowDown') {
-                    if (sideChatHistoryIdx <= 0) { setSideChatHistoryIdx(-1); setSideChatDraft(''); return }
-                    const next = sideChatHistoryIdx - 1
-                    e.preventDefault()
-                    setSideChatHistoryIdx(next)
-                    setSideChatDraft(next === -1 ? '' : sideChatHistory[next])
-                  }
-                }}
-                placeholder="Ask a question about this session…"
-                autoFocus
-                disabled={sideChatThinking}
-              />
-              <button className="side-chat-send" type="submit" disabled={!sideChatDraft.trim() || sideChatThinking}>
-                ↗
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
+    {secretsModalOpen && createPortal(
+      <SecretsPanel cwd={session.cwd} onClose={() => setSecretsModalOpen(false)} modal />,
+      document.body
+    )}
+    {chipsModalOpen && session.cwd && createPortal(
+      <ChipsPanel cwd={session.cwd} onClose={() => setChipsModalOpen(false)} />,
+      document.body
+    )}
+    </>
   )
 }
 
