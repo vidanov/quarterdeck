@@ -151,11 +151,15 @@ running, a recipe when not. Opening a collection can spawn what isn't running.
 
 ### 7c. Mobile UX
 
-- [ ] **Bigger fonts and reduced element density on small screens.** The phone
+- [x] **Bigger fonts and reduced element density on small screens.** The phone
       view inherits the desktop density — too small to tap reliably. Responsive
       pass: increase base font size, reduce visible card fields to the
       essentials (status, title, one action), and widen tap targets. Detail
       panel and approval gate are the critical paths.
+      Done 2026-08-24: full `@media (max-width: 700px)` pass across cards,
+      detail panel, composer, approval banner, prompt gate, and wall view.
+      detail-prompt-label 10px→13px, prompt action buttons 44px min-height,
+      nav keys 44×44, detail-gate tap target enlarged.
 
 ### 7d. Grid refinements
 
