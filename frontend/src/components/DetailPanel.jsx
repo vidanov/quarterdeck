@@ -1928,7 +1928,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   </button>
                 )}
                 {onNewSession && (
-                  <button className="detail-overflow-item" onClick={onNewSession}>
+                  <button className="detail-overflow-item" onClick={() => onNewSession(session.cwd)}>
                     ＋ New session
                   </button>
                 )}
