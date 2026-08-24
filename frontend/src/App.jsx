@@ -1719,7 +1719,8 @@ export default function App() {
                   cwd={scriptOutput.cwd}
                   onClose={() => setScriptOutput(null)}
                 />
-              )} The launcher is the quick line with
+              )} 
+              {/* One prompt box at a time. The launcher is the quick line with
                   its options unfolded — showing both left two "what should the
                   agent do" fields on screen, only one of which was listening. */}
               {launcherOpen ? (
