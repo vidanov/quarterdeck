@@ -1,14 +1,18 @@
 import React from 'react'
 
 // Extensions worth linking — common output files from kiro-cli sessions
-const FILE_EXTS = /\.(md|txt|json|yaml|yml|py|js|jsx|ts|tsx|sh|toml|csv|html|xml|log|pdf|docx|xlsx)$/i
+const FILE_EXTS = /\.(md|txt|json|yaml|yml|py|js|jsx|ts|tsx|sh|toml|csv|html|xml|log|pdf|docx|xlsx|png|jpg|jpeg|gif|svg|webp|heic|heif|mp4|mov|zip|tar|gz)$/i
 
 // Paths that look like URLs/routes, not filesystem paths — never linkify these
 // as file chips even though they start with /
 const API_PATH_RE = /^\/(api|app|auth|static|assets|public|login|logout|health)\//i
 
 // A path segment that suggests a real filesystem location
-const FS_SEGMENT_RE = /^(Users|home|var|etc|tmp|usr|opt|Applications|Library|Documents|Desktop|Downloads|Projects|src|backend|frontend|build|dist)\b/i
+const FS_SEGMENT_RE = /^(Users|home|var|etc|tmp|usr|opt|Applications|Library|Documents|Desktop|Downloads|Projects|Monosnap|Pictures|Movies|Music|src|backend|frontend|build|dist)\b/i
+
+// Bare home-prefix patterns — match even without a leading slash
+// e.g. "Users/a.vidanov/..." typed without the leading /
+const BARE_HOME_RE = /^Users\/[^/\s]+\//
 
 function isFilesystemPath(path) {
   if (!path) return false
@@ -19,16 +23,20 @@ function isFilesystemPath(path) {
   // Needs a known file extension OR enough depth + a filesystem-looking segment
   if (FILE_EXTS.test(path)) return true
   if (depth < 2) return false
+  // Bare "Users/<name>/..." without leading slash
+  if (BARE_HOME_RE.test(path)) return true
   // Must have a segment that looks like a real fs location
   const segments = path.split('/').filter(Boolean)
   return segments.some(s => FS_SEGMENT_RE.test(s)) || path.startsWith('~/')
 }
 
 function revealFile(path) {
+  // Normalize bare paths like "Users/foo/..." → "/Users/foo/..."
+  const normalized = path.startsWith('/') || path.startsWith('~') ? path : '/' + path
   fetch('/api/files/reveal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path: normalized }),
   }).catch(() => {})
 }
 
@@ -51,10 +59,10 @@ function splitFilePaths(text) {
   const segments = []
   let last = 0
   let m
-  // Match paths starting with / or ~ up to a whitespace boundary or quote.
+  // Match paths starting with /, ~/, or a bare filesystem root like Users/
   // Allow spaces inside paths (e.g. "Obsidian Vault") but stop at obvious
   // sentence-ending punctuation when followed by whitespace or end-of-string.
-  const re = /((~\/|\/)[^\n"')\]`,*<>|]+\/[^\n"')\]`,*<>|]+)/g
+  const re = /((~\/|\/|(?:Users|home|tmp|var|etc|opt|Applications)\/)[^\n"')\]`,*<>|]+\/[^\n"')\]`,*<>|]+)/g
   while ((m = re.exec(text)) !== null) {
     let path = m[1].replace(/[.,;:!?]+$/, '') // strip trailing punctuation
     if (!isFilesystemPath(path)) continue
