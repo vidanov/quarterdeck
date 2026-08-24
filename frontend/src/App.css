@@ -4520,6 +4520,46 @@ body.resizing .detail-resize::after { background: var(--accent); }
 
   /* Remote access QR area: center properly */
   .remote-qr-wrap { text-align: center; }
+
+  /* ── Detail prompt (permission required) — primary phone approval path ── */
+  /* Label was 10px uppercase — unreadable without zooming. */
+  .detail-prompt-label {
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    margin-bottom: 8px;
+  }
+  /* Action buttons: Allow once / Trust / Deny — must be finger-tappable.
+     These are the most important buttons in the entire app on a phone. */
+  .detail-prompt-actions {
+    gap: 8px;
+  }
+  .detail-prompt-actions button {
+    min-height: 44px;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 8px;
+    flex: 1 1 auto;
+  }
+  /* Nav keys (↑ ↓ ↵ esc) — smaller than action buttons but still tappable */
+  .detail-prompt-actions button[title="Move up"],
+  .detail-prompt-actions button[title="Move down"],
+  .detail-prompt-actions button[title="Select"],
+  .detail-prompt-actions button[title="Close the menu"] {
+    min-height: 44px;
+    min-width: 44px;
+    font-size: 18px;
+    padding: 8px;
+    flex: 0 0 auto;
+  }
+
+  /* ── Approval gate toggle — 11px pill is too small to tap confidently ── */
+  .detail-gate {
+    font-size: 13px;
+    padding: 7px 14px;
+    min-height: 36px;
+    border-radius: 6px;
+  }
 }
 
 
