@@ -857,6 +857,14 @@ def spawn(
         # nonce is hex we generated, so it is safe as both an env value and the
         # filename the hook writes. A resume already knows its id and needs none.
         env_args = [] if resume_id else ["-e", f"{NONCE_ENV}={nonce}"]
+        # Inject per-project secrets as environment variables. Values come from
+        # the macOS keychain — they never appear in JSONL or process arguments.
+        try:
+            from .secrets import get_env as _get_secret_env
+            for _k, _v in _get_secret_env(target_cwd).items():
+                env_args += ["-e", f"{_k}={_v}"]
+        except Exception:
+            pass  # secrets unavailable — don't break the spawn
         _tmux("new-session", "-d", "-s", name,
               "-x", str(DEFAULT_COLS), "-y", str(DEFAULT_ROWS),
               *env_args, "-c", target_cwd, *argv)
