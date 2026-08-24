@@ -501,6 +501,39 @@ def main():
 
     window.events.loaded += inject_local_token
 
+    # Dock badge — show count of sessions that need attention.
+    # Runs in a daemon thread so it dies with the app.
+    def _badge_worker():
+        import urllib.request
+        import json as _json
+        _last = None
+        while True:
+            time.sleep(5)
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/sessions",
+                    headers={"X-Local-Token": local_token},
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = _json.loads(resp.read())
+                count = sum(
+                    1 for s in data.get("sessions", [])
+                    if s.get("status") in ("awaiting-approval", "error")
+                )
+                if count != _last:
+                    _last = count
+                    label = str(count) if count > 0 else ""
+                    try:
+                        from AppKit import NSApplication
+                        ns_app = NSApplication.sharedApplication()
+                        ns_app.dockTile().setBadgeLabel_(label)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    threading.Thread(target=_badge_worker, daemon=True).start()
+
     webview.start(install_menus, private_mode=False)
 
     # Window closed — shut down the backend gracefully so the socket is released
