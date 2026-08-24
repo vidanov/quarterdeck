@@ -134,7 +134,7 @@ def _spawn() -> bool:
     # Model comes from settings; "auto" unless someone chose otherwise.
     global _running_model
     model = configured_model()
-    argv = [KIRO_CLI, "chat", "--trust-tools=shell,read,write,glob,grep",
+    argv = [KIRO_CLI, "chat", "--trust-tools=shell,read,write,glob,grep,knowledge",
             f"--model={model}"]
     name = _tmux_name()
 
@@ -162,6 +162,11 @@ def _spawn() -> bool:
 
     # Even if we can't detect the prompt, the session may still be fine
     return tmux.session_exists(name)
+
+
+def ensure_alive() -> bool:
+    """Public alias for _spawn — ensures the concierge session is running."""
+    return _spawn()
 
 
 def _capture(lines: int = 40) -> str:
@@ -347,14 +352,17 @@ def _extract_json(text: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def _search_sessions_fast(q: str) -> list[dict]:
-    """Search active + archived sessions by title/cwd keywords. Returns up to 12 matches.
+    """Search active + archived sessions by title/cwd keywords AND content.
 
-    Uses OR matching ranked by token hit count — a session matching 3 of 4 tokens
-    ranks above one matching 1. This handles queries like "Porsche S3 Gateway"
-    where no single session title contains all words.
+    Merges results from two sources:
+    1. FTS5 full-text index (first 5 user turns) — ranked best-match-first.
+    2. Title/cwd token match (original behavior) — for sessions not yet indexed.
+
+    Returns up to 12 matches, deduped and ranked.
     """
     import json as _json
     import re as _re
+
     results: list[dict] = []
     seen: set[str] = set()
 
@@ -369,8 +377,36 @@ def _search_sessions_fast(q: str) -> list[dict]:
     if not tokens:
         return results
 
-    candidates: list[tuple[int, float, dict]] = []
+    # --- Pass 1: FTS5 content search ---
+    try:
+        from backend import search as _search_mod
+        fts_hits = _search_mod.search(q, limit=12)
+        for hit in fts_hits:
+            sid = hit["id"]
+            if sid in seen:
+                continue
+            seen.add(sid)
+            cwd = hit.get("cwd", "")
+            cwd_short = cwd.replace(str(Path.home()), "~") if cwd else ""
+            json_path = SESSIONS_DIR / f"{sid}.json"
+            mtime = json_path.stat().st_mtime if json_path.exists() else 0
+            try:
+                meta = _json.loads(json_path.read_text()) if json_path.exists() else {}
+            except Exception:
+                meta = {}
+            results.append({
+                "id": sid,
+                "title": hit.get("title") or "Untitled",
+                "cwd": cwd,
+                "cwd_short": cwd_short,
+                "status": "active" if sid in active_ids else "done",
+                "updated_at": meta.get("updated_at") or meta.get("created_at") or "",
+            })
+    except Exception:
+        pass
 
+    # --- Pass 2: title/cwd token match (fills gaps for un-indexed sessions) ---
+    candidates: list[tuple[int, float, dict]] = []
     for json_file in sorted(SESSIONS_DIR.glob("*.json"),
                             key=lambda f: f.stat().st_mtime, reverse=True):
         sid = json_file.stem
@@ -399,9 +435,7 @@ def _search_sessions_fast(q: str) -> list[dict]:
             "updated_at": meta.get("updated_at") or meta.get("created_at") or "",
         }))
 
-    # Best hits first, then most recent
     candidates.sort(key=lambda x: (-x[0], -x[1]))
-    # Require at least half the tokens to match (avoids very noisy results)
     min_hits = max(1, (len(tokens) + 1) // 2)
     for hits, _, entry in candidates:
         if hits < min_hits:
@@ -409,7 +443,8 @@ def _search_sessions_fast(q: str) -> list[dict]:
         results.append(entry)
         if len(results) >= 12:
             break
-    return results
+
+    return results[:12]
 
 
 def _resolve_cwd_for_query(q: str) -> str | None:

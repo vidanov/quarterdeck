@@ -148,6 +148,14 @@ async def lifespan(_app: FastAPI):
     threading.Thread(target=_warm_projects_cache, daemon=True, name="projects-warmup").start()
     threading.Thread(target=_sessions_bg_refresh, daemon=True, name="sessions-bg-refresh").start()
 
+    # Build/refresh FTS5 search index in background. Non-blocking and non-fatal.
+    def _refresh_search_index():
+        try:
+            search_mod.refresh_stale(SESSIONS_DIR)
+        except Exception:
+            pass
+    threading.Thread(target=_refresh_search_index, daemon=True, name="search-index-refresh").start()
+
     yield
 
     # Shutdown: stop all ACP observer subprocesses cleanly.
@@ -1956,6 +1964,10 @@ def _do_sessions_scan() -> dict:
             "trust_until": _trust_until(session_id) or None,
             "context_pct": _context_pct(pane),
             "subagent_count": _find_subagent_count(session_id, lock_data) if is_managed else 0,
+            # jsonl mtime — lets the frontend detect when a session's conversation
+            # has not changed and skip re-fetching or back off poll frequency.
+            "jsonl_mtime": (SESSIONS_DIR / f"{session_id}.jsonl").stat().st_mtime
+                           if (SESSIONS_DIR / f"{session_id}.jsonl").exists() else 0,
             **_ownership_fields(session_id),
             **dict(zip(("model", "effort"), _session_model_effort(meta))),
             "sq_depth": len(sq_list(session_id)),
@@ -2801,6 +2813,81 @@ def resume_session(session_id: str, payload: dict | None = None):
     if not result.get("ok"):
         return {"error": result.get("error", "spawn failed")}
     return {"ok": True, "id": session_id, "attach": tmux.attach_command(session_id)}
+
+
+@app.post("/api/sessions/{session_id}/duplicate")
+def duplicate_session(session_id: str):
+    """Start a new session in the same cwd with the same opening task.
+
+    The opening task is the text of the first user-prompt turn in the session's
+    JSONL. If no JSONL exists (e.g. an empty session), falls back to the session
+    title. The new session is independent — the original is untouched.
+    """
+    meta = read_metadata(session_id)
+    if not meta:
+        return {"error": "Session not found"}
+    cwd = meta.get("cwd", "")
+    if not cwd:
+        return {"error": "No cwd for session"}
+
+    # Extract the first user-prompt turn as the task
+    task = ""
+    jsonl_path = SESSIONS_DIR / f"{session_id}.jsonl"
+    if jsonl_path.exists():
+        try:
+            with jsonl_path.open("rb") as f:
+                for raw_line in f:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("kind") == "Prompt":
+                        for block in entry.get("data", {}).get("content", []):
+                            if isinstance(block, dict) and block.get("kind") == "text":
+                                task = (block.get("data") or "").strip()
+                                break
+                        if task:
+                            break
+        except OSError:
+            pass
+
+    # Fall back to title if no prompt text found
+    if not task:
+        task = clean_title(meta_title(meta) or "", session_id) or "Continue"
+
+    result = tmux.spawn(cwd, task=task, wait=False, **_spawn_kwargs({}, session_id))
+    if not result.get("ok"):
+        return {"error": result.get("error", "spawn failed")}
+
+    nonce = result.get("nonce", "")
+    new_id = result.get("session_id", "")
+    if nonce:
+        threading.Thread(
+            target=tmux.resolve_pending, args=(nonce,), daemon=True
+        ).start()
+
+    # Re-index the new session after it starts (background, non-blocking)
+    def _reindex_new(sid: str, nonce_: str):
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            state = tmux.load_state()
+            if nonce_ and nonce_ not in state.get("pending", {}):
+                new_ids = set(state.get("managed", {})) - {session_id}
+                if new_ids:
+                    sid = next(iter(new_ids))
+                break
+            time.sleep(0.5)
+        if sid:
+            search_mod.index_session(sid, SESSIONS_DIR,
+                                     title=task[:80], cwd=cwd)
+    threading.Thread(
+        target=_reindex_new, args=(new_id, nonce), daemon=True
+    ).start()
+
+    return {"ok": True, "id": new_id or nonce, "task": task[:80]}
 
 
 @app.post("/api/sessions/{session_id}/takeover")
@@ -3917,6 +4004,35 @@ def list_deny_patterns():
     return {"patterns": _deny_mod.list_patterns()}
 
 
+# Static sub-paths MUST be registered before /{pattern_id} to avoid
+# FastAPI matching "packs" as a pattern_id value.
+@app.get("/api/deny-patterns/packs")
+def list_deny_packs():
+    return {"packs": _deny_mod.list_packs()}
+
+
+@app.post("/api/deny-patterns/packs/{pack_id}/install")
+def install_deny_pack(pack_id: str, request: Request):
+    if not require_local(request):
+        return {"error": "local only"}
+    try:
+        added, skipped = _deny_mod.install_pack(pack_id)
+        return {"ok": True, "added": added, "skipped": skipped}
+    except ValueError as e:
+        return {"error": str(e)}
+
+
+@app.delete("/api/deny-patterns/packs/{pack_id}")
+def remove_deny_pack(pack_id: str, request: Request):
+    if not require_local(request):
+        return {"error": "local only"}
+    try:
+        removed = _deny_mod.remove_pack(pack_id)
+        return {"ok": True, "removed": removed}
+    except ValueError as e:
+        return {"error": str(e)}
+
+
 @app.post("/api/deny-patterns")
 def add_deny_pattern(payload: dict, request: Request):
     if not require_local(request):
@@ -3933,12 +4049,225 @@ def add_deny_pattern(payload: dict, request: Request):
     return {"pattern": _deny_mod.add_pattern(tool, pattern, note)}
 
 
+@app.patch("/api/deny-patterns/{pattern_id}")
+def update_deny_pattern(pattern_id: str, payload: dict, request: Request):
+    if not require_local(request):
+        return {"error": "local only"}
+    if "enabled" in payload:
+        ok = _deny_mod.set_enabled(pattern_id, bool(payload["enabled"]))
+        return {"ok": ok}
+    return {"error": "nothing to update"}
+
+
 @app.delete("/api/deny-patterns/{pattern_id}")
 def delete_deny_pattern(pattern_id: str, request: Request):
     if not require_local(request):
         return {"error": "local only"}
     ok = _deny_mod.remove_pattern(pattern_id)
     return {"ok": ok}
+
+
+# ── Per-project secrets ───────────────────────────────────────────────────────
+
+from . import secrets as _secrets_mod  # noqa: E402
+
+# Deny patterns injected when secrets exist for a project.
+# Prevents the agent from echoing secret values or reading the secrets store.
+_SECRETS_AUTO_DENY = [
+    {"id": "auto-secrets-fs", "tool": "fs_read",
+     "pattern": r"\.osa-kiro/secrets", "note": "block fs_read on secrets store"},
+    {"id": "auto-secrets-echo", "tool": "execute_bash",
+     "pattern": r"(echo|printf|cat|printenv|env)\s.*\$[A-Z_]{3,}",
+     "note": "block printing env var values"},
+]
+
+
+def _ensure_secrets_deny_patterns() -> None:
+    """Add auto-deny patterns for the secrets store if not already present."""
+    existing_ids = {p.get("id") for p in _deny_mod.list_patterns()}
+    for p in _SECRETS_AUTO_DENY:
+        if p["id"] not in existing_ids:
+            _deny_mod.add_pattern(p["tool"], p["pattern"], p["note"])
+            # Preserve the stable id so we don't duplicate on restart
+            pats = _deny_mod.list_patterns()
+            for pat in pats:
+                if pat.get("pattern") == p["pattern"] and pat.get("id") != p["id"]:
+                    pat["id"] = p["id"]
+            from .config import STATE_DIR
+            import json as _json
+            (_deny_mod.DENY_FILE).write_text(_json.dumps(pats, indent=2))
+
+
+@app.get("/api/secrets")
+def list_secrets(cwd: str = "", request: Request = None):  # type: ignore[assignment]
+    """List secret names (never values) for a project folder."""
+    if request is not None and not require_local(request):
+        return {"error": "local only"}
+    if not cwd:
+        return {"error": "cwd required"}
+    return {"secrets": _secrets_mod.list_secrets(cwd)}
+
+
+@app.post("/api/secrets")
+def set_secret(payload: dict, request: Request):
+    """Add or update a secret for a project folder. Value never returned."""
+    if not require_local(request):
+        return {"error": "local only"}
+    cwd = payload.get("cwd", "").strip()
+    name = payload.get("name", "").strip()
+    value = payload.get("value", "")
+    if not cwd:
+        return {"error": "cwd required"}
+    if not name:
+        return {"error": "name required"}
+    if not value:
+        return {"error": "value required"}
+    entry = _secrets_mod.set_secret(cwd, name, value)
+    # Ensure deny patterns exist to protect the secrets store
+    _ensure_secrets_deny_patterns()
+    return {"ok": True, "secret": entry}
+
+
+@app.delete("/api/secrets/{name}")
+def delete_secret(name: str, cwd: str = "", request: Request = None):  # type: ignore[assignment]
+    """Remove a secret from a project folder."""
+    if request is not None and not require_local(request):
+        return {"error": "local only"}
+    if not cwd:
+        return {"error": "cwd required"}
+    ok = _secrets_mod.delete_secret(cwd, name)
+    return {"ok": ok}
+
+
+# ---------------------------------------------------------------------------
+# Folder scripts
+# ---------------------------------------------------------------------------
+
+from . import scripts as _scripts_mod  # noqa: E402
+
+
+@app.get("/api/scripts")
+def list_scripts(cwd: str = "", request: Request = None):  # type: ignore[assignment]
+    """List scripts for a project folder (or all if cwd omitted)."""
+    if request is not None and not require_local(request):
+        return {"error": "local only"}
+    if not cwd:
+        return {"error": "cwd required"}
+    return {"scripts": _scripts_mod.list_scripts(cwd)}
+
+
+@app.post("/api/scripts")
+def add_script(payload: dict, request: Request):
+    """Create a new script for a project folder."""
+    if not require_local(request):
+        return {"error": "local only"}
+    cwd = payload.get("cwd", "").strip()
+    name = payload.get("name", "").strip()
+    command = payload.get("command", "").strip()
+    if not cwd or not name or not command:
+        return {"error": "cwd, name, and command required"}
+    try:
+        entry = _scripts_mod.add_script(
+            cwd, name, command,
+            description=payload.get("description", ""),
+            confirm=bool(payload.get("confirm", False)),
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+    return {"ok": True, "script": entry}
+
+
+@app.patch("/api/scripts/{script_id}")
+def update_script(script_id: str, payload: dict, request: Request):
+    """Update name, command, description, or confirm for a script."""
+    if not require_local(request):
+        return {"error": "local only"}
+    cwd = payload.get("cwd", "").strip()
+    if not cwd:
+        return {"error": "cwd required"}
+    fields = {k: v for k, v in payload.items()
+              if k in ("name", "command", "description", "confirm")}
+    result = _scripts_mod.update_script(script_id, cwd, **fields)
+    if result is None:
+        return {"error": "script not found"}
+    return {"ok": True, "script": result}
+
+
+@app.delete("/api/scripts/{script_id}")
+def delete_script(script_id: str, cwd: str = "", request: Request = None):  # type: ignore[assignment]
+    """Delete a script and kill any active run."""
+    if request is not None and not require_local(request):
+        return {"error": "local only"}
+    if not cwd:
+        return {"error": "cwd required"}
+    ok = _scripts_mod.delete_script(script_id, cwd)
+    return {"ok": ok}
+
+
+@app.post("/api/scripts/{script_id}/run")
+def run_script(script_id: str, payload: dict | None = None, request: Request = None):  # type: ignore[assignment]
+    """Start running a script. Replaces any in-progress run for this script."""
+    if request is not None and not require_local(request):
+        return {"error": "local only"}
+    cwd = (payload or {}).get("cwd", "").strip()
+    if not cwd:
+        return {"error": "cwd required"}
+    result = _scripts_mod.run_script(script_id, cwd)
+    if result is None:
+        return {"error": "script not found"}
+    return result
+
+
+@app.delete("/api/scripts/{script_id}/run")
+def kill_script_run(script_id: str, request: Request = None):  # type: ignore[assignment]
+    """Kill the active run for a script."""
+    if request is not None and not require_local(request):
+        return {"error": "local only"}
+    ok = _scripts_mod.kill_script(script_id)
+    return {"ok": ok}
+
+
+@app.get("/api/scripts/{script_id}/output")
+def script_output(script_id: str, after: int = 0):
+    """Poll script output lines.  Use ?after=N to get only new lines."""
+    return _scripts_mod.get_output(script_id, after)
+
+
+@app.get("/api/scripts/imports")
+def detect_script_imports(cwd: str = ""):
+    """Detect importable targets from Makefile / package.json in cwd."""
+    if not cwd:
+        return {"error": "cwd required"}
+    return {"imports": _scripts_mod.detect_imports(cwd)}
+# "project-settings:{cwd}". No separate file needed; the main settings store
+# is a flat JSON dict that handles arbitrary keys fine.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/project-settings")
+def get_project_settings(cwd: str = "", request: Request = None):  # type: ignore[assignment]
+    if request is not None and not require_local(request):
+        return {"error": "local only"}
+    if not cwd:
+        return {"error": "cwd required"}
+    settings = _load_settings()
+    return settings.get(f"project-settings:{cwd}", {})
+
+
+@app.post("/api/project-settings")
+def save_project_settings(payload: dict, request: Request):
+    if not require_local(request):
+        return {"error": "local only"}
+    cwd = payload.pop("cwd", "").strip()
+    if not cwd:
+        return {"error": "cwd required"}
+    with _settings_lock:
+        settings = _load_settings()
+        key = f"project-settings:{cwd}"
+        existing = settings.get(key, {})
+        existing.update(payload)
+        settings[key] = existing
+        _save_settings(settings)
+    return {"ok": True}
 
 
 @app.get("/api/sessions/{session_id}/gate")
@@ -5508,6 +5837,7 @@ def shells_close(shell_id: str):
 
 from starlette.websockets import WebSocket as StarletteWebSocket, WebSocketDisconnect
 from backend import pty_shell
+from backend import search as search_mod
 
 
 @app.websocket("/api/pty/{shell_id}/ws")
@@ -7539,7 +7869,13 @@ def get_projects(refresh: bool = False):
 # --- Archive search ---
 @app.get("/api/archive")
 def search_archive(q: str = "", limit: int = 50):
-    """Search all sessions (active + done) by title/cwd."""
+    """Search all sessions (active + done) by title/cwd.
+
+    When *q* is given, also searches session content via the FTS5 index
+    (first 5 user-prompt turns of each session). Content matches are
+    merged with title/cwd matches and ranked — FTS5 results first,
+    then title/cwd matches, deduped.
+    """
     if not SESSIONS_DIR.exists():
         return {"sessions": [], "total": 0}
 
@@ -7559,35 +7895,65 @@ def search_archive(q: str = "", limit: int = 50):
         if ld and is_process_alive(ld.get("pid", 0)):
             active_ids.add(lock_file.stem)
 
+    # --- FTS5 content search ---
+    fts_ids: list[str] = []
+    if q_lower:
+        try:
+            fts_results = search_mod.search(q, limit=limit)
+            fts_ids = [r["id"] for r in fts_results if r["id"] not in active_ids]
+        except Exception:
+            fts_ids = []
+
+    def _make_row(session_id: str, meta: dict) -> dict:
+        title = clean_title(meta_title(meta) or "Untitled", session_id) or "Untitled"
+        cwd = meta.get("cwd") or ""
+        return {
+            "id": session_id,
+            "title": (title[:80] + "…" if len(title) > 80 else title),
+            "cwd": cwd,
+            "cwd_display": shorten_path(cwd),
+            "created_at": meta.get("created_at", ""),
+            "updated_at": meta.get("updated_at", ""),
+            "is_favourite": session_id in favs,
+        }
+
     results = []
+    seen: set[str] = set()
     total_matches = 0
-    
+
+    # 1. FTS5 content matches (ranked best-first)
+    for sid in fts_ids:
+        if sid in seen or sid in active_ids:
+            continue
+        meta = read_metadata(sid)
+        if not meta:
+            continue
+        cwd = meta.get("cwd") or ""
+        if any(cwd.startswith(p) for p in HIDDEN_CWD_PREFIXES):
+            continue
+        seen.add(sid)
+        total_matches += 1
+        if len(results) < limit:
+            results.append(_make_row(sid, meta))
+
+    # 2. Title/cwd substring matches (original behaviour)
     for json_file in json_files:
         session_id = json_file.stem
-        if session_id in active_ids:
+        if session_id in seen or session_id in active_ids:
             continue
         meta = read_metadata(session_id)
         if not meta:
             continue
         title = clean_title(meta_title(meta) or "Untitled", session_id) or "Untitled"
         cwd = meta.get("cwd") or ""
-        # Hide KiroCrew background/infrastructure sessions
         if any(cwd.startswith(p) for p in HIDDEN_CWD_PREFIXES):
             continue
-        # Filter by search query
         if q_lower and q_lower not in title.lower() and q_lower not in cwd.lower():
             continue
+        seen.add(session_id)
         total_matches += 1
         if len(results) < limit:
-            results.append({
-                "id": session_id,
-                "title": (title[:80] + "…" if len(title) > 80 else title),
-                "cwd": cwd,
-                "cwd_display": shorten_path(cwd),
-                "created_at": meta.get("created_at", ""),
-                "updated_at": meta.get("updated_at", ""),
-                "is_favourite": session_id in favs,
-            })
+            results.append(_make_row(session_id, meta))
 
     # Include V3 sessions in archive
     v3_sessions_all = sorted(
@@ -7596,6 +7962,8 @@ def search_archive(q: str = "", limit: int = 50):
         reverse=True,
     )
     for v3_id, _ in v3_sessions_all:
+        if v3_id in seen:
+            continue
         meta = v3mod.read_metadata(v3_id)
         if not meta:
             continue
@@ -7605,6 +7973,7 @@ def search_archive(q: str = "", limit: int = 50):
             continue
         if q_lower and q_lower not in title.lower() and q_lower not in cwd.lower():
             continue
+        seen.add(v3_id)
         total_matches += 1
         if len(results) < limit:
             results.append({
@@ -7618,7 +7987,9 @@ def search_archive(q: str = "", limit: int = 50):
                 "format": "v3",
             })
 
-    results.sort(key=lambda s: s.get("updated_at", "") or "", reverse=True)
+    # FTS5 results are already ranked; only sort title/cwd-only results by date
+    if not fts_ids:
+        results.sort(key=lambda s: s.get("updated_at", "") or "", reverse=True)
     return {"sessions": results[:limit], "total": total_matches}
 
 
