@@ -1100,7 +1100,11 @@ export default function App() {
       // Seed localStorage with transferred composer history + draft from backend prefs,
       // then switch to the new session so DetailPanel mounts with history already in place.
       loadHistoryFromPrefs(newId).catch(() => {}).finally(() => {
-        setTimeout(() => selectSession(newId), 800)
+        setTimeout(() => {
+          // Pass a minimal session object so selected.id is valid — full data arrives
+          // on the next poll. DetailPanel falls back to fetching detail via the id.
+          selectSession({ id: newId, title: '…', cwd: '', status: 'starting', control: 'managed' })
+        }, 800)
       })
     }
   }
@@ -2108,7 +2112,7 @@ export default function App() {
               })
           }
         }} />
-        {selected && <DetailPanel session={sessions.find(s => s.id === selected.id) || selected} onClose={() => { 
+        {selected && typeof selected === 'object' && <DetailPanel session={sessions.find(s => s.id === selected.id) || selected} onClose={() => { 
           if (returnView) { changeSessionViewMode(returnView); setReturnView(null) }
           selectSession(null); setFocusMode(false)
         }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActiveWithFav} onNewSession={(cwd) => { if (expanded) setExpanded(false); setLauncherOpen(true); if (cwd) setLauncherCwd(cwd) }} onRestartHere={handleRestartHere} fromWall={returnView === 'wall'} favourites={favourites} onToggleFavourite={handleToggleFavourite} />}
