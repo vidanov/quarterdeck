@@ -35,6 +35,7 @@ import * as api from './api/sessions'
 import * as settingsApi from './api/settings'
 import * as collectionsApi from './api/collections'
 import * as profilesApi from './api/profiles'
+import * as scriptsApi from './api/scripts'
 import { useToast } from './state/ToastContext'
 import { useConfirm, useConfirmPending } from './state/ConfirmContext'
 import { useSessions } from './state/SessionsContext'
@@ -277,6 +278,69 @@ function WallTile({ s, cfg, isLive, isWaiting, focused, onFocus, onOpenFull, onR
   )
 }
 
+function ScriptOutputPanel({ scriptId, name, cwd, onClose }) {
+  const [lines, setLines] = React.useState([])
+  const [exitCode, setExitCode] = React.useState(null)
+  const [running, setRunning] = React.useState(true)
+  const [after, setAfter] = React.useState(0)
+  const bottomRef = React.useRef(null)
+
+  React.useEffect(() => {
+    if (!running) return
+    const poll = setInterval(() => {
+      scriptsApi.getOutput(scriptId, after)
+        .then(d => {
+          if (d.lines && d.lines.length > 0) {
+            setLines(prev => [...prev, ...d.lines])
+            setAfter(d.total)
+          }
+          if (!d.running) {
+            setExitCode(d.exit_code)
+            setRunning(false)
+          }
+        })
+        .catch(() => {})
+    }, 400)
+    return () => clearInterval(poll)
+  }, [scriptId, running, after])
+
+  React.useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [lines])
+
+  return createPortal(
+    <div className="script-output-overlay" onClick={onClose}>
+      <div className="script-output-panel" onClick={e => e.stopPropagation()}>
+        <div className="script-output-header">
+          <span className="script-output-name">{name}</span>
+          {!running && (
+            <span className={`script-exit-badge ${exitCode === 0 ? 'ok' : 'fail'}`}>
+              {exitCode === 0 ? '✓ exited 0' : `✗ exited ${exitCode}`}
+            </span>
+          )}
+          {running && <span className="script-running-badge">running…</span>}
+          {running && (
+            <button className="script-kill-btn"
+              onClick={() => scriptsApi.killScript(scriptId).then(() => setRunning(false))}
+              title="Kill script">■ Kill</button>
+          )}
+          <button className="script-output-close" onClick={onClose}>×</button>
+        </div>
+        <div className="script-output-body">
+          {lines.length === 0 && running && (
+            <span className="script-output-waiting">Waiting for output…</span>
+          )}
+          {lines.map((line, i) => (
+            <div key={i} className="script-output-line">{line || '\u00a0'}</div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
+      </div>
+    </div>,
+    document.body
+  )
+}
+
 export default function App() {
   const notify = useToast()
   const askConfirm = useConfirm()
@@ -311,6 +375,10 @@ export default function App() {
   const toggleFocus = () => setFocusMode(v => !v)
   const [launcherOpen, setLauncherOpen] = useState(false)
   const [launcherCwd, setLauncherCwd] = useState('')
+
+  // Script chips — load scripts for selected session's cwd
+  const [scriptChips, setScriptChips] = useState([])
+  const [scriptOutput, setScriptOutput] = useState(null) // {id, name} of running script to show output for
   const [wallFocused, setWallFocused] = useState(null)
   const [wallInput, setWallInput] = useState('')
   const [wallOutput, setWallOutput] = useState('')
@@ -426,6 +494,15 @@ export default function App() {
   // Closing the panel drops the maximised state with it, so the next session
   // does not open full screen unless it was asked to.
   useEffect(() => { if (!selected) { setExpanded(false); setReturnView(null) } }, [selected])
+
+  // Load script chips when selected session's cwd changes
+  useEffect(() => {
+    const cwd = selected?.cwd
+    if (!cwd) { setScriptChips([]); return }
+    scriptsApi.listScripts(cwd)
+      .then(d => setScriptChips(d.scripts || []))
+      .catch(() => setScriptChips([]))
+  }, [selected?.cwd])
 
   // F maximises the open session. Deliberately unmodified — the composer and
   // every other text field is excluded below, so a bare letter is free.
@@ -808,6 +885,8 @@ export default function App() {
             collectionsApi.addMember(col.collection.id, { session_id: s.id, cwd: s.cwd })
           ))
           notify(`Collection "${name}" created with ${activeSessions.length} sessions`, 'info')
+          // Reload snapshots list so the Snapshots tab refreshes
+          collectionsApi.getSnapshots().then(d => setSnapshots(d.snapshots || [])).catch(() => {})
         } catch {
           notify('Could not create snapshot collection', 'error')
         }
@@ -1244,6 +1323,36 @@ export default function App() {
     }
   }
 
+  const handleDuplicateArchive = (session) => {
+    fetch(`/api/sessions/${session.id}/duplicate`, { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { console.error('duplicate failed:', d.error); return }
+        // Switch to active view so the new session appears immediately
+        setView('active')
+      })
+      .catch(e => console.error('duplicate error:', e))
+  }
+
+  const handleRunScript = async (script) => {
+    if (script.confirm) {
+      const ok = await askConfirm(
+        `Run "${script.name}"?`,
+        script.command,
+        'Run'
+      )
+      if (!ok) return
+    }
+    const cwd = selected?.cwd
+    if (!cwd) return
+    scriptsApi.runScript(script.id, cwd)
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        setScriptOutput({ id: script.id, name: script.name, cwd })
+      })
+      .catch(() => notify('Could not start script', 'error'))
+  }
+
   const active = sessions.filter(s => {
     if (!['thinking', 'running', 'awaiting-approval', 'idle', 'starting'].includes(s.status)) return false
     // Hide machine-owned workers unless showHidden is on. Defaults: if
@@ -1303,10 +1412,40 @@ export default function App() {
   const favSet = new Set(favourites.map(f => f.id))
   const shownActiveWithFav = shownActive.map(s => ({ ...s, is_favourite: favSet.has(s.id) }))
 
+  // Debounce the awaiting-approval → "Needs you" signal to suppress false
+  // positives from auto-approved tool calls. A session only counts as needing
+  // attention after it has been in awaiting-approval for APPROVAL_ATTENTION_DELAY_MS
+  // without resolving. Auto-approved calls (trust TTL, deny rules) clear within
+  // one poll cycle (~2s) and never make it into the stable set.
+  const APPROVAL_ATTENTION_DELAY_MS = 1500
+  const awaitingFirstSeenRef = useRef(new Map()) // id → timestamp when first seen awaiting
+  const [stableAwaitingIds, setStableAwaitingIds] = useState(new Set())
+  useEffect(() => {
+    const nowAwaiting = new Set(
+      shownActiveWithFav.filter(s => s.status === 'awaiting-approval').map(s => s.id)
+    )
+    // Drop sessions that are no longer awaiting
+    for (const id of awaitingFirstSeenRef.current.keys()) {
+      if (!nowAwaiting.has(id)) awaitingFirstSeenRef.current.delete(id)
+    }
+    // Record first-seen time for new awaiting sessions
+    const now = Date.now()
+    for (const id of nowAwaiting) {
+      if (!awaitingFirstSeenRef.current.has(id)) awaitingFirstSeenRef.current.set(id, now)
+    }
+    // Stable = awaiting for longer than the delay
+    const stable = new Set(
+      [...awaitingFirstSeenRef.current.entries()]
+        .filter(([, t]) => now - t >= APPROVAL_ATTENTION_DELAY_MS)
+        .map(([id]) => id)
+    )
+    setStableAwaitingIds(stable)
+  }, [shownActiveWithFav])
+
   // A working agent needs nothing from you, so it does not deserve the same
   // real estate as one that is stopped waiting. Cards for what needs you; one
   // line each for what does not.
-  const { needsYou: needsYouRaw, working: workingRaw } = partitionByAttention(shownActiveWithFav, heldBySession)
+  const { needsYou: needsYouRaw, working: workingRaw } = partitionByAttention(shownActiveWithFav, heldBySession, stableAwaitingIds)
   // Starred sessions float to the top within each partition.
   const sortFav = arr => [...arr.filter(({s}) => s.is_favourite), ...arr.filter(({s}) => !s.is_favourite)]
   const needsYou = sortFav(needsYouRaw)
@@ -1451,11 +1590,15 @@ export default function App() {
         </div>
       )}
 
-      {pendingApprovals.length > 0 && (
+      {pendingApprovals.filter(a => (a.age || 0) >= 1.5).length > 0 && (() => {
+        // Only show approvals that have been pending ≥1.5s — filters out auto-approved
+        // calls (trust TTL, deny rules) that resolve within one poll cycle.
+        const stableApprovals = pendingApprovals.filter(a => (a.age || 0) >= 1.5)
+        return (
         <div className="approval-banner">
           <div className="approval-banner-header">
             <span className="approval-banner-title">
-              🔧 {pendingApprovals.length} tool call{pendingApprovals.length > 1 ? 's' : ''} waiting for approval
+              🔧 {stableApprovals.length} tool call{stableApprovals.length > 1 ? 's' : ''} waiting for approval
             </span>
             <button
               className="approval-dismiss-all"
@@ -1465,7 +1608,7 @@ export default function App() {
               Dismiss all
             </button>
           </div>
-          {pendingApprovals.map(a => {
+          {stableApprovals.map(a => {
             const session = sessions.find(s => s.id === a.session_id)
             const sessionTitle = session?.title || a.session_id.slice(0, 8)
             const ageSec = Math.round(a.age || 0)
@@ -1495,7 +1638,8 @@ export default function App() {
             )
           })}
         </div>
-      )}
+        )
+      })()}
 
       <div className={`main-layout${focusMode ? ' focus-mode' : ''}`}>
         <div className="grid">
@@ -1550,7 +1694,32 @@ export default function App() {
                   </div>
                 )}
               </div>
-              {/* One prompt box at a time. The launcher is the quick line with
+              {/* Script chips — shown when selected session's cwd has scripts */}
+              {scriptChips.length > 0 && selected?.cwd && (
+                <div className="script-chips-bar">
+                  <span className="script-chips-label">Scripts:</span>
+                  {scriptChips.map(s => (
+                    <button
+                      key={s.id}
+                      className="script-chip-btn"
+                      onClick={() => handleRunScript(s)}
+                      title={`${s.command}${s.confirm ? ' (asks before run)' : ''}`}
+                    >
+                      {s.confirm && <span className="script-chip-warn">⚠ </span>}
+                      {s.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Script output modal */}
+              {scriptOutput && (
+                <ScriptOutputPanel
+                  scriptId={scriptOutput.id}
+                  name={scriptOutput.name}
+                  cwd={scriptOutput.cwd}
+                  onClose={() => setScriptOutput(null)}
+                />
+              )} The launcher is the quick line with
                   its options unfolded — showing both left two "what should the
                   agent do" fields on screen, only one of which was listening. */}
               {launcherOpen ? (
@@ -1654,7 +1823,7 @@ export default function App() {
 
               {shownActiveWithFav.length === 0 && (
                 <div className="empty">
-                  {!sessionsLoaded
+                  {!sessionsLoaded && !error
                     ? 'Loading…'
                     : active.length === 0
                       ? <>No active sessions. Press <strong>+</strong> to launch one, or resume from Snapshots.</>
@@ -1680,6 +1849,7 @@ export default function App() {
               onDeleteArchive={handleDeleteArchive}
               onRenameArchive={handleRenameArchive}
               onSelectAllArchive={handleSelectAllArchive}
+              onDuplicateArchive={handleDuplicateArchive}
               favourites={favourites}
               onToggleFavourite={handleToggleFavourite}
               onLaunchFavourite={handleLaunchFavourite}

@@ -107,36 +107,103 @@ function AddToCollectionBtn({ session }) {
 function CollectionMember({ member, onRemove }) {
   const avail = member.availability || 'done'
   const isMissing = avail === 'missing'
+  // When title is missing, use the folder name from cwd as a readable label
+  const displayName = member.title || (member.cwd ? member.cwd.split('/').pop() : null) || member.session_id?.slice(0, 8) || 'Unnamed'
+  // Only show cwd secondary line when title is shown above (otherwise cwd would duplicate)
+  const showCwd = !!member.title && !!member.cwd
   return (
     <div className={`coll-member ${isMissing ? 'coll-member-missing' : ''}`}>
       <AvailBadge availability={avail} />
-      <span className="coll-member-title">{member.title || member.cwd || member.session_id || 'Unnamed'}</span>
-      {member.cwd && <span className="coll-member-cwd">{member.cwd_display || member.cwd}</span>}
+      <span className="coll-member-title">{displayName}</span>
+      {showCwd && <span className="coll-member-cwd">{member.cwd_display || member.cwd}</span>}
       {isMissing && <span className="coll-member-missing-hint">session deleted</span>}
       <button className="coll-member-remove" onClick={() => onRemove(member.session_id)} title="Remove">×</button>
     </div>
   )
 }
 
-function CollectionCard({ collection, sessions, onRename, onDelete, onStart, onRemoveMember, expanded, onToggle }) {
+function CollectionCard({ collection, sessions, onRename, onDelete, onStart, onRemoveMember, onAddMember, expanded, onToggle }) {
+  const notify = useToast()
   const memberCount = collection.members.length
   const isSnapshot = collection.source === 'snapshot'
   const isFavourites = collection.source === 'favourites'
   const sourceIcon = isSnapshot ? '⊙' : isFavourites ? '★' : '📁'
 
+  // Inline rename state
+  const [renaming, setRenaming] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
+  const renameRef = useRef(null)
+
+  const startRename = (e) => {
+    e.stopPropagation()
+    setRenameDraft(collection.name || '')
+    setRenaming(true)
+    setTimeout(() => renameRef.current?.focus(), 30)
+  }
+  const saveRename = () => {
+    const name = renameDraft.trim()
+    setRenaming(false)
+    if (name && name !== collection.name) onRename(name)
+  }
+  const onRenameKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveRename() }
+    if (e.key === 'Escape') setRenaming(false)
+  }
+
+  // Add-session picker state
+  const [adding, setAdding] = useState(false)
+  const addRef = useRef(null)
+  useEffect(() => {
+    if (!adding) return
+    const handler = (e) => { if (addRef.current && !addRef.current.contains(e.target)) setAdding(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [adding])
+
+  const memberIds = new Set(collection.members.map(m => m.session_id))
+  const addableSessions = (sessions || []).filter(s => s.id && !memberIds.has(s.id))
+
   return (
     <div className="coll-card">
-      <div className="coll-card-header" onClick={onToggle}>
+      <div className="coll-card-header" onClick={renaming ? undefined : onToggle}>
         <span className="coll-expand">{expanded ? '▼' : '▶'}</span>
         <span className="coll-source-icon" title={collection.source}>{sourceIcon}</span>
-        <span className="coll-name">{collection.name}</span>
+        {renaming ? (
+          <input
+            ref={renameRef}
+            className="coll-name-input"
+            value={renameDraft}
+            onChange={e => setRenameDraft(e.target.value)}
+            onBlur={saveRename}
+            onKeyDown={onRenameKey}
+            onClick={e => e.stopPropagation()}
+          />
+        ) : (
+          <span className="coll-name">{collection.name}</span>
+        )}
         <span className="coll-count">{memberCount} {memberCount === 1 ? 'session' : 'sessions'}</span>
         {collection.meta?.date && <span className="coll-meta-date">{collection.meta.date}</span>}
         <div className="coll-actions" onClick={e => e.stopPropagation()}>
           {memberCount > 0 && (
             <button className="coll-start-btn" onClick={onStart} title="Start all members">▶ Start</button>
           )}
-          <button className="coll-rename-btn" onClick={onRename} title="Rename">✎</button>
+          <div className="coll-add-wrap" ref={addRef}>
+            <button className="coll-rename-btn" onClick={e => { e.stopPropagation(); setAdding(v => !v) }} title="Add session">＋</button>
+            {adding && (
+              <div className="coll-add-dropdown">
+                {addableSessions.length === 0
+                  ? <div className="coll-add-empty">No sessions to add</div>
+                  : addableSessions.map(s => (
+                    <button key={s.id} className="coll-add-item" onClick={() => { onAddMember(s.id); setAdding(false) }}>
+                      <span className="coll-add-name">{s.title || s.name || s.id.slice(0, 8)}</span>
+                      <span className="coll-add-cwd">{s.cwd?.split('/').pop() || ''}</span>
+                    </button>
+                  ))
+                }
+              </div>
+            )}
+          </div>
+          <button className="coll-rename-btn" onClick={startRename} title="Rename">✎</button>
           <button className="coll-delete-btn" onClick={onDelete} title="Delete collection">×</button>
         </div>
       </div>
@@ -144,10 +211,7 @@ function CollectionCard({ collection, sessions, onRename, onDelete, onStart, onR
         <div className="coll-members">
           {collection.members.length === 0 && (
             <div className="coll-empty-members">
-              No members.
-              {isFavourites
-                ? ' Add sessions via the ★ button.'
-                : ' Use the 📁+ button on sessions in the Projects or Archive tab.'}
+              No members yet. Press ＋ to add sessions.
             </div>
           )}
           {collection.members.map((m, i) => (
@@ -175,7 +239,7 @@ function CollectionsSubTab({ sessions, onResumeSession }) {
   const load = useCallback(() => {
     setLoading(true)
     collectionsApi.listCollectionsEnriched()
-      .then(d => setCollections(d.collections || []))
+      .then(d => setCollections((d.collections || []).filter(c => c.source !== 'snapshot')))
       .catch(() => notify('Failed to load collections', 'error'))
       .finally(() => setLoading(false))
   }, [])
@@ -205,13 +269,20 @@ function CollectionsSubTab({ sessions, onResumeSession }) {
     }
   }
 
-  const handleRename = async (collection) => {
-    const name = window.prompt('New name:', collection.name)
+  const handleRename = async (collection, name) => {
     if (!name || name === collection.name) return
     const d = await collectionsApi.renameCollection(collection.id, name)
     if (d.ok) {
       setCollections(prev => prev.map(c => c.id === collection.id ? d.collection : c))
     }
+  }
+
+  const handleAddMember = async (collection, sessionId) => {
+    const session = (sessions || []).find(s => s.id === sessionId)
+    if (!session) return
+    const d = await collectionsApi.addMember(collection.id, { session_id: sessionId, cwd: session.cwd, title: session.title }).catch(() => ({ error: 'Network error' }))
+    if (d.error) { notify(d.error, 'error'); return }
+    load()
   }
 
   const handleDelete = async (collection) => {
@@ -282,10 +353,11 @@ function CollectionsSubTab({ sessions, onResumeSession }) {
           sessions={sessions}
           expanded={expanded.has(c.id)}
           onToggle={() => toggleExpand(c.id)}
-          onRename={() => handleRename(c)}
+          onRename={(name) => handleRename(c, name)}
           onDelete={() => handleDelete(c)}
           onStart={() => handleStart(c)}
           onRemoveMember={handleRemoveMember}
+          onAddMember={(sessionId) => handleAddMember(c, sessionId)}
         />
       ))}
     </div>
@@ -384,6 +456,7 @@ export default function CollectionsPanel({
   onDeleteArchive,
   onRenameArchive,
   onSelectAllArchive,
+  onDuplicateArchive,
   // Favourites props
   favourites,
   onToggleFavourite,
@@ -541,6 +614,9 @@ export default function CollectionsPanel({
                   </span>
                   <button className="archive-rename" onClick={e => { e.stopPropagation(); onRenameArchive(s) }} title="Rename">✎</button>
                   <AddToCollectionBtn session={s} />
+                  {onDuplicateArchive && (
+                    <button className="archive-duplicate" onClick={e => { e.stopPropagation(); onDuplicateArchive(s) }} title="Duplicate — start new session with same task">⧉</button>
+                  )}
                   <button className="archive-launch" onClick={e => { e.stopPropagation(); onLaunchFavourite(s) }} title="Resume in new tab">▶</button>
                   <button className="archive-delete" onClick={e => { e.stopPropagation(); onDeleteArchive(s.id) }} title="Delete session">×</button>
                 </div>
