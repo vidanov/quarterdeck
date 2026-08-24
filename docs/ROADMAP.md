@@ -105,7 +105,7 @@ is a truncating copy.
 
 - [x] **Decided: kiro-cli's `Ctrl+S` queue.** Establish what it does before
       building a parallel mechanism.
-- [ ] **Cross-session stack view.** Dashboard answers "what is waiting" across all
+- [x] **Cross-session stack view.** Dashboard answers "what is waiting" across all
       sessions.
 
 ---
@@ -824,7 +824,354 @@ Start Task 2. While it runs:
 
 ---
 
-## 15. Ideas from Composio audit (2026-08-15)
+## 19. UX patterns from Omarchy evaluation (2026-08-23)
+
+Source: Omarchy v4 "Quattro" by DHH (basecamp/omarchy). A Linux desktop environment, not a
+web framework — but three design decisions map directly onto Quarterdeck problems.
+
+### 19a. Merge Concierge and dispatch into one ⌘K surface
+
+Omarchy finding: once `Super + Space` could search both apps and commands, there was no
+reason to keep two separate palettes. They merged the launcher and the command menu into
+one filterable box.
+
+Quarterdeck currently has two overlapping entry points: the Concierge bar (⌘K, natural
+language, session search) and the dispatch box (quick-create input, raw task text). They
+serve different users of the same intent: "start or find something."
+
+- [ ] **Unified ⌘K surface.** One box that: finds active sessions by title/cwd, searches
+      the archive (Phase 1 of section 17a), dispatches new sessions, runs Concierge queries,
+      and opens Library folders. The quick-create strip below the header becomes a shortcut
+      to ⌘K, not a separate input.
+- [ ] **Intent detection.** If the query matches a session title → show it. If it matches
+      nothing → offer to dispatch it as a new task. No mode switching. The box decides.
+- [ ] **Mobile ⌘K.** On small screens ⌘K is the primary nav. A single tap-target in the
+      header opens it. Session cards are the result list. Approval actions stay on cards.
+
+Relationship to section 17a (content-aware search): the unified ⌘K is the front-end for
+the FTS5 index. Build 17a first, then wire it into a merged ⌘K surface.
+
+### 19b. Data-file pattern for display widgets
+
+Omarchy's agents bar widget was rewritten: it discovers JSON records that separate
+collector scripts write, watches them for changes, and draws whatever appears. Adding an
+agent means shipping a collector — never touching the display code.
+
+The display is dumb. The logic is replaceable.
+
+This pattern already appears implicitly in Quarterdeck's roadmap (16a gate types, 16d
+knowledge MCP). Worth naming it explicitly as a convention:
+
+- [ ] **Collector/display split convention.** Any Quarterdeck widget that shows live data
+      (session status, agent usage, deny pattern stats, knowledge index freshness) reads
+      from a JSON file in `~/.osa-kiro/state/`. A background collector writes that file.
+      The API endpoint serves the file; the frontend renders it. Neither knows about the
+      other's internals.
+- [ ] **File-watching for live updates.** Instead of polling `/api/sessions` for every
+      status widget, have the backend watch its own state files and push updates via the
+      existing SSE or WebSocket path. The frontend subscribes once. Omarchy's conclusion:
+      "an idle desktop stops burning CPU" — same applies to Quarterdeck on a phone with
+      all sessions idle.
+
+Relationship to section 10c (session resource protection) and the adaptive polling work
+done in SessionsContext: this is the next step past backoff polling.
+
+### 19c. Direct manipulation over settings dialogs
+
+Omarchy principle: "There's no settings panel for the bar — you just grab it." Direct
+interaction with the thing itself rather than configuring it in a modal.
+
+Quarterdeck's settings panel is now 6 tabs and growing. Some of what lives there should
+move to where the thing actually is.
+
+- [ ] **Drag-to-assign folders in Library.** Session cards in the Library view (section 18)
+      should be draggable onto folder targets. No "Add to folder" dialog.
+- [ ] **Inline session rename.** Already implemented for session cards. Extend to the
+      detail panel header — click the title, type, done. No modal.
+- [ ] **Drag-to-reorder chips.** Composer chips (the starter chips row) already have up/down
+      buttons in the chips editor. Replace with drag handles for direct reordering, both
+      in the editor and in the composer strip itself.
+- [ ] **Settings panel audit.** After Library and 19a are built, review Settings for items
+      that belong closer to the thing they configure. Candidates: deny patterns (belong in
+      a session's security context, not a global tab), chips (belong on the composer),
+      per-project secrets (belong in the session detail panel, not Settings).
+
+---
+
+Status: design discussed, not started. Replaces and extends current Collections tab.
+
+### Problem with current state
+
+- Collections are flat — no nesting, no subfolders
+- Snapshots are pointer lists (session IDs), not reusable spawn recipes
+- Projects tab is auto-generated by cwd, not user-organised
+- No way to duplicate a session with the same premise
+- Archive, Projects, Snapshots, Collections are four separate sub-tabs that conceptually belong together
+
+### Core concept
+
+A two-pane **Library** tab replaces the Collections tab. Left pane: folder tree (user-managed, infinitely nestable). Right pane: sessions and templates in the selected folder.
+
+Sessions can live in multiple folders (folders are labels, not containers — the session still lives in `~/.kiro/sessions/`). Templates and sessions coexist in the same tree, distinguished by icon.
+
+```
+┌────────────────┬───────────────────────────────────────────┐
+│ FOLDERS        │  Quarterdeck                               │
+│                │                                            │
+│ 📁 AWS         │  ◉ osa-kiro refactor        active  2h ago│
+│  📁 Quarterdeck│  ○ auth bug fix              done   3d ago │
+│  📁 VPtB       │  📋 Feature start template  template      │
+│ 📁 Porsche     │                                            │
+│ 📁 Personal    │  [+ Add]  [Duplicate]  [Spawn template]   │
+│                │                                            │
+│ [+ New folder] │  ── Archive ─────────────────────────────│
+│                │  [search archived sessions inline]         │
+└────────────────┴───────────────────────────────────────────┘
+```
+
+### Data model
+
+`~/.osa-kiro/library.json`:
+
+```json
+{
+  "folders": [
+    {"id": "f1", "name": "AWS", "parent_id": null},
+    {"id": "f2", "name": "Quarterdeck", "parent_id": "f1"}
+  ],
+  "entries": [
+    {"id": "e1", "folder_id": "f2", "session_id": "abc123", "added_at": "..."},
+    {"id": "e2", "folder_id": "f2", "template_id": "t1"}
+  ]
+}
+```
+
+### Templates (replaces Snapshots)
+
+Current snapshots = list of session IDs captured at a point in time.
+Proposed templates = **session spawn recipe**: cwd, task text, agent, model, effort, chips config, secret names (not values).
+
+Captured from any live or archived session via "Save as template". Click template → pre-fills the launcher. "Quick spawn" fires immediately with no edits.
+
+Template shape:
+```json
+{
+  "id": "t1",
+  "name": "Quarterdeck feature start",
+  "folder_id": "f2",
+  "recipe": {
+    "cwd": "/path/to/project",
+    "task": "Implement: [describe feature]",
+    "agent": "kiro_default",
+    "model": "claude-sonnet-4-5",
+    "effort": "normal",
+    "chips": [...],
+    "env_vars": ["DATABASE_URL"]
+  },
+  "source_session_id": "abc123",
+  "use_count": 4
+}
+```
+
+### Duplicate session
+
+Two variants:
+
+- **Duplicate as new session** — spawn a fresh session in the same cwd with the same first user turn as task. Available from card overflow, detail panel, Library view. Uses `POST /api/dispatch`.
+- **Branch** (already exists as `branch-at`) — fork from a specific conversation turn. Keep as-is, surface more visibly.
+
+Distinction: Duplicate = fresh start with same premise. Branch = fork from a point in the conversation.
+
+### Migration from current state
+
+- Collections → Library folders (a collection becomes a folder, migration on first Library open)
+- Snapshots → Templates (legacy snapshot = template without recipe, displayed as "legacy snapshot" until manually upgraded)
+- Archive → stays as search-oriented filter inside Library ("Show archived" toggle)
+- Projects → auto-folders in Library (grey, system-managed, seeded from cwd grouping; user folders appear above)
+
+### Build order (when work starts)
+
+1. **Library tab skeleton** — two-pane layout, folders in localStorage, sessions from existing API
+2. **Folder persistence backend** — `GET/POST/PATCH/DELETE /api/library/folders`, `~/.osa-kiro/library.json`
+3. **Templates** — `GET/POST/DELETE /api/templates`, capture from session, spawn via launcher
+4. **Duplicate** — `POST /api/sessions/{id}/duplicate`, surface in card overflow and detail panel
+5. **Migration** — convert existing collections/snapshots on Library tab first open
+
+### Open questions before build
+
+- Should sessions be movable between folders (change primary folder) or only addable to multiple folders?
+- Auto-add to folder when session starts in a cwd that matches a folder's pinned path?
+- Template versioning: can a template be updated, or is each capture a new template?
+- Should the folder tree replace the Projects tab entirely, or coexist?
+
+---
+
+Source: handover document "Semantic Checkout for Captain and Quarterdeck" (2026-08-23).
+The core design decision: **late binding**. Do not compress session content at write time
+against a guess about future questions. Extract at read time, against the actual question.
+
+Two independent phases. Phase 1 unlocks Concierge content search with minimal infra.
+Phase 2 is the full semantic checkout — restoring a specific reasoning thread verbatim
+into a new session.
+
+### 17a. Content-aware archive search (Phase 1)
+
+Current `GET /api/archive?q=` does title + cwd substring match only. "Find the session
+about the auth bug" fails when the session is titled "osa-kiro refactor."
+
+- [ ] **Session content index.** `backend/session_index.py` — SQLite FTS5 index over
+      the first 5 user turns of every session. Rebuild incrementally on access
+      (mtime check against `~/.osa-kiro/session-index.db`). No embeddings for Phase 1 —
+      BM25 over raw text is sufficient for same-project queries.
+- [ ] **Extend archive search.** `GET /api/archive?q=...&content=true` falls through to
+      the FTS5 index when title+cwd match returns zero results. Return ranked results with
+      a `match_source: "content"` field so Concierge can distinguish.
+- [ ] **Concierge intent-aware dispatch.** When a Concierge query resolves zero title
+      matches, automatically retry against content index. Present top 3 with matched
+      excerpt visible. Already noted in section 15b.
+- [ ] **V1/V2/V3 reader parity.** The index must cover all three session formats
+      (V1 SQLite, V2 SQLite, V3 JSONL). Quarterdeck already reads all three for status
+      detection — reuse that path for content extraction.
+
+### 17b. Chapter segmentation and semantic checkout (Phase 2)
+
+A long session contains several unrelated threads. Restore the specific thread, not
+a summary of the whole session.
+
+Design principle from the handover: **chapter title = originating user question verbatim**.
+Not a generated summary. You recognise your own question faster than any abstraction of it.
+
+- [ ] **Chapter segmenter.** Segment sessions into chapters on user-turn topic shift
+      (heuristic: embedding distance between consecutive user turns > threshold).
+      Fall back to the SeCom segmenter (arXiv 2502.05589) if boundaries are poor.
+      Chapter index stored in `~/.osa-kiro/chapter-index.db`.
+- [ ] **Chapter index is a read model.** The index is rebuildable from the JSONL by
+      replay. It never mutates session files. Re-segmentation produces a new projection
+      version; old projections stay addressable.
+- [ ] **Hybrid retrieval.** BM25 + vector over chapter titles and first user turn.
+      Rerank. Return the chapter map — do not auto-select. Selection is the user's.
+- [ ] **Restore action.** `POST /api/sessions/{id}/restore-chapter` assembles:
+      compacted prior context, verbatim chapter, current date, provenance envelope
+      (`source_session_id`, `turn_range`, `checkpoint_date`, `ledger_entry_hash`,
+      `segmenter_version`). Dispatches as a new session via `load-via-script` hook.
+- [ ] **Provenance envelope in audit trail.** Restored context enters the new session
+      as an unverified claim. The audit trail records the envelope so derived outputs
+      are traceable to an unattested input.
+- [ ] **Chapter browser in detail panel.** A "Chapters" tab alongside Transcript and
+      Activity. Lists chapter titles (verbatim user questions), date, turn range. Click
+      to restore. On mobile: accessible from the session detail view.
+
+### Mode split (from arXiv 2604.27003 evidence)
+
+| Mode | Distance | Representation | v1 scope |
+|---|---|---|---|
+| Resume | same project, same problem | verbatim chapter | ✅ build |
+| Transfer | different project or task | abstracted decision, verbatim on demand | deferred |
+
+Cross-project transfer is deliberately deferred. Within-project verbatim beats abstraction
+(evidence: -9.5 FWT negative transfer for raw cross-task vs +6.5 for abstracted insights).
+The ordering inverts for within-task reuse. Build resume first, measure, then transfer.
+
+### What not to build (explicitly out of scope for v1)
+
+- Automatic chapter selection (selection is the user's)
+- Delta / invalidation sets (git gives chronology, not semantic supersession)
+- Cross-project reasoning transfer
+- Abstract decision extraction
+
+### Sequencing
+
+Phase 1 (17a) before Phase 2 (17b). Phase 1 stands alone and unblocks Concierge.
+Phase 2 depends on Phase 1's reader infrastructure.
+
+---
+
+Source: `/Users/a.vidanov/Documents/PROJECTS/PORSCHE/ACTUAL/turbo-spec-main` — a spec-driven
+multi-agent CI/CD engine (Porsche internal). Five patterns worth adopting, in priority order.
+
+### 16a. Named quality gates with retry/reroute logic
+
+turbo-spec's evaluators are discrete, named, pluggable verdicts (`build_pass`, `review_approved`,
+`spec_completeness`). Quarterdeck's approval gate is binary: allow/deny.
+
+Pattern: named gate types with configurable outcome routing instead of a single hold/release.
+
+- [ ] **Gate types per session rule file.** Each rule entry carries an `action` field: `auto_allow`,
+      `auto_deny`, `human_required`, `timed_out`. Pairs with 15a (per-session rule files) and 10a
+      (trust TTL).
+- [ ] **Retry/reroute on gate outcome.** When a gate fires `human_required` and the human denies,
+      the agent can be rerouted to a fallback task rather than hard-blocked. Configurable per rule.
+- [ ] **Gate verdict in audit trail.** Every auto-allow and auto-deny records the rule name that
+      matched, not just the tool name. Already partially addressed by 15a.
+
+Reference: `src/agentic_evaluator/assessor.py`, `script_gate_evaluator.py` in turbo-spec.
+
+### 16b. Blueprint YAML for multi-stage dispatch
+
+turbo-spec describes multi-agent pipelines declaratively. Quarterdeck dispatches single sessions
+with a task string.
+
+- [ ] **Blueprint format for chained dispatch.** A lightweight YAML definition:
+      `stages: [{task, cwd, depends_on, gate}]`. Define "plan then implement" chains from the UI
+      without needing ACP. Stored in `~/.osa-kiro/blueprints/`.
+- [ ] **Blueprint picker in launcher.** When dispatching, offer to pick a blueprint instead of
+      typing a raw task. Blueprint fills the task field and sets up the dependency chain.
+- [ ] **Stage handoff.** When a stage completes successfully, auto-dispatch the next stage with the
+      previous stage's output injected as context.
+
+Relationship to ROADMAP: this is a lighter-weight version of section 14 (constraint loop) that
+does not require ACP. Sequence: build 16b before 14.
+
+Reference: `docs/workflow-blueprint.md`, `src/workflow_skeleton/schemas/` in turbo-spec.
+
+### 16c. Evaluator pattern for deny chains (waterfall)
+
+turbo-spec's `aop_apply_critic`, `script_gate_evaluator`, `scripted_judge_gates` are all
+variations of "run a check, get a verdict, route on outcome." Python, no external framework.
+
+- [ ] **Waterfall deny chain.** Replace the flat pattern list in `deny.py` with a chain of policy
+      handlers that each call `next()`. Each handler can short-circuit (deny) or pass through.
+      Cordis-style semantics, ~20 lines of Python.
+- [ ] **Script gates.** Allow a deny pattern entry to specify a shell script instead of a regex.
+      Script receives the tool input on stdin, exits 0 (allow) or non-zero (deny). Enables complex
+      checks (file content inspection, git diff analysis) that regex cannot express.
+
+Reference: `src/agentic_evaluator/assessor.py` in turbo-spec.
+
+### 16d. knowledge-mcp as queryable context injection
+
+turbo-spec runs a local MCP server that agents query for project-specific reference material
+instead of injecting entire steering files. Agents ask questions, get relevant chunks.
+
+- [ ] **Local knowledge MCP server.** Small SQLite-backed MCP server (`backend/knowledge_mcp.py`)
+      built at session dispatch from a watched directory (`~/.kiro/steering/`, project docs).
+      Exposes a `search_knowledge(query)` tool agents can call during a session.
+- [ ] **Per-session knowledge scope.** The knowledge server is scoped to the session's cwd —
+      project-specific docs override global steering for that session.
+- [ ] **Settings UI.** Configure watched directories per project. Toggle knowledge MCP on/off per
+      session from the detail panel.
+
+Relationship to ROADMAP: this is the implementation path for section 10e (persistent memory across
+sessions). Sequence: build 16d before 10e's full memory feature.
+
+Reference: `knowledge-mcp/server/` in turbo-spec.
+
+### 16e. OpenSpec governance for Quarterdeck's own development
+
+turbo-spec enforces: every PR that changes behaviour must carry a versioned spec document, archived
+into the repo on merge. CI blocks merge until archived.
+
+- [ ] **Lightweight spec convention.** For non-trivial features (anything touching auth, approval
+      gates, session storage), require a spec entry in `docs/specs/` before implementation.
+      Not CI-enforced (solo tool), but tracked in ROADMAP and CHANGELOG.
+- [ ] **ADR discipline.** turbo-spec's `docs/adr/` pattern — one file per architectural decision
+      with status, context, decision, consequences — applied to Quarterdeck's open decisions
+      (V3 vs V1 session format, ACP transport, loopback bypass, etc.).
+
+This is a process change, not a feature. Low urgency, worth adopting if the project gets
+contributors.
+
+---
 
 Source: https://composio.dev — tool execution infrastructure for AI agents.
 Composio's product is orthogonal to Quarterdeck (tool layer vs. session layer),
@@ -921,6 +1268,34 @@ Internal identifiers stay unchanged (`~/.osa-kiro/`, `DECK_NONCE`, `DECK_PORT`,
 - ~~**Persist helpers menu (chips strip) state across restarts**~~ — done 2026-08-13: `chipsOpen` saved to backend settings (`dispatch-cwd-mode`), survives WKWebView localStorage clear
 - ~~**Copy button on transcript messages**~~ — done 2026-08-15: `⎘` button on every assistant block and user bubble, hidden until row hover, copied state shows green `✓` for 1.5 s.
 
+## Pending UX requests (2026-08-20)
+
+- [x] **macOS dock badge — attention count.** When one or more sessions need
+      attention (status `awaiting-approval`, or `error`), show a red badge on
+      the Quarterdeck dock icon with the count. Clears when no sessions need
+      attention. Background thread polls `/api/sessions` every 5 s and calls
+      `NSApp.dockTile().setBadgeLabel_()` via pyobjc. Implemented in `app.py`
+      2026-08-20.
+- [ ] **Project automation — mechanical procedures outside LLM chat.** Repetitive
+      project-level operations (git push, build, deploy, run tests, npm install,
+      pip sync) should be executable from Quarterdeck without opening a chat session
+      or typing a prompt. A per-project "Procedures" panel lists named shell commands
+      defined in `.quarterdeck/procedures.json` (or a global fallback list). Each
+      procedure is a label + shell command, optionally with a confirm step for
+      destructive ones.
+
+      - `GET /api/projects/{cwd}/procedures` — list procedures for a cwd.
+      - `POST /api/projects/{cwd}/procedures/run` — `{"name": "..."}`. Runs the
+        command in the project cwd in a short-lived tmux pane; streams output back.
+      - UI: a "⚡ Run" button on project cards and the detail header that opens a
+        procedure picker. One click to git push, build, or deploy without involving
+        an LLM. Output shown inline (small terminal or toast log).
+      - File format: `[{"name": "git push", "cmd": "git push origin main",
+        "confirm": true}, {"name": "build", "cmd": "./build-app.sh --install"}]`.
+        Global defaults (git status, git push, npm run build) when no project file.
+      - Commands matching destructive patterns (push, rm, deploy) require confirm.
+        Safe commands (build, test, status) run immediately with output inline.
+
 ## Pending UX requests (2026-08-15)
 
 - [ ] **Restore + Queue button in mobile Chat view.** `App.css` hides `.queue-btn`
@@ -950,3 +1325,61 @@ Internal identifiers stay unchanged (`~/.osa-kiro/`, `DECK_NONCE`, `DECK_PORT`,
       the goal is read access and light edits from the phone without leaving
       Quarterdeck. Path is validated against the vault root (no directory
       traversal). Write endpoint is POST-gated behind the existing auth token.
+
+---
+
+## 13. Folder scripts — mechanical procedures without an LLM
+
+Some project operations are deterministic and need no agent: `git push`, `npm run build`, `pytest`, `docker compose up`, deploy scripts. Running these through kiro-cli wastes context and adds latency. Quarterdeck should let you define and run them directly, one click from the project's card or detail panel.
+
+**Core idea.** A script is a named shell command bound to a folder (or collection). It runs in a tmux pane (visible output, killable), not through kiro-cli. The LLM is not involved.
+
+**Design constraints:**
+- Scripts are per-folder, stored in `~/.osa-kiro/scripts/<cwd-hash>.json`. The cwd hash avoids filesystem path issues.
+- Each script has: `name`, `command`, `cwd`, optional `description`, optional `confirm` flag (ask before running).
+- Runs in a dedicated short-lived tmux session named `deck-script-<uuid>`. Output is capturable by the backend.
+- A script's exit code is reported back to the UI (green/red badge).
+- Scripts are not sessions — they do not appear in the session grid or archive.
+
+**Work:**
+
+- [ ] **Script store.** `GET/POST/DELETE /api/scripts?cwd=...`. Returns scripts bound to a cwd or all scripts. Backed by `~/.osa-kiro/scripts/`.
+- [ ] **Run endpoint.** `POST /api/scripts/{id}/run`. Spawns a tmux session, streams output via `/api/scripts/{id}/output` (tail). Returns `{ok, run_id, tmux_session}`.
+- [ ] **Kill endpoint.** `DELETE /api/scripts/{id}/run` to cancel a running script.
+- [ ] **Script editor in Settings.** Add/edit/delete scripts per folder. Name, command, confirm-before-run toggle.
+- [ ] **Script buttons in the toolbar.** When `view === 'active'` and the selected session's cwd has scripts, show them as chips in the filter/action bar. One click runs; confirm flag shows a prompt first.
+- [ ] **Script output panel.** A lightweight pane (reuse the pane-view component) showing the last N lines of a running or finished script. Exit status badge.
+- [ ] **Import from Makefile / package.json.** Auto-detect common script sources in the project folder and offer to import them as Quarterdeck scripts. `make` targets from `Makefile`, `scripts` block from `package.json`.
+- [ ] **Phone support.** Script chips visible on mobile detail view. Confirm prompt before run (always, on mobile — fat-finger guard).
+
+**What this is not.** This is not a task queue or a build system. It is a one-click shortcut for things you run manually anyway. No scheduling, no dependencies, no retry logic. Those belong in the agent or in a real CI tool.
+
+
+---
+
+## 14. Per-project secrets injection
+
+Named secrets bound to a folder. Injected as environment variables into sessions
+started in that folder. Agent-written code can use them; the agent never sees the
+values in context.
+
+**Protection model:**
+- Agent writes `os.environ.get("DATABASE_URL")` → works, value never in context
+- Agent tries `echo $DATABASE_URL` → deny pattern auto-blocks it
+- Agent tries to read `~/.osa-kiro/secrets/` → fs_read deny pattern blocks it
+- Value never typed into the composer, never appears in the JSONL transcript
+
+**Storage:** `~/.osa-kiro/secrets/<cwd-hash>.json`, values encrypted with a
+key stored in the macOS keychain under `com.vidanov.quarterdeck.secrets`.
+Falls back to file-based key in `~/.osa-kiro/secrets.key` in headless/CI.
+
+**Work:**
+
+- [x] `backend/secrets.py` — load, save, encrypt/decrypt per cwd. CRUD: list (names only), add, remove, get-for-injection (decrypted, internal only).
+- [x] `/api/secrets` CRUD endpoints — GET (names + masked values), POST (add), DELETE (remove by name). Value never returned after creation.
+- [x] Inject at spawn — `tmux.spawn()` calls `secrets.get_env(cwd)` and passes each secret as `-e KEY=VALUE` to `tmux new-session`.
+- [x] Auto-deny on spawn — when secrets exist for a cwd, ensure deny patterns block `fs_read` on `~/.osa-kiro/secrets/` and `execute_bash` patterns that would print secret names (`echo \$KEY`, `printenv KEY`, `env | grep KEY`).
+- [ ] Settings UI — per-project secrets panel: list secrets by name (masked), add new (name + value, value cleared after save), delete. Accessible from the session detail panel and from Settings when a project is selected.
+- [ ] Audit — log which secret names were injected per session (names only, never values). Visible in the audit trail.
+- [ ] Rotation hint — flag secrets older than 90 days in the UI.
+
