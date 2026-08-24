@@ -12,6 +12,10 @@ export const useSessions = () => useContext(SessionsContext)
 
 // Default poll intervals (ms). Overridden by settings if configured.
 const DEFAULT_POLL_MS = 2000
+// Backoff interval when all sessions are stable (idle/done, no recent jsonl change)
+const BACKOFF_POLL_MS = 8000
+// Sessions in these statuses count as "active" — keep fast polling
+const ACTIVE_STATUSES = new Set(['thinking', 'running', 'awaiting-approval', 'starting'])
 
 // How long a card stays flagged after its status changes to one that wants you.
 const NOTIFY_MS = 5000
@@ -151,9 +155,28 @@ export function SessionsProvider({ children }) {
   }, [refresh])
 
   useEffect(() => {
-    refresh()
-    const interval = setInterval(refresh, pollMs.current)
-    return () => clearInterval(interval)
+    let timer = null
+    const prevMtimes = {}
+
+    const schedule = (sessions) => {
+      // Stay fast if any session is actively working
+      const hasActive = sessions.some(s => ACTIVE_STATUSES.has(s.status))
+      // Stay fast if any session's jsonl changed since last poll
+      const hasChanged = sessions.some(s => {
+        const prev = prevMtimes[s.id]
+        return prev !== undefined && s.jsonl_mtime && s.jsonl_mtime !== prev
+      })
+      // Update mtime cache
+      sessions.forEach(s => { if (s.jsonl_mtime) prevMtimes[s.id] = s.jsonl_mtime })
+
+      const next = (hasActive || hasChanged) ? pollMs.current : BACKOFF_POLL_MS
+      timer = setTimeout(() => {
+        refresh().then(result => schedule(result || []))
+      }, next)
+    }
+
+    refresh().then(result => schedule(result || []))
+    return () => { if (timer) clearTimeout(timer) }
   }, [refresh])
 
   const markKilling = useCallback((id) => setKilling(prev => new Set([...prev, id])), [])
