@@ -14,6 +14,88 @@ import { DocCard } from './DocCard'
 import XtermPane from './XtermPane'
 import ShellInputBar from './ShellInputBar'
 
+// ---------------------------------------------------------------------------
+// Save-as-template modal
+// ---------------------------------------------------------------------------
+function SaveAsTemplateModal({ session, afterSeq, onClose, notify }) {
+  const [name, setName] = useState(session?.title || '')
+  const [task, setTask] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  // Close on Escape
+  useEffect(() => {
+    const h = (e) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [onClose])
+
+  const handleSave = async () => {
+    if (!name.trim()) { notify('Template name is required', 'error'); return }
+    setSaving(true)
+    try {
+      const d = await api.saveAsTemplate(session.id, {
+        after_seq: afterSeq,
+        name: name.trim(),
+        task: task.trim(),
+        cwd: session.cwd || '',
+      })
+      if (d.ok) {
+        notify(`Template "${name.trim()}" saved`, 'info')
+        onClose()
+      } else {
+        notify(d.error || 'Save failed', 'error')
+      }
+    } catch (e) {
+      notify(e.message || 'Save failed', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return createPortal(
+    <div className="sat-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="sat-modal" role="dialog" aria-modal="true" aria-label="Save as template">
+        <div className="sat-header">
+          <span className="sat-title">Save as template</span>
+          <button className="sat-close" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <p className="sat-hint">
+          Snapshot of this conversation up to turn&nbsp;<strong>{afterSeq}</strong> will be
+          saved. Every time you use this template a new session starts from this exact context.
+        </p>
+        <label className="sat-label">
+          Template name
+          <input
+            className="sat-input"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="e.g. Refactor module"
+            autoFocus
+          />
+        </label>
+        <label className="sat-label">
+          Task / prompt
+          <span className="sat-hint-inline">Use {'{{var}}'} for variable slots</span>
+          <textarea
+            className="sat-textarea"
+            value={task}
+            onChange={e => setTask(e.target.value)}
+            placeholder={'e.g. Refactor {{file}} using the patterns established in this session.'}
+            rows={4}
+          />
+        </label>
+        <div className="sat-footer">
+          <button className="sat-btn-cancel" onClick={onClose}>Cancel</button>
+          <button className="sat-btn-save" onClick={handleSave} disabled={saving || !name.trim()}>
+            {saving ? 'Saving…' : '📋 Save template'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  )
+}
+
 // Error boundary so a transcript rendering crash shows a recovery button
 // instead of a blank white screen with no way out.
 class TranscriptErrorBoundary extends React.Component {
@@ -660,6 +742,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   // Corrections — one-press logging, confirm/withdraw after the fact
   const [corrections, setCorrections] = useState([])
   const [showCorrections, setShowCorrections] = useState(false)
+  // Save-as-template modal state
+  const [satModal, setSatModal] = useState(null) // { afterSeq: number } | null
   useEffect(() => {
     if (!session?.id || !showCorrections) return
     api.getCorrections(session.id)
@@ -2305,6 +2389,13 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                           {ts && <span className="chat-ts">{ts}</span>}
                           <CopyButton text={msg.text} />
                           {forkFn && <button className="chat-fork" title="Fork from this point" onClick={forkFn}>⑂</button>}
+                          {msg.is_turn && (
+                            <button
+                              className="chat-fork"
+                              title="Save as template from this point"
+                              onClick={() => setSatModal({ afterSeq: msg.seq > 0 ? msg.seq - 1 : 0 })}
+                            >📋</button>
+                          )}
                         </div>
                       </>
                     )}
@@ -2838,6 +2929,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     {chipsModalOpen && session.cwd && createPortal(
       <ChipsPanel cwd={session.cwd} onClose={() => setChipsModalOpen(false)} />,
       document.body
+    )}
+    {satModal && (
+      <SaveAsTemplateModal
+        session={session}
+        afterSeq={satModal.afterSeq}
+        onClose={() => setSatModal(null)}
+        notify={notify}
+      />
     )}
     </>
   )

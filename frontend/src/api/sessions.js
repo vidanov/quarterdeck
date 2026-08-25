@@ -91,3 +91,19 @@ export const getDurationStats = (project, typeTag) =>
   getJSON(`/api/stats/duration?project=${encodeURIComponent(project)}&type_tag=${encodeURIComponent(typeTag)}`)
 export const setSessionTypeTag = (id, tag) =>
   postJSON(`/api/sessions/${id}/duration/type-tag`, { tag })
+
+// Templates
+export const listTemplates = () => getJSON('/api/templates')
+export const createTemplate = (payload) => postJSON('/api/templates', payload)
+export const updateTemplate = (id, payload) =>
+  fetch(`/api/templates/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(r => r.json())
+export const deleteTemplate = (id) => del(`/api/templates/${encodeURIComponent(id)}`)
+export const saveAsTemplate = (sessionId, payload) =>
+  postJSON(`/api/sessions/${encodeURIComponent(sessionId)}/save-as-template`, payload)
+
+// Intake — resolve a template + vars and spawn a session
+export const intake = (payload) => postJSON('/api/intake', payload)
