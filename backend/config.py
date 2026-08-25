@@ -163,6 +163,9 @@ SNAPSHOTS_FILE = STATE_DIR / "snapshots.json"
 FAVOURITES_FILE = STATE_DIR / "favourites.json"
 COLLECTIONS_FILE = STATE_DIR / "collections.json"
 TEMPLATES_FILE = STATE_DIR / "templates.json"
+# Frozen JSONL baselines written at "Save as template" time.
+# One file per template: <template_id>.jsonl — never modified after creation.
+TEMPLATE_SNAPSHOTS_DIR = STATE_DIR / "template-snapshots"
 
 # Where they used to live. Read once, if the new file does not exist yet, so a
 # checkout that already had preferences keeps them.

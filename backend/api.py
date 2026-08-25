@@ -40,6 +40,7 @@ from .config import (
     SESSIONS_DIR, CREW_SESSIONS_DIR, TAIL_LINES, TERMINALS, VITE_PORT, WORKSPACE_AGENTS_SUBDIR,
     SETTINGS_FILE, SNAPSHOTS_FILE, FAVOURITES_FILE, SUMMARIES_DIR, SLASH_QUEUES_DIR,
     TEMPLATES_FILE,
+    TEMPLATE_SNAPSHOTS_DIR,
     available_models, ensure_tool_path, migrate_settings,
 )
 
@@ -2788,6 +2789,102 @@ def branch_at_turn(session_id: str, payload: dict):
         "branch_point": after_seq,
         "attach": tmux.attach_command(new_id),
     }
+
+
+@app.post("/api/sessions/{session_id}/save-as-template")
+async def save_as_template(session_id: str, req: Request):
+    """Snapshot a session up to a turn and save it as a reusable template.
+
+    Body:
+      after_seq  int      last JSONL line to keep (same semantics as branch-at)
+      name       str      template display name
+      task       str      task string with optional {{var}} slots
+      vars       list     [{name, description, required}]
+      cwd        str      override cwd (defaults to session's cwd)
+
+    The frozen JSONL is written to TEMPLATE_SNAPSHOTS_DIR/<template_id>.jsonl
+    once and never modified.  Every instantiation via /api/intake resumes from
+    this snapshot, so all instances start from the identical context baseline.
+    """
+    import uuid as _uuid_st
+    from datetime import datetime as _dt_st
+
+    payload = await req.json()
+    after_seq = payload.get("after_seq")
+    if after_seq is None or not isinstance(after_seq, int) or after_seq < 0:
+        return JSONResponse({"error": "after_seq must be a non-negative integer"}, status_code=400)
+
+    name = (payload.get("name") or "").strip()
+    task = (payload.get("task") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    # task may be empty — caller can fill it later via PUT /api/templates/{id}
+
+    meta = read_metadata(session_id)
+    if not meta:
+        return JSONResponse({"error": "session not found"}, status_code=404)
+
+    src_jsonl = SESSIONS_DIR / f"{session_id}.jsonl"
+    if not src_jsonl.exists():
+        return JSONResponse({"error": "no conversation history"}, status_code=404)
+
+    # Read lines up to after_seq (same logic as branch-at)
+    kept_lines = []
+    with open(src_jsonl, "r") as f:
+        for seq, line in enumerate(f):
+            if seq > after_seq:
+                break
+            kept_lines.append(line)
+
+    if not kept_lines:
+        return JSONResponse({"error": "no lines to keep at that seq"}, status_code=400)
+
+    # If the cut lands on a ToolResults entry, extend to the next line so the
+    # turn is complete and kiro-cli won't see a dangling tool call.
+    try:
+        last_kind = json.loads(kept_lines[-1]).get("kind", "")
+    except (json.JSONDecodeError, IndexError):
+        last_kind = ""
+
+    if last_kind == "ToolResults":
+        with open(src_jsonl, "r") as f:
+            for seq, line in enumerate(f):
+                if seq == after_seq + 1:
+                    kept_lines.append(line)
+                    break
+
+    template_id = str(_uuid_st.uuid4())
+
+    # Write the frozen snapshot
+    TEMPLATE_SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    snapshot_path = TEMPLATE_SNAPSHOTS_DIR / f"{template_id}.jsonl"
+    snapshot_path.write_text("".join(kept_lines))
+
+    cwd = (payload.get("cwd") or "").strip() or meta.get("cwd", "")
+
+    t = {
+        "id": template_id,
+        "name": name,
+        "cwd": cwd,
+        "task": task,
+        "agent": payload.get("agent") or "",
+        "model": payload.get("model") or "",
+        "effort": payload.get("effort") or "",
+        "vars": payload.get("vars") or [],
+        # Context-seeded fields
+        "source_session_id": session_id,
+        "source_seq": after_seq,
+        "snapshot_id": template_id,   # snapshot file == <template_id>.jsonl
+        "lines_snapshotted": len(kept_lines),
+        "created_at": _dt_st.utcnow().isoformat() + "Z",
+    }
+
+    with _templates_lock:
+        templates = _load_templates()
+        templates.append(t)
+        _save_templates(templates)
+
+    return {"ok": True, "template": t}
 
 
 @app.post("/api/sessions/{session_id}/resume")
@@ -8276,8 +8373,34 @@ async def intake(req: Request):
     if not task.strip():
         return JSONResponse({"error": "resolved task is empty"}, status_code=400)
 
-    result = tmux.spawn(cwd, task=" ".join(task.split()), wait=False,
-                        **_spawn_kwargs(dispatch_payload))
+    # Context-seeded templates carry a frozen JSONL snapshot. Copy it into the
+    # sessions directory so kiro-cli can --resume-id from it, then send the
+    # resolved task as the first new prompt in that resumed session.
+    snapshot_id = (tmpl or {}).get("snapshot_id", "") if template_name else ""
+    if snapshot_id:
+        snapshot_src = TEMPLATE_SNAPSHOTS_DIR / f"{snapshot_id}.jsonl"
+        if not snapshot_src.exists():
+            return JSONResponse({"error": f"snapshot for template '{template_name}' not found"}, status_code=500)
+        import uuid as _uuid_intake
+        resume_id = str(_uuid_intake.uuid4())
+        import shutil as _shutil_intake
+        _shutil_intake.copy2(snapshot_src, SESSIONS_DIR / f"{resume_id}.jsonl")
+        # Minimal metadata so the session is discoverable
+        from datetime import datetime as _dt_intake
+        _stamp = _dt_intake.utcnow().isoformat() + "Z"
+        (SESSIONS_DIR / f"{resume_id}.json").write_text(json.dumps({
+            "session_id": resume_id,
+            "title": f"(template: {(tmpl or {}).get('name', '')}) {task[:60]}",
+            "cwd": cwd,
+            "created_at": _stamp,
+            "updated_at": _stamp,
+            "template_id": snapshot_id,
+        }))
+        result = tmux.spawn(cwd, resume_id=resume_id, task=" ".join(task.split()),
+                            wait=False, **_spawn_kwargs(dispatch_payload))
+    else:
+        result = tmux.spawn(cwd, task=" ".join(task.split()), wait=False,
+                            **_spawn_kwargs(dispatch_payload))
     if not result.get("ok"):
         return JSONResponse({"error": result.get("error", "spawn failed")}, status_code=500)
 
