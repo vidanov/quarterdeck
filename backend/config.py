@@ -162,6 +162,7 @@ CLIENT_PREFS_FILE = STATE_DIR / "client-prefs.json"  # UI state that must surviv
 SNAPSHOTS_FILE = STATE_DIR / "snapshots.json"
 FAVOURITES_FILE = STATE_DIR / "favourites.json"
 COLLECTIONS_FILE = STATE_DIR / "collections.json"
+TEMPLATES_FILE = STATE_DIR / "templates.json"
 
 # Where they used to live. Read once, if the new file does not exist yet, so a
 # checkout that already had preferences keeps them.

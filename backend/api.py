@@ -39,6 +39,7 @@ from .config import (
     RECENT_SESSIONS_LIMIT, REMOTE_PORT, STATE_DIR, STACKS_DIR,
     SESSIONS_DIR, CREW_SESSIONS_DIR, TAIL_LINES, TERMINALS, VITE_PORT, WORKSPACE_AGENTS_SUBDIR,
     SETTINGS_FILE, SNAPSHOTS_FILE, FAVOURITES_FILE, SUMMARIES_DIR, SLASH_QUEUES_DIR,
+    TEMPLATES_FILE,
     available_models, ensure_tool_path, migrate_settings,
 )
 
@@ -8126,6 +8127,171 @@ def update_apply():
             yield "__ERROR__\n"
 
     return StreamingResponse(_stream(), media_type="text/plain")
+
+
+# ---------------------------------------------------------------------------
+# Templates (intake recipes with {{var}} parameter slots)
+# ---------------------------------------------------------------------------
+
+import threading as _thr_templates
+from datetime import datetime as _dt_templates
+
+_templates_lock = _thr_templates.Lock()
+
+
+def _load_templates() -> list:
+    try:
+        return json.loads(TEMPLATES_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_templates(templates: list) -> None:
+    import tempfile as _tempfile
+    TEMPLATES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with _tempfile.NamedTemporaryFile("w", dir=TEMPLATES_FILE.parent, delete=False, suffix=".tmp") as f:
+        json.dump(templates, f, indent=2)
+        tmp = Path(f.name)
+    tmp.replace(TEMPLATES_FILE)
+
+
+@app.get("/api/templates")
+def list_templates():
+    with _templates_lock:
+        return {"templates": _load_templates()}
+
+
+@app.post("/api/templates")
+async def create_template(req: Request):
+    payload = await req.json()
+    name = (payload.get("name") or "").strip()
+    task = (payload.get("task") or "").strip()
+    if not name or not task:
+        return JSONResponse({"error": "name and task required"}, status_code=400)
+    import uuid as _uuid
+    t = {
+        "id": str(_uuid.uuid4()),
+        "name": name,
+        "cwd": payload.get("cwd") or "",
+        "task": task,
+        "agent": payload.get("agent") or "",
+        "model": payload.get("model") or "",
+        "effort": payload.get("effort") or "",
+        "vars": payload.get("vars") or [],
+        "created_at": _dt_templates.utcnow().isoformat() + "Z",
+    }
+    with _templates_lock:
+        templates = _load_templates()
+        templates.append(t)
+        _save_templates(templates)
+    return {"ok": True, "template": t}
+
+
+@app.put("/api/templates/{template_id}")
+async def update_template(template_id: str, req: Request):
+    payload = await req.json()
+    with _templates_lock:
+        templates = _load_templates()
+        for i, t in enumerate(templates):
+            if t.get("id") == template_id:
+                for field in ("name", "cwd", "task", "agent", "model", "effort", "vars"):
+                    if field in payload:
+                        t[field] = payload[field]
+                templates[i] = t
+                _save_templates(templates)
+                return {"ok": True, "template": t}
+    return JSONResponse({"error": "template not found"}, status_code=404)
+
+
+@app.delete("/api/templates/{template_id}")
+def delete_template(template_id: str):
+    with _templates_lock:
+        templates = _load_templates()
+        before = len(templates)
+        templates = [t for t in templates if t.get("id") != template_id]
+        if len(templates) == before:
+            return JSONResponse({"error": "template not found"}, status_code=404)
+        _save_templates(templates)
+    return {"ok": True}
+
+
+@app.post("/api/intake")
+async def intake(req: Request):
+    """Resolve a named template, substitute vars, and spawn a session.
+
+    Body: {"template": "name-or-id", "vars": {"text": "...", ...}}
+    Also accepts direct dispatch fields (cwd, task, agent, model, effort)
+    as an override or bypass (no template required if task is provided directly).
+    """
+    payload = await req.json()
+    template_name = (payload.get("template") or "").strip()
+    vars_ = payload.get("vars") or {}
+
+    if template_name:
+        with _templates_lock:
+            templates = _load_templates()
+        tmpl = None
+        for t in templates:
+            if t.get("id") == template_name or t.get("name") == template_name:
+                tmpl = t
+                break
+        if not tmpl:
+            return JSONResponse({"error": f"template '{template_name}' not found"}, status_code=404)
+
+        # Substitute {{var}} slots in task text
+        task = tmpl["task"]
+        for k, v in vars_.items():
+            task = task.replace("{{" + k + "}}", str(v))
+
+        # Check required vars still present as unfilled slots
+        missing = [
+            v["name"] for v in (tmpl.get("vars") or [])
+            if v.get("required") and "{{" + v["name"] + "}}" in task
+        ]
+        if missing:
+            return JSONResponse({"error": f"missing required vars: {', '.join(missing)}"}, status_code=400)
+
+        dispatch_payload = {
+            "cwd": payload.get("cwd") or tmpl.get("cwd") or "",
+            "task": task,
+            "agent": payload.get("agent") or tmpl.get("agent") or "",
+            "model": payload.get("model") or tmpl.get("model") or "",
+            "effort": payload.get("effort") or tmpl.get("effort") or "",
+        }
+    else:
+        task = (payload.get("task") or "").strip()
+        if not task:
+            return JSONResponse({"error": "template or task required"}, status_code=400)
+        dispatch_payload = {
+            "cwd": payload.get("cwd") or "",
+            "task": task,
+            "agent": payload.get("agent") or "",
+            "model": payload.get("model") or "",
+            "effort": payload.get("effort") or "",
+        }
+
+    cwd = dispatch_payload["cwd"] or cwd_suggestion()["path"] or str(Path.home())
+    task = dispatch_payload["task"]
+
+    if not task.strip():
+        return JSONResponse({"error": "resolved task is empty"}, status_code=400)
+
+    result = tmux.spawn(cwd, task=" ".join(task.split()), wait=False,
+                        **_spawn_kwargs(dispatch_payload))
+    if not result.get("ok"):
+        return JSONResponse({"error": result.get("error", "spawn failed")}, status_code=500)
+
+    nonce = result.get("nonce", "")
+    if nonce:
+        threading.Thread(target=tmux.resolve_pending, args=(nonce,), daemon=True).start()
+
+    return {
+        "ok": True,
+        "session_id": result.get("session_id"),
+        "nonce": nonce,
+        "template": template_name or None,
+        "cwd": cwd,
+    }
 
 
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
