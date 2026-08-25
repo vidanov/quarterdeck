@@ -5,6 +5,7 @@ import * as profilesApi from '../api/profiles'
 import * as denyApi from '../api/denyPatterns'
 import * as secretsApi from '../api/secrets'
 import * as scriptsApi from '../api/scripts'
+import * as sessionsApi from '../api/sessions'
 import { useToast } from '../state/ToastContext'
 import { useConfirm } from '../state/ConfirmContext'
 
@@ -2069,6 +2070,118 @@ function DenyPatternsSettings() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Templates management
+// ---------------------------------------------------------------------------
+function TemplatesSettings() {
+  const notify = useToast()
+  const askConfirm = useConfirm()
+  const [templates, setTemplates] = React.useState([])
+  const [loading, setLoading] = React.useState(true)
+  const [editing, setEditing] = React.useState(null)
+  const [editDraft, setEditDraft] = React.useState({})
+
+  const load = React.useCallback(() => {
+    setLoading(true)
+    sessionsApi.listTemplates()
+      .then(d => setTemplates(d.templates || []))
+      .catch(() => notify('Could not load templates', 'error'))
+      .finally(() => setLoading(false))
+  }, [notify])
+
+  React.useEffect(() => { load() }, [load])
+
+  const startEdit = (t) => {
+    setEditing(t.id)
+    setEditDraft({ name: t.name, task: t.task || '', cwd: t.cwd || '' })
+  }
+
+  const saveEdit = (id) => {
+    sessionsApi.updateTemplate(id, editDraft)
+      .then(d => {
+        if (d.ok) { setEditing(null); load() }
+        else notify(d.error || 'Update failed', 'error')
+      })
+      .catch(e => notify(e.message || 'Update failed', 'error'))
+  }
+
+  const remove = (t) => {
+    askConfirm(`Delete template "${t.name}"?`, () => {
+      sessionsApi.deleteTemplate(t.id)
+        .then(d => { if (d.ok) load(); else notify(d.error || 'Delete failed', 'error') })
+        .catch(e => notify(e.message || 'Delete failed', 'error'))
+    })
+  }
+
+  return (
+    <div className="templates-settings">
+      <h3 className="settings-title">Templates</h3>
+      <p className="cleanup-hint">
+        Templates are session recipes with <code>{'{{var}}'}</code> slots.
+        Context-seeded ones start from a frozen conversation snapshot.
+        Create them from the transcript by clicking&nbsp;📋 on a user turn.
+      </p>
+      {loading && <p className="cleanup-hint">Loading…</p>}
+      {!loading && templates.length === 0 && (
+        <p className="cleanup-hint templates-empty">
+          No templates yet. Open a session and click 📋 on a user turn to save one.
+        </p>
+      )}
+      {templates.map(t => (
+        <div key={t.id} className="template-row">
+          {editing === t.id ? (
+            <div className="template-edit">
+              <input
+                className="sat-input"
+                value={editDraft.name}
+                onChange={e => setEditDraft(d => ({ ...d, name: e.target.value }))}
+                placeholder="Template name"
+                autoFocus
+              />
+              <textarea
+                className="sat-textarea"
+                value={editDraft.task}
+                onChange={e => setEditDraft(d => ({ ...d, task: e.target.value }))}
+                placeholder="Task / prompt with {{var}} slots"
+                rows={3}
+              />
+              <input
+                className="sat-input"
+                value={editDraft.cwd}
+                onChange={e => setEditDraft(d => ({ ...d, cwd: e.target.value }))}
+                placeholder="Default working directory (optional)"
+              />
+              <div className="template-edit-actions">
+                <button className="sat-btn-save" onClick={() => saveEdit(t.id)}>Save</button>
+                <button className="sat-btn-cancel" onClick={() => setEditing(null)}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="template-info">
+                <span className="template-name">{t.name}</span>
+                {t.snapshot_id && (
+                  <span className="template-badge" title="Starts from a conversation snapshot">📎 context</span>
+                )}
+                {t.cwd && <span className="template-cwd">{t.cwd.split('/').pop()}</span>}
+                {t.task && (
+                  <p className="template-task">
+                    {t.task.slice(0, 120)}{t.task.length > 120 ? '…' : ''}
+                  </p>
+                )}
+              </div>
+              <div className="template-actions">
+                <button className="script-btn" onClick={() => startEdit(t)}>Edit</button>
+                <button className="script-btn script-btn-danger" onClick={() => remove(t)}>Delete</button>
+              </div>
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onChangeShowHidden, showCrew, onChangeShowCrew, sessionViewMode, onChangeViewDefault }) {
   const notify = useToast()
   const askConfirm = useConfirm()
@@ -2155,13 +2268,14 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
   const routeTotal = Object.values(routes).reduce((a, b) => a + b, 0)
 
   const TABS = [
-    { id: 'remote',   label: 'Remote' },
-    { id: 'general',  label: 'General' },
-    { id: 'chips',    label: 'Chips' },
-    { id: 'hooks',    label: 'Hooks' },
-    { id: 'scripts',  label: 'Scripts' },
-    { id: 'security', label: 'Security' },
-    { id: 'advanced', label: 'Advanced' },
+    { id: 'remote',    label: 'Remote' },
+    { id: 'general',   label: 'General' },
+    { id: 'chips',     label: 'Chips' },
+    { id: 'hooks',     label: 'Hooks' },
+    { id: 'scripts',   label: 'Scripts' },
+    { id: 'templates', label: 'Templates' },
+    { id: 'security',  label: 'Security' },
+    { id: 'advanced',  label: 'Advanced' },
   ]
 
   return (
@@ -2400,6 +2514,10 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
 
       {tab === 'scripts' && (
         <ScriptsSettings />
+      )}
+
+      {tab === 'templates' && (
+        <TemplatesSettings />
       )}
 
       {tab === 'security' && (

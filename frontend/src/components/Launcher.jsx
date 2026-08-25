@@ -490,6 +490,12 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
   const [showPre, setShowPre] = useState(false)
   const [recording, setRecording] = useState(false)
   const [suggested, setSuggested] = useState(null)
+  // Template picker
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false)
+  const [templates, setTemplates] = useState(null) // null = not loaded yet
+  const [selectedTemplate, setSelectedTemplate] = useState(null)
+  const [templateVars, setTemplateVars] = useState({})
+  const [intakeRunning, setIntakeRunning] = useState(false)
   const recognitionRef = useRef(null)
   const inputRef = useRef(null)
   const {
@@ -538,6 +544,47 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
   const pickFolder = () => {
     settingsApi.pickFolder()
       .then(data => { if (data.path) setCwd(data.path) })
+  }
+
+  const openTemplatePicker = () => {
+    if (!showTemplatePicker) {
+      api.listTemplates().then(d => setTemplates(d.templates || [])).catch(() => setTemplates([]))
+    }
+    setShowTemplatePicker(v => !v)
+    setSelectedTemplate(null)
+    setTemplateVars({})
+  }
+
+  const selectTemplate = (t) => {
+    setSelectedTemplate(t)
+    const vars = {}
+    ;(t.vars || []).forEach(v => { vars[v.name] = '' })
+    setTemplateVars(vars)
+  }
+
+  const launchFromTemplate = () => {
+    if (!selectedTemplate) return
+    setIntakeRunning(true)
+    api.intake({
+      template: selectedTemplate.id,
+      vars: templateVars,
+      cwd: cwd || selectedTemplate.cwd || '',
+      model: model || '',
+      effort: effort || '',
+      agent: agent || '',
+    })
+      .then(d => {
+        if (d.ok) {
+          setShowTemplatePicker(false)
+          setSelectedTemplate(null)
+          setTemplateVars({})
+          onCancel()
+        } else {
+          alert(d.error || 'Intake failed')
+        }
+      })
+      .catch(e => alert(e.message || 'Intake failed'))
+      .finally(() => setIntakeRunning(false))
   }
 
   // The description is the only thing that distinguishes one agent from another
@@ -631,6 +678,10 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
                 title="Run a shell command before kiro-cli starts">
           {showPre ? '⌄ shell' : '› shell'}
         </button>
+        <button type="button" className={`launcher-cancel${showTemplatePicker ? ' active' : ''}`}
+                onClick={openTemplatePicker} title="Start from a saved template">
+          📋 template
+        </button>
         <span className="launcher-spacer" />
         <button type="button" className={`dispatch-mic ${recording ? 'recording' : ''}`} onClick={toggleRecording} title="Voice input">
           {recording ? '⏹' : '🎤'}
@@ -646,6 +697,60 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
           placeholder="Shell to run first, e.g. cd packages/api && nvm use 20"
           spellCheck={false}
         />
+      )}
+      {showTemplatePicker && (
+        <div className="template-picker">
+          {templates === null && <p className="template-picker-hint">Loading templates…</p>}
+          {templates !== null && templates.length === 0 && (
+            <p className="template-picker-hint">
+              No templates yet — open a session transcript and click 📋 on a user turn.
+            </p>
+          )}
+          {templates !== null && templates.length > 0 && !selectedTemplate && (
+            <div className="template-picker-list">
+              {templates.map(t => (
+                <button key={t.id} type="button" className="template-picker-item"
+                        onClick={() => selectTemplate(t)}>
+                  <span className="template-name">{t.name}</span>
+                  {t.snapshot_id && <span className="template-badge">📎 context</span>}
+                  {t.cwd && <span className="template-cwd">{t.cwd.split('/').pop()}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+          {selectedTemplate && (
+            <div className="template-picker-vars">
+              <div className="template-picker-selected">
+                <span className="template-name">{selectedTemplate.name}</span>
+                <button type="button" className="sat-btn-cancel"
+                        onClick={() => setSelectedTemplate(null)}>← back</button>
+              </div>
+              {selectedTemplate.task && (
+                <p className="template-task template-task-preview">{selectedTemplate.task.slice(0, 200)}</p>
+              )}
+              {(selectedTemplate.vars || []).length > 0 && (
+                <div className="template-vars-form">
+                  {selectedTemplate.vars.map(v => (
+                    <label key={v.name} className="sat-label">
+                      {v.name}{v.required && <span className="template-required"> *</span>}
+                      {v.description && <span className="sat-hint-inline">{v.description}</span>}
+                      <input
+                        className="sat-input"
+                        value={templateVars[v.name] || ''}
+                        onChange={e => setTemplateVars(d => ({ ...d, [v.name]: e.target.value }))}
+                        placeholder={v.description || v.name}
+                      />
+                    </label>
+                  ))}
+                </div>
+              )}
+              <button type="button" className="dispatch-btn" disabled={intakeRunning}
+                      onClick={launchFromTemplate}>
+                {intakeRunning ? 'Launching…' : '▶ Launch from template'}
+              </button>
+            </div>
+          )}
+        </div>
       )}
     </form>
   )
