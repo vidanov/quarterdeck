@@ -379,6 +379,40 @@ def install_session_menu(window):
         pass
 
 
+def _handle_open_url(url: str) -> None:
+    """Handle a quarterdeck:// URL by POSTing to /api/intake."""
+    import urllib.parse as _up
+    import urllib.request as _ur
+    import json as _json
+    try:
+        parsed = _up.urlparse(url)
+        params = dict(_up.parse_qsl(parsed.query))
+        # quarterdeck://intake?template=foo&text=bar
+        # or quarterdeck://dispatch?task=...&cwd=...
+        body = _json.dumps({
+            "template": params.get("template", ""),
+            "task": params.get("task", ""),
+            "cwd": params.get("cwd", ""),
+            "vars": {k: v for k, v in params.items()
+                     if k not in ("template", "task", "cwd", "agent", "model", "effort")},
+            "agent": params.get("agent", ""),
+            "model": params.get("model", ""),
+            "effort": params.get("effort", ""),
+        }).encode()
+        from backend.config import PORT
+        req = _ur.Request(
+            f"http://127.0.0.1:{PORT}/api/intake",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _ur.urlopen(req, timeout=5) as r:
+            result = _json.loads(r.read())
+        print(f"[intake] URL {url!r} → session {result.get('session_id') or result.get('nonce')}")
+    except Exception as exc:
+        print(f"[intake] URL handler error: {exc}")
+
+
 def main():
     missing = preflight()
     if missing:
@@ -533,6 +567,33 @@ def main():
                 pass
 
     threading.Thread(target=_badge_worker, daemon=True).start()
+
+    # Register quarterdeck:// URL scheme handler
+    _url_handler_instance = None  # module-level reference would shadow; keep local
+    try:
+        from AppKit import NSAppleEventManager, NSObject
+        import objc
+
+        class _URLHandler(NSObject):
+            def handleGetURLEvent_withReplyEvent_(self, event, reply):
+                url = event.paramDescriptorForKeyword_(0x2d2d2d2d)  # '----' direct object
+                if url:
+                    threading.Thread(
+                        target=_handle_open_url,
+                        args=(str(url.stringValue()),),
+                        daemon=True,
+                    ).start()
+
+        _url_handler_instance = _URLHandler.alloc().init()
+        mgr = NSAppleEventManager.sharedAppleEventManager()
+        mgr.setEventHandler_andSelector_forEventClass_andEventID_(
+            _url_handler_instance,
+            "handleGetURLEvent:withReplyEvent:",
+            0x4755524c,  # kInternetEventClass 'GURL'
+            0x4755524c,  # kAEGetURL          'GURL'
+        )
+    except Exception as _e:
+        print(f"[intake] URL scheme handler registration failed: {_e}", file=sys.stderr)
 
     webview.start(install_menus, private_mode=False)
 

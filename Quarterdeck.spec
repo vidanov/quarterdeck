@@ -118,5 +118,9 @@ app = BUNDLE(
             'Quarterdeck uses AppleScript to read the front Finder window as a default '
             'directory and to open a session in Terminal.app or iTerm2.'
         ),
+        'CFBundleURLTypes': [{
+            'CFBundleURLName': 'com.vidanov.quarterdeck',
+            'CFBundleURLSchemes': ['quarterdeck'],
+        }],
     },
 )
