@@ -1030,6 +1030,15 @@ body {
 .grid { flex: 1; min-width: 0; }
 
 /* Focus mode: grid collapses to a thin attention strip, panel expands. */
+.focus-mode {
+  /* Lock the layout to the viewport so the detail panel can fill it.
+     Without this, .app is a scrolling document and flex:1 on the panel
+     just makes it grow with content rather than filling the window. */
+  height: calc(100vh - 48px); /* 48px = 2 × 24px .app padding */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 .focus-mode .grid {
   flex: 0 0 200px;
   min-width: 0;
@@ -1049,7 +1058,13 @@ body {
 }
 /* In focus mode needsYou cards become compact rows in the strip */
 .focus-mode .grid .working-list { margin-top: 0; }
-.focus-mode .detail-panel { flex: 1; width: auto !important; max-width: none; }
+.focus-mode .detail-panel {
+  flex: 1;
+  width: auto !important;
+  max-width: none;
+  height: auto;        /* let flex:1 on the parent chain control the height */
+  position: static;   /* not sticky — it's already filling the viewport */
+}
 
 /* Floating new-session button in focus mode — the launcher is hidden but you
    still need to be able to start work without leaving the focused view. */
