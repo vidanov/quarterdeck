@@ -1387,3 +1387,91 @@ Falls back to file-based key in `~/.osa-kiro/secrets.key` in headless/CI.
 - [ ] Audit — log which secret names were injected per session (names only, never values). Visible in the audit trail.
 - [ ] Rotation hint — flag secrets older than 90 days in the UI.
 
+
+---
+
+## 15. kiro-cli 2.19.2 — improvements to adopt
+
+Items from the 2.19.2 release that are directly relevant to Quarterdeck.
+Added 2026-08-26.
+
+### 15a. stream-json event source for session status (high value)
+
+kiro-cli 2.19.2 adds `--output-format stream-json` in non-interactive mode,
+emitting run events as JSON Lines on stdout (v2/v3). This is the right foundation
+to replace tmux pane polling for status detection.
+
+Current status detection reads the `.jsonl` tail and infers state from heuristics
+(last tool call → running, prompt pattern → awaiting-approval, no lock → idle).
+`stream-json` would give real event signals: tool-start, tool-end,
+awaiting-approval, turn-complete.
+
+**Work:**
+
+- [ ] **Prototype:** spawn one session with `--output-format stream-json`,
+      pipe stdout to a file, and map the event types to Quarterdeck status values.
+      Verify the mapping covers all current states.
+- [ ] **Adapter hook:** add an optional `stdout_events` path to `tmux_manager.py`
+      — when present, read it in parallel with (or instead of) JSONL tail polling.
+- [ ] **Status accuracy check:** compare status detection latency and correctness
+      before and after. The `stop` hook already handles end-of-turn; `stream-json`
+      would sharpen mid-turn state (tool running vs. thinking).
+- [ ] **Section 9 connection:** document this as the first concrete step toward
+      the multi-agent adapter interface. `stream-json` is the status-detection
+      abstraction the adapter needs.
+
+**Sequencing:** prototype first (one afternoon), then decide whether to replace
+or supplement the current JSONL tail approach.
+
+### 15b. Trust-all inheritance for subagents
+
+kiro-cli 2.19.2 fixes: subagents now inherit `/tools trust-all` from the spawning
+session instead of prompting for approvals.
+
+This closes a gap in Quarterdeck's approval gating model: previously, a gated
+session that spawned a subagent would leave the subagent ungated (it would prompt
+in the terminal, invisible to Quarterdeck). With 2.19.2 the subagent inherits
+trust-all — which means if the parent has trust-all set, subagents are also
+unblocked. The gating model is now consistent.
+
+**Work:**
+
+- [ ] **Document in gating UI:** update the gate panel tooltip/hint to note that
+      subagents inherit trust state. "Gating off: all tools allowed (subagents
+      inherit this setting)."
+- [ ] **Test:** spawn a session with gating on, let it create a subagent, confirm
+      Quarterdeck's approval queue receives tool calls from both parent and
+      subagent (via the process-tree sub-agent detection already in 10f).
+
+### 15c. Hook matcher warnings (observability)
+
+kiro-cli 2.19.2 fix: invalid hook matchers now show a clear warning when hooks
+load.
+
+Previously, a malformed `fileMatch` or event matcher in a hook config silently
+disabled the hook — `preToolUse` gating would appear to be set but never fire.
+
+**Work:**
+
+- [ ] **Surface in Quarterdeck:** when the session pane output contains a
+      `hook matcher` warning line, show a one-time amber banner in the detail
+      panel: "Hook config warning detected — gating may not be active. Check
+      Settings → Hooks."
+- [ ] **Pattern to detect:** grep pane output for `invalid hook matcher` or
+      `hook.*warning` (verify exact string from kiro-cli source or a test run).
+
+### 15d. Interrupted tool call explanations (transcript rendering)
+
+kiro-cli 2.19.2 fix: interrupted tool calls now explain why they stopped.
+
+Previously an interrupted tool result had empty content, which rendered as a
+blank tool cluster in the transcript. Now it carries a reason string.
+
+**Work:**
+
+- [ ] **Verify DetailPanel renders it:** check that an interrupted tool result
+      with a reason string appears in the tool cluster summary line rather than
+      being silently empty. Likely already works — the cluster renderer uses
+      whatever text is present.
+- [ ] **If blank:** add a fallback label in the tool cluster: "interrupted" when
+      result content is empty and no results count is present.
