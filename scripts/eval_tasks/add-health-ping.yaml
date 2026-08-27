@@ -1,0 +1,14 @@
+name: Add a new API endpoint
+description: |
+  Add a GET /api/health/ping endpoint that returns {"ok": true, "ts": <unix timestamp>}.
+  The endpoint must not require authentication.
+files:
+  - backend/api.py
+verify: |
+  curl -s http://127.0.0.1:19419/api/health/ping | python3 -c "
+    import sys, json
+    d = json.load(sys.stdin)
+    assert d['ok'] is True
+    assert isinstance(d['ts'], (int, float))
+    print('PASS')
+  "
