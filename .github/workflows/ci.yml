@@ -42,8 +42,5 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
 
-      - name: Run backend tests
-        run: python -m pytest tests/ -q
-
-      - name: Build frontend
-        run: npm --prefix frontend run build
+      - name: Verify
+        run: make verify

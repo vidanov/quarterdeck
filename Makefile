@@ -1,4 +1,10 @@
-.PHONY: bootstrap verify test build
+.PHONY: bootstrap verify test build help
+
+help:
+	@echo "bootstrap  — set up venv and install all dependencies"
+	@echo "verify     — run tests and build frontend (matches CI)"
+	@echo "test       — run backend tests only"
+	@echo "build      — build frontend bundle only"
 
 # Set up the project from scratch
 bootstrap:
