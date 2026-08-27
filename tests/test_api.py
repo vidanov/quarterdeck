@@ -1750,7 +1750,7 @@ class TestShell:
         # A shell is not one, and must not be swept up as one.
         assert not api.shell.SHELL_TMUX_NAME.startswith(config.TMUX_PREFIX)
 
-    @pytest.mark.skipif(not api.tmux.tmux_available(), reason="tmux not installed")
+    @pytest.mark.skipif(not api.tmux.tmux_available(), reason="tmux not installed")  # owner: @vidanov
     def test_a_real_shell_runs_a_command_and_closes(self):
         # Never touch a shell somebody else opened. The shell is a singleton, so
         # an earlier version of this test adopted the running one, typed into
