@@ -557,10 +557,20 @@ def main():
                 if count != _last:
                     _last = count
                     label = str(count) if count > 0 else ""
+                    # AppKit is not thread-safe. Mutating NSApplication from a
+                    # background thread corrupts KVO state and causes crashes
+                    # (AttributeError: NSKVONotifying_NSApplication has no
+                    # attribute abortModal_). Dispatch to the main queue instead,
+                    # same pattern as install_edit_menu / install_session_menu.
                     try:
-                        from AppKit import NSApplication
-                        ns_app = NSApplication.sharedApplication()
-                        ns_app.dockTile().setBadgeLabel_(label)
+                        from Foundation import NSOperationQueue
+                        def _set_badge(lbl=label):
+                            try:
+                                from AppKit import NSApplication
+                                NSApplication.sharedApplication().dockTile().setBadgeLabel_(lbl)
+                            except Exception:
+                                pass
+                        NSOperationQueue.mainQueue().addOperationWithBlock_(_set_badge)
                     except Exception:
                         pass
             except Exception:
