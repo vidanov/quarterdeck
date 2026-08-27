@@ -1,0 +1,8 @@
+[importlinter]
+root_packages = backend
+
+[importlinter:contract:app-does-not-import-tests]
+name = app does not import tests
+type = forbidden
+source_modules = backend
+forbidden_modules = tests
