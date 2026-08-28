@@ -229,10 +229,13 @@ the obvious second adapter.
 
 ### 10b. Denied command patterns
 
-- [ ] Deny list in the `preToolUse` hook for `execute_bash`.
-- [ ] Default list (rm -rf /, git push --force, DROP TABLE, etc.).
-- [ ] Settings UI: view, disable, add patterns.
-- [ ] Bypass for gated sessions (already human-reviewed).
+Shipped: backend (`deny.py`) with default patterns plus the AWS Safety and Crew
+Safety packs, and the Settings UI (`SettingsPanel.jsx` via `denyApi`).
+
+- [x] Deny list in the `preToolUse` hook for `execute_bash`.
+- [x] Default list (rm -rf /, git push --force, DROP TABLE, etc.).
+- [x] Settings UI: view, disable, add patterns.
+- [x] Bypass for gated sessions (already human-reviewed).
 
 ### 10c. Session resource protection
 
@@ -265,6 +268,10 @@ the obvious second adapter.
 
 ### 10g. Side chat (non-blocking clarification against frozen context)
 
+Shipped: `SideChat.jsx` component and the backend side-chat routes/module
+(`side_chat.py`) — read-only ask-mode kiro-cli process seeded with a frozen
+parent-context snapshot, isolated under `~/.osa-kiro/side/`.
+
 **What it is.** A `/side` command opens a multi-turn side conversation against a
 frozen snapshot of the parent session's context. It lives in a separate tab (the
 Activity panel or a dedicated pane), is fully isolated — messages never enter the
@@ -288,24 +295,24 @@ exists) or a concierge-style query with the parent's tail injected as context.
 
 Work:
 
-- [ ] **Verify kiro-cli can run read-only.** Does `--trust none` or equivalent
+- [x] **Verify kiro-cli can run read-only.** Does `--trust none` or equivalent
       suppress all tool use while keeping the conversation context? If not, is
       there a flag for it? If neither, the concierge path is the fallback.
-- [ ] **Snapshot the context.** On `/side`, capture the parent session's last N
+- [x] **Snapshot the context.** On `/side`, capture the parent session's last N
       messages (tail of `.jsonl`) as a frozen context blob. This is the input to
       the side session and never changes regardless of what the parent does next.
-- [ ] **Isolation guarantees.** The side session's `.jsonl` lives under a separate
+- [x] **Isolation guarantees.** The side session's `.jsonl` lives under a separate
       prefix (e.g. `~/.osa-kiro/side/<parent_id>-<timestamp>.jsonl`). It is never
       read by the parent, never summarized into memory (10e), never counted in
       stats.
-- [ ] **UI.** A tab in the detail panel (alongside Activity, Queue, etc.) that
+- [x] **UI.** A tab in the detail panel (alongside Activity, Queue, etc.) that
       shows the side conversation. Multiple side chats per session allowed —
       they're cheap. A "close" discards; there is no resume because the context
       was frozen at open time and grows stale.
-- [ ] **Phone.** The side tab is reachable from the detail view on mobile. Keep
+- [x] **Phone.** The side tab is reachable from the detail view on mobile. Keep
       it a simple text exchange — no tool output, no artifacts, no streaming
       indicators beyond a spinner.
-- [ ] **No token bleed.** Side chats use the concierge session's token budget, not
+- [x] **No token bleed.** Side chats use the concierge session's token budget, not
       the parent's. The parent session is untouched — it does not know a side chat
       exists.
 
