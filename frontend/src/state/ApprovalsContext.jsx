@@ -33,6 +33,10 @@ export function ApprovalsProvider({ children }) {
   const answered = useRef(new Map())
 
   useEffect(() => {
+    // Back off when nothing is pending: poll every 8s instead of 2s.
+    // Most users have gating disabled, so this saves ~3 req/s of overhead.
+    let emptyCount = 0
+    const BACKOFF_THRESHOLD = 3  // after 3 empty polls, slow down
     const poll = () => approvalsApi.listApprovals()
       .then(d => {
         const incoming = d.approvals || []
@@ -42,11 +46,18 @@ export function ApprovalsProvider({ children }) {
         for (const [id, at] of answered.current) {
           if (!live.has(id) || Date.now() - at > SUPPRESS_MAX_MS) answered.current.delete(id)
         }
-        setPendingApprovals(incoming.filter(a => !answered.current.has(a.request_id)))
+        const visible = incoming.filter(a => !answered.current.has(a.request_id))
+        setPendingApprovals(visible)
+        emptyCount = visible.length > 0 ? 0 : emptyCount + 1
       })
       .catch(() => {})
     poll()
-    const interval = setInterval(poll, POLL_MS)
+    const interval = setInterval(() => {
+      // Fast while approvals are pending or just appeared; slow otherwise.
+      if (emptyCount < BACKOFF_THRESHOLD) poll()
+      else if (emptyCount % 4 === 0) poll()  // ~8s cadence (4 × 2s)
+      emptyCount++
+    }, POLL_MS)
     return () => clearInterval(interval)
   }, [])
 

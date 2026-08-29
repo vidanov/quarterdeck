@@ -38,16 +38,25 @@ Quarterdeck solves three concrete problems:
 What you get:
 
 - **Real-time session grid** — color-coded cards for every active and recent session, updating within 2 seconds
-- **Structural approval gates** — hold `preToolUse` calls until you approve or deny them from the app or a phone
+- **Structural approval gates** — hold `preToolUse` calls until you allow or deny them from the app or a phone; deny patterns auto-block known dangerous commands
 - **Transcript and pane views** — send replies, review conversation history, or watch the raw terminal pane
-- **Wall view with board mode** — all sessions on one full-screen surface, optionally grouped by project
-- **Phone-ready layout** — approval controls, session cards, and input composer built for a small screen
+- **Views: focus, wall, list** — one session full-width; all sessions on a second monitor; dense triage list
+- **Branch at turn** — fork a session from any prior turn; lineage tracked in metadata
+- **Collections** — named groups of sessions with spawn recipes; replaces snapshots and favourites
+- **Task stack** — queue work per session; auto-advances on turn end; `/compact` runs before the next task
+- **Side chat** — ask questions about a session's output without touching its conversation state
+- **Phone-ready layout** — approval controls, session cards, and input composer built for a small screen; responsive pass at 700 px
+- **Per-device tokens** — named tokens for each device, individually revocable from Settings
 - **Audit trail** — every mutating request, approval decision, and tool outcome recorded to a bounded local log
-- **Concierge** — natural-language command bar for finding sessions, launching work, and generating reports
+- **Concierge** — natural-language command bar (⌘K) for finding sessions, launching work, and weekly reports
 - **Draft persistence and history** — input drafts survive session switches; arrow-up recalls sent messages
-- **Paste as document** — pasting a large block of text collapses it into an attachment tile; delivery writes the content to a file so structure survives and context is not consumed
+- **Paste as document** — large pastes collapse into an attachment tile; delivered as a file reference so structure survives and context is not consumed
+- **Per-project secrets** — named env vars injected at spawn; values never appear in context or transcript
+- **kiro-cli V3 support** — reads both V1 (flat `~/.kiro/sessions/cli/`) and V3 (workspace-hash dirs, `messages.jsonl`) session formats
+- **ACP observer** — structured event stream for V3 sessions; slash commands dispatched over protocol instead of tmux keys
 - **Context compaction** — one click to send `/compact` when context is running high
 - **Self-update** — `Settings > Updates` pulls, rebuilds frontend, and restarts the backend in place
+- **Dock badge** — red attention count when sessions need you
 
 ## Quick start
 
@@ -86,16 +95,20 @@ To build a native `.app` bundle:
 
 ## How it works
 
-Quarterdeck reads `~/.kiro/sessions/cli/` — the directory where Kiro CLI stores session state. It never writes to those files.
+Quarterdeck reads `~/.kiro/sessions/` — the directory where Kiro CLI stores session state. It supports both V1 (flat `cli/` directory) and V3 (workspace-hash subdirectories) formats simultaneously. It never writes to those files.
 
 ```
-~/.kiro/sessions/cli/
-  {uuid}.lock    active session (pid, started_at)
-  {uuid}.json    metadata (title, cwd, timestamps)
-  {uuid}.jsonl   conversation log (prompts, responses, tool calls)
+~/.kiro/sessions/cli/           (V1)
+  {uuid}.json    metadata
+  {uuid}.jsonl   conversation log
+  {uuid}.lock    active session (pid)
+
+~/.kiro/sessions/{workspace-hash}/  (V3)
+  sess_{uuid}/session.json      metadata
+  sess_{uuid}/messages.jsonl    conversation log
 ```
 
-Status is derived from the JSONL tail: the last tool call means running; a prompt pattern means awaiting approval; no lock file means idle or done. Four optional hooks sharpen this with real signals from kiro-cli:
+Status is derived from the JSONL tail: the last tool call means running; a prompt pattern means awaiting approval; no lock file means idle or done. For V3 sessions, `pending_interaction` entries in the JSONL provide structural approval detection without TUI scraping. Four optional hooks sharpen this further:
 
 | Hook | What it does |
 |------|-------------|
@@ -150,23 +163,25 @@ Current controls:
 - Remote mode binds only to the Tailscale IPv4 address
 - Connections from outside the tailnet's assigned ranges are rejected at the socket level
 - Mutating session input and dispatch are rate-limited to 10 requests/minute
-- A long-lived shared token (HttpOnly cookie) protects remote access
-- An optional audit trail records requests, approval decisions, and tool outcomes
-- The local API at `127.0.0.1` is trusted without a token, consistent with local process access
+- Per-device named tokens (HttpOnly cookie), each individually revocable from Settings
+- An audit trail records requests, approval decisions, and tool outcomes
+- Local API at `127.0.0.1` requires `X-Local-Token`; pywebview injects it automatically
 
-What is not there: per-device revocation, application-level TLS outside WireGuard, and per-user accounts. Do not run Quarterdeck on a shared machine without understanding that.
+What is not there: application-level TLS outside WireGuard, per-user accounts. Do not run Quarterdeck on a shared machine without understanding that.
 
 ## Project structure
 
 ```
 app.py                  macOS app entry point (pywebview + backend thread)
 backend/
-  api.py                FastAPI: 138 routes covering sessions, dispatch, hooks,
+  api.py                FastAPI: session listing, detail, dispatch, hooks,
                         approvals, audit, remote, collections, stats, cleanup
   config.py             Paths and constants (~/.osa-kiro/)
+  tmux_manager.py       Session spawn, correlation, gate logic
+  acp_observer.py       ACP event stream for V3 sessions
 frontend/
   src/
-    App.jsx             Session grid, wall view, board mode, concierge
+    App.jsx             Session grid, wall view, concierge
     components/
       DetailPanel.jsx   Transcript, pane view, approval controls, input composer
       SessionGrid.jsx   Card layout, attention partitioning
@@ -181,12 +196,17 @@ docs/
 Local state lives in `~/.osa-kiro/`:
 
 ```
-managed.json    Quarterdeck-owned tmux sessions
-settings.json   Shared preferences
-stacks/         Per-session queued work
-gates/          Held preToolUse state
-approvals/      Approval decisions
-audit/          Date-partitioned JSONL records
+managed.json      Quarterdeck-owned tmux sessions
+settings.json     Shared preferences
+collections.json  Named session groups and spawn recipes
+stacks/           Per-session queued work
+slash-queues/     Per-session slash command queue
+gates/            Held preToolUse state
+approvals/        Approval decisions
+pastes/           Large paste attachments (per session)
+secrets/          Per-project encrypted env vars
+side/             Side chat session snapshots
+audit/            Date-partitioned JSONL records
 ```
 
 ## When not to use this

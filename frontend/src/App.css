@@ -6863,6 +6863,20 @@ body.resizing .detail-resize::after { background: var(--accent); }
   display: inline-block;
   animation: pulse 1.2s ease-in-out infinite;
 }
+/* Streaming text cursor */
+.chat-streaming-cursor {
+  display: inline-block;
+  animation: blink-cursor 0.8s step-end infinite;
+  opacity: 0.7;
+  margin-left: 1px;
+}
+@keyframes blink-cursor {
+  0%, 100% { opacity: 0.7; }
+  50%       { opacity: 0; }
+}
+.chat-assistant-streaming {
+  min-height: 1.4em;
+}
 /* pane theme overrides */
 .chat-transcript.pane-light { background: #f8fafc; }
 .chat-transcript.pane-light .chat-assistant-text { color: #0f172a; }

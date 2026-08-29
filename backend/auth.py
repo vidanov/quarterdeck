@@ -561,6 +561,9 @@ def install(app) -> None:
                 # Token not yet generated — allow through (startup or dev mode)
                 return await call_next(request)
             presented = request.headers.get("X-Local-Token", "")
+            # EventSource cannot send custom headers — accept ?t= as fallback
+            if not presented:
+                presented = request.query_params.get("t", "")
             if hmac.compare_digest(presented, local):
                 return await call_next(request)
             return JSONResponse(
