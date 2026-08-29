@@ -2655,6 +2655,66 @@ def get_acp_events(session_id: str):
     }
 
 
+import asyncio as _asyncio
+
+@app.get("/api/sessions/{session_id}/stream")
+async def stream_acp_chunks(session_id: str, request: Request, after: int = -1, t: str = ""):
+    """Server-Sent Events stream of agent_message_chunk text from ACP observer.
+
+    Each event is ``data: <json>\\n\\n`` where json is
+    ``{"index": int, "text": str, "done": bool}``.
+
+    ``done: true`` signals the turn ended — client should stop listening.
+    Returns 204 immediately if no ACP observer is attached.
+
+    Auth: accepts X-Local-Token header OR ?t=<token> query param (for
+    EventSource which cannot send custom headers).
+    """
+    # Allow token via query param for EventSource (can't send custom headers).
+    # Validate it against the local token the same way the middleware does.
+    if t:
+        local = auth.read_local_token()
+        import hmac as _hmac
+        if not local or not _hmac.compare_digest(t, local):
+            from fastapi.responses import Response as _Resp
+            return _Resp(status_code=401)
+
+    chunks, attached = acp_observer.get_stream_chunks(session_id, after=after)
+    if not attached:
+        from fastapi.responses import Response as _Resp
+        return _Resp(status_code=204)
+
+    async def _generate():
+        cursor = after
+        # First: replay buffered chunks since cursor
+        for chunk in chunks:
+            yield f"data: {json.dumps(chunk)}\n\n"
+            cursor = chunk["index"]
+            if chunk.get("done"):
+                return
+        # Then: long-poll for new ones (max 60s, 100ms ticks)
+        deadline = _asyncio.get_event_loop().time() + 60.0
+        while _asyncio.get_event_loop().time() < deadline:
+            await _asyncio.sleep(0.1)
+            new_chunks, still_attached = acp_observer.get_stream_chunks(session_id, after=cursor)
+            if not still_attached:
+                break
+            for chunk in new_chunks:
+                yield f"data: {json.dumps(chunk)}\n\n"
+                cursor = chunk["index"]
+                if chunk.get("done"):
+                    return
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/sessions/{session_id}/summarize")
 def trigger_summary(session_id: str, request: Request):
     """Kick off background summary generation (or return cached result)."""
@@ -6476,7 +6536,42 @@ def switch_profile(payload: dict):
             profile_arn = meta_data.get("profile_arn", "")
             state_profile = meta_data.get("state_profile", "")
         except Exception:
+            meta_data = {}
+
+    # If critical metadata is missing (profile saved before ARN tracking, or
+    # meta.json was clobbered), back-fill what we can.  The tokens have already
+    # been restored, so `kiro-cli whoami` reflects this profile's SSO identity
+    # (email, provider).  However the profile_arn and state_profile in the DB
+    # may still be the *previous* profile's values — we haven't written them
+    # yet — so we must NOT read those from the live DB.  Only back-fill the
+    # email and token fingerprint; the ARN stays empty until the user re-saves.
+    meta_backfill = False
+    if email in ("?", ""):
+        try:
+            live_info = _current_profile_identity()
+            if live_info.get("email") and live_info["email"] != "unknown":
+                email = live_info["email"]
+                meta_backfill = True
+        except Exception:
             pass
+    if not _token_fingerprint(rows) == "":
+        meta_backfill = True  # always worth persisting the fingerprint
+    if meta_backfill:
+        try:
+            existing = {}
+            if meta_path.exists():
+                try:
+                    existing = json.loads(meta_path.read_text())
+                except Exception:
+                    pass
+            if email not in ("?", ""):
+                existing.setdefault("email", email)
+            existing.setdefault("token_fingerprint", _token_fingerprint(rows))
+            existing.setdefault("saved_at", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+            meta_path.write_text(json.dumps(existing))
+        except Exception:
+            pass  # best-effort
+
     # Also update the state table so kiro-cli uses the correct profile ARN.
     # kiro-cli reads api.codewhisperer.profile from the state table to determine
     # which CodeWhisperer profile (and therefore which account/subscription) to
@@ -7712,6 +7807,236 @@ def apply_cleanup(payload: dict):
         _invalidate_projects_cache()
     # Sweep expired paste files alongside session cleanup
     paste_store.sweep()
+    return {"deleted": deleted, "failed": failed, "count": len(deleted)}
+
+
+# ── Disk status & Time Machine snapshots ────────────────────────────────────
+
+def _du_mb(path: str) -> int:
+    """Return size of path in MB, or -1 on error."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(["du", "-sm", path], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return int(r.stdout.split()[0])
+    except Exception:
+        pass
+    return -1
+
+
+def _fmt_mb(mb: int) -> str:
+    if mb < 0:
+        return "—"
+    if mb >= 1024:
+        return f"{mb / 1024:.1f} GB"
+    return f"{mb} MB"
+
+
+@app.get("/api/disk/status")
+def disk_status():
+    """
+    Return sizes for the main disk consumers Quarterdeck knows about.
+    All sizes in MB; display strings included.
+    Slow paths (Documents, App Support) run with a generous timeout.
+    """
+    import shutil as _shutil
+    import subprocess as _sp
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    home = str(Path.home())
+    kiro_cli = f"{home}/Library/Application Support/kiro-cli"
+
+    # Disk free
+    total_gb = used_gb = free_gb = -1
+    try:
+        usage = _shutil.disk_usage("/")
+        total_gb = round(usage.total / 1024**3, 1)
+        used_gb  = round(usage.used  / 1024**3, 1)
+        free_gb  = round(usage.free  / 1024**3, 1)
+    except Exception:
+        pass
+
+    # Fast paths only (sub-second). Large dirs (Documents, App Support)
+    # are omitted to keep the scan under 10 s.
+    paths = {
+        "kiro_cli_data": kiro_cli,
+        "kiro_sqlite":   f"{kiro_cli}/data.sqlite3",
+        "kiro_kas":      f"{kiro_cli}/kas",
+        "docker":        f"{home}/Library/Containers/com.docker.docker",
+        "homebrew":      "/opt/homebrew",
+        "downloads":     f"{home}/Downloads",
+        "caches":        f"{home}/Library/Caches",
+        "osa_kiro":      str(STATE_DIR),
+    }
+
+    def _measure(key_path):
+        key, p = key_path
+        return key, _du_mb(p)
+
+    sizes = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(_measure, item): item[0] for item in paths.items()}
+        for fut in as_completed(futures, timeout=30):
+            try:
+                key, mb = fut.result()
+                sizes[key] = {"path": paths[key], "mb": mb, "display": _fmt_mb(mb)}
+            except Exception:
+                key = futures[fut]
+                sizes[key] = {"path": paths[key], "mb": -1, "display": "—"}
+
+    # kas versions: list dirs, identify old vs current (latest by version prefix)
+    kas_versions = []
+    kas_path = Path(f"{kiro_cli}/kas")
+    if kas_path.exists():
+        entries = sorted(
+            [d for d in kas_path.iterdir() if d.is_dir() and not d.name.startswith(".")],
+            key=lambda d: d.name,
+        )
+        for entry in entries:
+            mb = _du_mb(str(entry))
+            version_label = entry.name.split("-")[0]
+            kas_versions.append({
+                "name": entry.name,
+                "version": version_label,
+                "path": str(entry),
+                "mb": mb,
+                "display": _fmt_mb(mb),
+            })
+        # Mark all but the last (highest version) as old
+        if len(kas_versions) > 1:
+            for v in kas_versions[:-1]:
+                v["old"] = True
+            kas_versions[-1]["old"] = False
+        elif kas_versions:
+            kas_versions[0]["old"] = False
+
+    old_kas_mb = sum(v["mb"] for v in kas_versions if v.get("old") and v["mb"] > 0)
+
+    # Time Machine local snapshot count
+    tm_count = 0
+    try:
+        r = _sp.run(
+            ["tmutil", "listlocalsnapshots", "/"],
+            capture_output=True, text=True, timeout=10,
+        )
+        tm_count = sum(1 for l in r.stdout.splitlines() if "TimeMachine" in l)
+    except Exception:
+        pass
+
+    return {
+        "disk": {"total_gb": total_gb, "used_gb": used_gb, "free_gb": free_gb},
+        "sizes": sizes,
+        "kas_versions": kas_versions,
+        "old_kas_mb": old_kas_mb,
+        "old_kas_display": _fmt_mb(old_kas_mb),
+        "tm_snapshot_count": tm_count,
+    }
+
+
+@app.delete("/api/disk/kas-old")
+def delete_old_kas():
+    """Delete all kiro-cli kas bundle versions except the latest."""
+    import shutil as _shutil
+    home = str(Path.home())
+    kas_path = Path(f"{home}/Library/Application Support/kiro-cli/kas")
+    if not kas_path.exists():
+        return {"deleted": [], "freed_mb": 0, "freed_display": "0 MB"}
+
+    entries = sorted(
+        [d for d in kas_path.iterdir() if d.is_dir() and not d.name.startswith(".")],
+        key=lambda d: d.name,
+    )
+    if len(entries) <= 1:
+        return {"deleted": [], "freed_mb": 0, "freed_display": "0 MB", "message": "Only one version, nothing to remove"}
+
+    old = entries[:-1]  # keep the last (highest version)
+    deleted = []
+    freed_mb = 0
+    for entry in old:
+        mb = _du_mb(str(entry))
+        try:
+            _shutil.rmtree(str(entry))
+            # Also remove matching .lock file if present
+            lock = kas_path / f"{entry.name}.lock"
+            if lock.exists():
+                lock.unlink()
+            deleted.append(entry.name)
+            if mb > 0:
+                freed_mb += mb
+        except Exception as e:
+            pass  # leave failed entries in place
+
+    return {"deleted": deleted, "freed_mb": freed_mb, "freed_display": _fmt_mb(freed_mb)}
+
+
+@app.get("/api/disk/tm-snapshots")
+def list_tm_snapshots():
+    """List local Time Machine snapshots."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(
+            ["tmutil", "listlocalsnapshots", "/"],
+            capture_output=True, text=True, timeout=10,
+        )
+        snapshots = []
+        for line in r.stdout.splitlines():
+            if "TimeMachine" not in line:
+                continue
+            # com.apple.TimeMachine.2026-08-28-163126.local → date part
+            parts = line.strip().split(".")
+            date_str = parts[3] if len(parts) > 3 else line.strip()
+            snapshots.append({"name": line.strip(), "date": date_str})
+        return {"snapshots": snapshots}
+    except Exception as e:
+        return {"snapshots": [], "error": str(e)}
+
+
+@app.delete("/api/disk/tm-snapshots")
+def delete_tm_snapshots(payload: dict = None):
+    """
+    Delete Time Machine local snapshots.
+    payload: { "dates": ["2026-08-28-163126", ...] }  — specific dates
+             { "all": true }                           — all TM snapshots
+    """
+    import subprocess as _sp
+
+    if payload is None:
+        payload = {}
+
+    # Resolve which dates to delete
+    if payload.get("all"):
+        r = _sp.run(
+            ["tmutil", "listlocalsnapshots", "/"],
+            capture_output=True, text=True, timeout=10,
+        )
+        dates = []
+        for line in r.stdout.splitlines():
+            if "TimeMachine" not in line:
+                continue
+            parts = line.strip().split(".")
+            if len(parts) > 3:
+                dates.append(parts[3])
+    else:
+        dates = payload.get("dates", [])
+
+    if not dates:
+        return {"deleted": [], "failed": [], "message": "Nothing to delete"}
+
+    deleted = []
+    failed = []
+    for date in dates:
+        try:
+            r = _sp.run(
+                ["tmutil", "deletelocalsnapshots", date],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0:
+                deleted.append(date)
+            else:
+                failed.append({"date": date, "reason": r.stderr.strip() or "non-zero exit"})
+        except Exception as e:
+            failed.append({"date": date, "reason": str(e)})
+
     return {"deleted": deleted, "failed": failed, "count": len(deleted)}
 
 

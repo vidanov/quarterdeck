@@ -227,6 +227,38 @@ def get_capabilities(session_id: str) -> list[str]:
     return list(entry.capabilities) if entry else []
 
 
+def get_stream_chunks(session_id: str, after: int = -1) -> tuple[list[dict], bool]:
+    """Return agent_message_chunk events since cursor *after*.
+
+    Each item is ``{"index": int, "text": str, "done": bool}`` where
+    ``done=True`` signals the turn ended (sessionUpdate == "done"/"end_turn").
+
+    Returns ``(chunks, attached)`` — ``attached`` is False if there is no
+    live ACP observer (caller should fall back to polling).
+    """
+    with _registry_lock:
+        entry = _registry.get(session_id)
+    if not entry:
+        return [], False
+
+    events = entry.store.snapshot()
+    result = []
+    for i, ev in enumerate(events):
+        if i <= after:
+            continue
+        if ev.get("method") != "session/update":
+            continue
+        update = (ev.get("params") or {}).get("update", {})
+        su = update.get("sessionUpdate", "")
+        if su == "agent_message_chunk":
+            content = update.get("content", {})
+            if content.get("type") == "text":
+                result.append({"index": i, "text": content.get("text", ""), "done": False})
+        elif su in ("done", "end_turn", "session_end"):
+            result.append({"index": i, "text": "", "done": True})
+    return result, True
+
+
 def detect_status(session_id: str) -> str | None:
     """Derive session status from the most recent ACP session/update event.
 

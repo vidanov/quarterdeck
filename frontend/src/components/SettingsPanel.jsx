@@ -958,6 +958,203 @@ function RetentionSettings() {
   )
 }
 
+function DiskCleanup() {
+  const notify = useToast()
+  const askConfirm = useConfirm()
+  const [status, setStatus] = useState(null)
+  const [snapshots, setSnapshots] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = () => {
+    setBusy(true)
+    Promise.all([
+      fetch('/api/disk/status').then(r => r.json()),
+      fetch('/api/disk/tm-snapshots').then(r => r.json()),
+    ]).then(([s, t]) => {
+      setStatus(s)
+      setSnapshots(t.snapshots || [])
+    }).catch(() => notify('Could not load disk info', 'error'))
+      .finally(() => setBusy(false))
+  }
+
+  const deleteOldKas = async () => {
+    const versions = (status?.kas_versions || []).filter(v => v.old)
+    const ok = await askConfirm(
+      `Delete ${versions.length} old kiro-crew bundle${versions.length === 1 ? '' : 's'}?`,
+      `${status?.old_kas_display} will be freed. kiro-cli re-downloads bundles as needed. The current version is kept.`,
+      'Delete'
+    )
+    if (!ok) return
+    setBusy(true)
+    fetch('/api/disk/kas-old', { method: 'DELETE' })
+      .then(r => r.json())
+      .then(d => {
+        notify(`Freed ${d.freed_display} (${d.deleted.length} old version${d.deleted.length === 1 ? '' : 's'} removed)`, 'info')
+        load()
+      })
+      .catch(() => notify('Delete failed', 'error'))
+      .finally(() => setBusy(false))
+  }
+
+  const deleteSnapshots = async (dates, label) => {
+    const ok = await askConfirm(
+      `Delete ${label}?`,
+      'Time Machine local snapshots will be permanently removed from this Mac. Remote backups are not affected.',
+      'Delete'
+    )
+    if (!ok) return
+    setBusy(true)
+    fetch('/api/disk/tm-snapshots', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(dates === 'all' ? { all: true } : { dates }),
+    }).then(r => r.json())
+      .then(d => {
+        notify(`Deleted ${d.count} snapshot${d.count === 1 ? '' : 's'}`, 'info')
+        load()
+      })
+      .catch(() => notify('Delete failed', 'error'))
+      .finally(() => setBusy(false))
+  }
+
+  const s = status
+  const disk = s?.disk
+  const sizes = s?.sizes || {}
+  const kasVersions = s?.kas_versions || []
+  const oldKas = kasVersions.filter(v => v.old)
+
+  const rows = [
+    { label: 'kiro-cli total',          key: 'kiro_cli_data' },
+    { label: '↳ data.sqlite3',          key: 'kiro_sqlite' },
+    { label: '↳ kas bundles',           key: 'kiro_kas' },
+    { label: 'Docker',                   key: 'docker' },
+    { label: 'Homebrew',                 key: 'homebrew' },
+    { label: 'Downloads',                key: 'downloads' },
+    { label: 'Caches',                   key: 'caches' },
+    { label: 'Quarterdeck state',        key: 'osa_kiro' },
+  ]
+
+  return (
+    <>
+      <h3 className="settings-title">Disk usage</h3>
+      <p className="cleanup-hint">Scan to see what's using space on this Mac.</p>
+      <div className="settings-actions">
+        <button className="launcher-cancel" disabled={busy} onClick={load}>
+          {busy ? '⟳ Scanning…' : 'Scan disk'}
+        </button>
+      </div>
+
+      {disk && (
+        <div style={{ marginTop: 12 }}>
+          <p className="cleanup-hint" style={{ marginBottom: 6 }}>
+            <strong>Disk:</strong> {disk.used_gb} GB used / {disk.total_gb} GB total
+            — <span style={{ color: disk.free_gb < 20 ? '#ef4444' : 'var(--text-dim)' }}>
+              {disk.free_gb} GB free
+            </span>
+          </p>
+
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <tbody>
+              {rows.map(({ label, key }) => {
+                const entry = sizes[key]
+                if (!entry) return null
+                const mb = entry.mb
+                const pct = disk.total_gb > 0 && mb > 0
+                  ? Math.min(100, (mb / (disk.total_gb * 1024)) * 100)
+                  : 0
+                return (
+                  <tr key={key} style={{ borderBottom: '1px solid var(--border)' }}>
+                    <td style={{ padding: '4px 0', color: 'var(--text-dim)', width: '55%' }}>{label}</td>
+                    <td style={{ padding: '4px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>{entry.display}</td>
+                    <td style={{ padding: '4px 0', width: 80 }}>
+                      {pct > 0 && (
+                        <div style={{ height: 4, background: 'var(--border)', borderRadius: 2 }}>
+                          <div style={{
+                            width: `${pct}%`, height: '100%', borderRadius: 2,
+                            background: pct > 15 ? '#ef4444' : pct > 5 ? '#f59e0b' : '#22c55e',
+                          }} />
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* kas old version cleanup */}
+      {kasVersions.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <p className="cleanup-hint">
+            <strong>kiro-crew bundles (kas)</strong> — {kasVersions.length} version{kasVersions.length === 1 ? '' : 's'} installed,
+            current: <code style={{ fontSize: 11 }}>{kasVersions[kasVersions.length - 1]?.version}</code>
+          </p>
+          {oldKas.length > 0 && (
+            <>
+              <ul className="cleanup-list">
+                {oldKas.map(v => (
+                  <li key={v.name}>
+                    <span className="settings-detail">{v.version}</span>
+                    <span className="settings-detail" style={{ marginLeft: 8, color: 'var(--text-dim)' }}>{v.display}</span>
+                  </li>
+                ))}
+              </ul>
+              <button className="launcher-cancel" disabled={busy} onClick={deleteOldKas}>
+                Delete {oldKas.length} old version{oldKas.length === 1 ? '' : 's'} ({s.old_kas_display})
+              </button>
+              <p className="cleanup-hint" style={{ marginTop: 6, color: 'var(--text-dim)' }}>
+                kiro-cli re-downloads bundles as needed. Only old versions are removed.
+              </p>
+            </>
+          )}
+          {oldKas.length === 0 && (
+            <p className="cleanup-hint" style={{ color: 'var(--text-dim)' }}>Only one version installed — nothing to remove.</p>
+          )}
+        </div>
+      )}
+
+      {/* Time Machine snapshots */}
+      {snapshots !== null && (
+        <div style={{ marginTop: 16 }}>
+          <p className="cleanup-hint">
+            <strong>Time Machine local snapshots</strong> — {snapshots.length === 0
+              ? 'none found'
+              : `${snapshots.length} snapshot${snapshots.length === 1 ? '' : 's'} on this disk`}
+          </p>
+          {snapshots.length > 0 && (
+            <>
+              <ul className="cleanup-list">
+                {snapshots.map(snap => (
+                  <li key={snap.date} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span className="settings-detail">{snap.date}</span>
+                    <button
+                      className="launcher-cancel"
+                      style={{ padding: '2px 8px', fontSize: 11 }}
+                      disabled={busy}
+                      onClick={() => deleteSnapshots([snap.date], `snapshot ${snap.date}`)}
+                    >
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <button className="launcher-cancel" disabled={busy}
+                      onClick={() => deleteSnapshots('all', `all ${snapshots.length} snapshots`)}>
+                Delete all snapshots
+              </button>
+              <p className="cleanup-hint" style={{ marginTop: 6, color: 'var(--text-dim)' }}>
+                Deletes local copies only. Remote Time Machine backups are not affected.
+              </p>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
+
 function DangerZone() {
   const notify = useToast()
   const askConfirm = useConfirm()
@@ -2540,6 +2737,7 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
             continuing the same conversation.
           </p>
           <ShellSettings />
+          <DiskCleanup />
           <DangerZone />
         </>
       )}

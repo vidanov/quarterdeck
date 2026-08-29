@@ -1424,10 +1424,20 @@ export default function App() {
   const APPROVAL_ATTENTION_DELAY_MS = 1500
   const awaitingFirstSeenRef = useRef(new Map()) // id → timestamp when first seen awaiting
   const [stableAwaitingIds, setStableAwaitingIds] = useState(new Set())
+
+  // Derive a stable key from the IDs currently awaiting approval.
+  // shownActiveWithFav is a new array reference every render (.map creates new
+  // objects), so using it as a useEffect dependency caused an infinite
+  // setState → re-render → new ref → re-run loop. A sorted ID string only
+  // changes when the set of awaiting sessions actually changes.
+  const awaitingKey = shownActiveWithFav
+    .filter(s => s.status === 'awaiting-approval')
+    .map(s => s.id)
+    .sort()
+    .join(',')
+
   useEffect(() => {
-    const nowAwaiting = new Set(
-      shownActiveWithFav.filter(s => s.status === 'awaiting-approval').map(s => s.id)
-    )
+    const nowAwaiting = new Set(awaitingKey ? awaitingKey.split(',') : [])
     // Drop sessions that are no longer awaiting
     for (const id of awaitingFirstSeenRef.current.keys()) {
       if (!nowAwaiting.has(id)) awaitingFirstSeenRef.current.delete(id)
@@ -1438,13 +1448,18 @@ export default function App() {
       if (!awaitingFirstSeenRef.current.has(id)) awaitingFirstSeenRef.current.set(id, now)
     }
     // Stable = awaiting for longer than the delay
-    const stable = new Set(
+    const next = new Set(
       [...awaitingFirstSeenRef.current.entries()]
         .filter(([, t]) => now - t >= APPROVAL_ATTENTION_DELAY_MS)
         .map(([id]) => id)
     )
-    setStableAwaitingIds(stable)
-  }, [shownActiveWithFav])
+    // Only update state if the set actually changed — avoids re-render when
+    // the timer fires but nothing graduated to stable yet.
+    setStableAwaitingIds(prev => {
+      if (prev.size === next.size && [...next].every(id => prev.has(id))) return prev
+      return next
+    })
+  }, [awaitingKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A working agent needs nothing from you, so it does not deserve the same
   // real estate as one that is stopped waiting. Cards for what needs you; one

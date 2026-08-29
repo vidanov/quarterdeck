@@ -705,10 +705,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       .then(s => { if (s['handoff-terminal']) setHandoffTerminal(s['handoff-terminal']) })
       .catch(() => {})
   }, [])
-  // The unified view picks itself from session state: streaming while the agent
-  // works, transcript once it stops. `viewOverride` is the manual pin, for
-  // reading back through turns (and forking) while a session is still running.
-  const [viewOverride, setViewOverride] = useState(null)  // null | 'live' | 'transcript'
+  // Transcript is always the default view — it streams live updates while the
+  // agent is active. `viewOverride` pins to raw pane or shell explicitly.
+  const [viewOverride, setViewOverride] = useState(null)  // null | 'raw' | 'transcript' | 'shell'
   const [pane, setPane] = useState('')
   const [width, setWidth] = useState(() =>
     clampPanelWidth(Number(localStorage.getItem('detail-width')) || PANEL_DEFAULT))
@@ -863,6 +862,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [messagesError, setMessagesError] = useState(null)
   const transcriptMaxSeq = useRef(-1)
+  // Live streaming text from ACP agent_message_chunk events (word-by-word)
+  const [streamingText, setStreamingText] = useState('')
+  const streamingCursorRef = useRef(-1)  // last ACP event index consumed
+  const streamingEsRef = useRef(null)    // active EventSource
   // In-memory transcript cache — keyed by session id, capped at 20 sessions.
   // Allows instant display when switching back to a previously-viewed session.
   const transcriptCache = useRef({})
@@ -893,13 +896,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const status = detail?.status || session.status
   const canSend = control === 'managed' || control === 'acp'
 
-  // One view, two renderings. A working agent gets the tmux pane; a stopped one
-  // gets the transcript (where turns can be forked). The pin overrides both.
+  // Transcript is always the default. Raw pane requires an explicit override.
   const isWorking = status === 'thinking' || status === 'running' || status === 'awaiting-approval'
   const canLive = canSend
   const effectiveView = viewOverride
-    ? (viewOverride === 'live' && !canLive ? 'transcript' : viewOverride)
-    : (canLive && isWorking ? 'live' : 'transcript')
+    ? (viewOverride === 'raw' && !canLive ? 'transcript' : viewOverride)
+    : 'transcript'
 
   // --- Multi-shell state (per-folder named sessions) ---
   const [activeShellId, setActiveShellId] = useState(null) // which shell tab is open
@@ -1098,6 +1100,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     transcriptLoadedFor.current = null
     setViewOverride(null)  // clear any manual pin when switching sessions
     setCorrections([])     // clear stale corrections before the fetch for the new session
+    // Reset streaming state
+    setStreamingText('')
+    streamingCursorRef.current = -1
+    if (streamingEsRef.current) { streamingEsRef.current.close(); streamingEsRef.current = null }
     // Close side chat when switching sessions
     sideChatRef.current?.close()
   }, [session.id])
@@ -1129,6 +1135,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       api.getMessages(session.id, after, 200).then(d => {
         const newMsgs = d.messages || []
         if (!newMsgs.length) return
+        // If new assistant messages arrived, the streaming bubble is now stale
+        if (newMsgs.some(m => m.role === 'assistant')) {
+          setStreamingText('')
+          streamingCursorRef.current = -1
+          if (streamingEsRef.current) { streamingEsRef.current.close(); streamingEsRef.current = null }
+        }
         setMessages(prev => {
           if (!prev) return newMsgs
           const maxSeen = prev.length ? prev[prev.length - 1].seq : -1
@@ -1140,10 +1152,61 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           return updated
         })
       }).catch(() => {})
-    }, 2000)
+    }, 500)
 
     return () => clearInterval(interval)
   }, [effectiveView, messagesLoaded, session.id, session.status, detail?.status])
+
+  // ACP word-by-word streaming: open an EventSource to /stream when the
+  // session is active and the ACP observer is attached. Accumulate text
+  // chunks into streamingText. Close when done or session goes idle.
+  useEffect(() => {
+    const isAcp = (detail?.control || session.control) === 'acp'
+    if (!isAcp || !isWorking || effectiveView !== 'transcript') {
+      // Not ACP or not active — close any open stream and clear
+      if (streamingEsRef.current) {
+        streamingEsRef.current.close()
+        streamingEsRef.current = null
+      }
+      if (!isWorking) {
+        setStreamingText('')
+        streamingCursorRef.current = -1
+      }
+      return
+    }
+    // Already streaming for this session
+    if (streamingEsRef.current) return
+
+    const cursor = streamingCursorRef.current
+    const localToken = window._qdLocalToken || ''
+    const url = `/api/sessions/${session.id}/stream?after=${cursor}&t=${encodeURIComponent(localToken)}`
+    const es = new EventSource(url)
+    streamingEsRef.current = es
+
+    es.onmessage = (e) => {
+      try {
+        const chunk = JSON.parse(e.data)
+        if (chunk.done) {
+          es.close()
+          streamingEsRef.current = null
+          // Don't clear streamingText here — wait for the JSONL poll to
+          // deliver the real message, then clear it in the messages effect.
+          return
+        }
+        streamingCursorRef.current = chunk.index
+        setStreamingText(prev => prev + chunk.text)
+      } catch (_) {}
+    }
+    es.onerror = () => {
+      es.close()
+      streamingEsRef.current = null
+    }
+
+    return () => {
+      es.close()
+      streamingEsRef.current = null
+    }
+  }, [isWorking, effectiveView, session.id, session.control, detail?.control])
 
   // When a session finishes a turn (goes idle/done), do one final fetch to
   // catch anything the 2s polling interval might have missed.
@@ -1338,7 +1401,17 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         })
     }
     fetchDetail()
-    const interval = setInterval(fetchDetail, 2000)
+    // Back off for idle/done sessions — the initial load has the data, and
+    // no new output will arrive. Active sessions keep the 2s cadence so status
+    // transitions and last_output update promptly. Idle sessions poll every
+    // 10s (5 ticks × 2s) to catch late status corrections or resumes.
+    let idleTick = 0
+    const interval = setInterval(() => {
+      const st = lastDetailJson.current.split('|')[0]
+      const idle = st === 'idle' || st === 'done' || st === 'error'
+      if (!idle) { idleTick = 0; fetchDetail() }
+      else if (++idleTick >= 5) { idleTick = 0; fetchDetail() }
+    }, 2000)
     return () => clearInterval(interval)
   }, [session?.id])
 
@@ -1365,7 +1438,11 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   }, [session?.id])
 
   // Poll for new screenshots every 3 seconds when the composer is visible.
+  // Poll for new screenshots — only while the session can receive input
+  // (composer is visible). No point scanning the filesystem when viewing a
+  // done session or a non-transcript tab.
   useEffect(() => {
+    if (!canSend) return
     const poll = () => {
       fetch('/api/screenshots/recent-files?minutes=5').then(r => r.json())
         .then(d => {
@@ -1380,7 +1457,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     poll()  // immediate on mount
     const id = setInterval(poll, 5000)
     return () => clearInterval(id)
-  }, [])
+  }, [canSend])
 
   // The transcript is the resting view now, so it loads whenever we land on it
   // rather than only on an explicit tab click.
@@ -1507,7 +1584,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   // by dead space. Driven by ResizeObserver, so maximising, dragging the panel
   // edge and resizing the OS window all go through the same path.
   useEffect(() => {
-    if (control !== 'managed' || effectiveView !== 'live') return
+    if (control !== 'managed' || effectiveView !== 'raw') return
     const box = paneBoxRef.current
     if (!box || typeof ResizeObserver === 'undefined') return
 
@@ -2183,15 +2260,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     onClick={() => next && onSelect(next)}>›</button>
             <span className="detail-bar-sep" />
             <span className="detail-view-label">
-              {effectiveView === 'live' ? 'Live' : 'Transcript'}
-              {effectiveView === 'live' && isWorking ? ' ●' : ''}
+              {effectiveView === 'raw' ? 'Raw' : 'Transcript'}
+              {effectiveView === 'raw' && isWorking ? ' ●' : ''}
               {effectiveView === 'transcript' && messages ? ` · ${messages.length}` : ''}
             </span>
             {canLive && (
               <div className="detail-view-pin">
-                <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)} title="Follow session state">auto</button>
-                <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')} title="Always show live pane">live</button>
-                <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')} title="Always show transcript">transcript</button>
+                <button className={`detail-pin-btn ${(!viewOverride || viewOverride === 'transcript') ? 'active' : ''}`} onClick={() => setViewOverride(null)} title="Streaming transcript">transcript</button>
+                <button className={`detail-pin-btn ${viewOverride === 'raw' ? 'active' : ''}`} onClick={() => setViewOverride('raw')} title="Raw tmux pane">raw</button>
               </div>
             )}
             {!isMobileBrowser && (
@@ -2212,8 +2288,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       {!(sessions && sessions.length > 0 && onSelect) && (
         <div className="detail-compact-bar detail-compact-bar-solo">
           <span className="detail-view-label">
-            {effectiveView === 'live' ? 'Live' : 'Transcript'}
-            {effectiveView === 'live' && isWorking ? ' ●' : ''}
+            {effectiveView === 'raw' ? 'Raw' : 'Transcript'}
+            {effectiveView === 'raw' && isWorking ? ' ●' : ''}
             {effectiveView === 'transcript' && messages ? ` · ${messages.length}` : ''}
           </span>
           {session.context_pct != null && session.context_pct !== '' && (
@@ -2221,9 +2297,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           )}
           {canLive && (
             <div className="detail-view-pin">
-              <button className={`detail-pin-btn ${!viewOverride ? 'active' : ''}`} onClick={() => setViewOverride(null)}>auto</button>
-              <button className={`detail-pin-btn ${viewOverride === 'live' ? 'active' : ''}`} onClick={() => setViewOverride('live')}>live</button>
-              <button className={`detail-pin-btn ${viewOverride === 'transcript' ? 'active' : ''}`} onClick={() => setViewOverride('transcript')}>transcript</button>
+              <button className={`detail-pin-btn ${(!viewOverride || viewOverride === 'transcript') ? 'active' : ''}`} onClick={() => setViewOverride(null)}>transcript</button>
+              <button className={`detail-pin-btn ${viewOverride === 'raw' ? 'active' : ''}`} onClick={() => setViewOverride('raw')}>raw</button>
             </div>
           )}
           <button className={`detail-pin-btn-shell ${viewOverride === 'shell' ? 'active' : ''}`}
@@ -2238,7 +2313,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           )}
         </div>
       )}
-      {effectiveView === 'live' && canLive && (
+      {effectiveView === 'raw' && canLive && (
         <div className={`terminal terminal-live pane-${paneTheme}`} ref={liveRef}>
           {/* Off-screen cell probe: the tmux geometry is derived from what a
               character actually measures in this font at this zoom, not from a
@@ -2470,9 +2545,16 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           })()}
           {isWorking && (
             <div className="chat-row chat-row-assistant">
-              <div className="chat-assistant-thinking">
-                <span className="chat-spinner">●</span> working…
-              </div>
+              {streamingText ? (
+                <div className="chat-assistant-text chat-assistant-streaming">
+                  <Markdown text={streamingText} />
+                  <span className="chat-streaming-cursor">▋</span>
+                </div>
+              ) : (
+                <div className="chat-assistant-thinking">
+                  <span className="chat-spinner">●</span> working…
+                </div>
+              )}
             </div>
           )}
           {/* Pending bubble: show sent text immediately before server confirms it */}
