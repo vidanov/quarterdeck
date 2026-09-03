@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from . import tmux_manager as tmux
+from .cache import LruCache
 from .config import DEFAULT_COLS, DEFAULT_ROWS
 
 # Legacy singleton name — kept so existing Settings panel still works
@@ -203,7 +204,8 @@ def get_pane_named(shell_id: str, lines: int = 40) -> dict:
     _get_pane_cache[shell_id] = (now, result)
     return result
 
-_get_pane_cache: dict = {}
+# Capped: never pruned otherwise, and each entry holds a pane's worth of text.
+_get_pane_cache: LruCache = LruCache(maxsize=32)
 
 
 def _get_pane_named_uncached(shell_id: str, lines: int = 40) -> dict:

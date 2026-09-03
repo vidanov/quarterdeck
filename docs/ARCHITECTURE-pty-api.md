@@ -82,6 +82,108 @@ unlike the tracked `snapshots.json` / `favourites.json`. Writes go through a tem
 unresolved pendings with a zero timeout so startup never blocks. Only `kiro-`-prefixed tmux sessions
 are ever touched, so unrelated tmux sessions on the machine are left alone.
 
+### The tmux server Quarterdeck spawns into
+
+Every tmux call carries `-f ~/.osa-kiro/tmux.conf` (written by `config.tmux_base_argv`).
+tmux reads a config exactly once, when it has to *start* a server, and ignores the flag
+when connecting to one that is already running — so this only governs the cold start
+Quarterdeck itself causes, and a server the user started from their own terminal keeps
+their own settings.
+
+The config loads no plugins on purpose. A `~/.tmux.conf` that ends in tpm and sets
+`@continuum-restore 'on'` makes any cold start a fleet resurrection: tmux-continuum
+replays the last tmux-resurrect snapshot, recreating every session in it and re-running
+each pane's saved command. One dispatch did that here — 38 sessions and ~40 `kiro-cli`
+processes in six seconds, from a snapshot eight days old, load average 14, the API
+answering in 25s.
+
+It diagnoses as a spawn leak and is not one. `ps` fills with lines reading
+`tmux new-session -d -s osa-pending-<nonce> … -c …/osa-kiro`, all with the same nonce,
+because the server's forked children wear the argv of the command that started it — one
+process, dozens of listings. `tmux ls` at the time showed every session created inside a
+six-second window, matching the resurrect snapshot name for name, while
+`managed.json`'s `pending` was empty.
+
+Escape hatches: `QUARTERDECK_TMUX_CONF=<path>` to use a different config,
+`QUARTERDECK_TMUX_CONF=none` to pass no `-f` and inherit whatever the user's config does.
+`_note_cold_start` prints one line to stderr when this process is the one starting the
+server, so a future burst is attributable without reconstructing it from `ps`.
+
+### Housekeeping: strays, corpses, idle agents
+
+Three different problems, three different levels of nerve:
+
+- **Strays.** `reconcile()` adopts stray `kiro-*` sessions so a restarted backend re-owns
+  its own work. Past `ADOPT_LIMIT` (8) arriving at once it adopts none of them and records
+  them under `unclaimed` in `managed.json` instead — a fleet that appears in one second was
+  not spawned by us. `GET /api/tmux/strays` lists them, `POST /api/tmux/strays/claim` takes
+  them, `POST /api/tmux/strays/kill` (dry run by default) does not. Held-back strays stay
+  out of the session list, so the UI does not present them as the user's work and the
+  summary worker does not queue one summary per resurrected agent.
+- **Corpses.** `remain-on-exit` keeps a crashed pane readable, and therefore leaks tmux
+  sessions. `reap_dead_panes` kills panes tmux itself reports dead once they have been dead
+  for `DEAD_PANE_TTL` (24h; `reap_dead_panes_hours` in settings, 0 disables). First sighting
+  only records the time of death, so a corpse always gets the full TTL. Runs hourly off the
+  same poll path as the directory sweeps, plus once at startup. `POST /api/tmux/reap`.
+- **Idle agents.** `reap_idle_sessions` quits sessions that are alive and have done nothing
+  for N hours. It ends running work, so it is manual, dry run by default, and skips anything
+  with a gate, a pending approval, or a queued stack item. `POST /api/tmux/reap-idle`.
+
+### Two things that made the machine feel broken
+
+Neither was a Quarterdeck bug in the usual sense; both were Quarterdeck making an expensive
+call repeatedly.
+
+- **The dock badge was an Apple event.** `/api/badge` shelled out to
+  `osascript -e 'tell application "Quarterdeck" …'` on every count change. Apple events are
+  gated behind the Automation permission, so a `needsYou` count that flickers with the 2s
+  poll reopened the permission prompt on a loop and left an unreaped `osascript` behind each
+  time. The backend runs inside the app process, so the dock tile is ours: it is set through
+  `NSApplication.sharedApplication().dockTile()` on the main queue, unchanged counts are
+  dropped, and the `osascript` fallback gives up permanently after two failures.
+- **`--reload` watched 3344 files.** `watchfiles` is not installed, so uvicorn falls back to
+  StatReload, which stats every `.py` file under the working directory four times a second —
+  `venv/`, `build/`, `dist/`, archived docs included. `start.sh` now passes
+  `--reload-dir backend` (28 files).
+
+### Why it slowed down, and where it leaked
+
+Growth in two directions: per-poll cost that scaled with things that only ever grow, and
+state that was never released. What was actually measured on the machine: 626MB of session
+JSONL across 558 files (largest single session 188MB), 902 turn marks, two backends polling
+at once (installed app on 19418, dev on 19419), TrendMicro's endpoint-security extensions
+at 50% + 39% CPU inspecting every `tmux` fork, and app RSS climbing 46.6MB → 63.2MB in 38
+seconds while idle.
+
+The fixes, and the reasoning that picked them:
+
+- **Per-session caches are capped** (`backend/cache.py`, `LruCache`). `_tail_cache` (64KB of
+  decoded text per session), `_last_message_cache`, `_capture_cache` (up to
+  `MAX_CAPTURE_LINES` of pane text) and `shell._get_pane_cache` were plain dicts with no
+  eviction — one entry per session the process had ever touched, held for its lifetime. LRU
+  rather than a periodic flush because the access pattern is a handful of live sessions hit
+  over and over while the archive is read once: least-recently-used keeps exactly the hot
+  entries and drops the drive-by reads.
+- **Dead ACP observers are pruned** (`acp_observer.prune`, called from the 30s sweep).
+  `detach()` only ran where Quarterdeck ends a session itself — kill, handoff, takeover. An
+  agent that exited on its own left its entry holding a live `kiro-cli-chat → bun → tui.js`
+  tree, hundreds of megabytes each. `attach()` also treated a dead entry as success, so that
+  session's V3 streaming stayed silently dead; it now replaces the corpse.
+- **Summaries run on a pool of 2, capped at 8 queued.** It was a thread per finished turn,
+  each then queuing on `acp_worker`'s single lock with a 40s timeout: 38 sessions finishing
+  meant 38 parked threads and a backlog measured in half-hours. Past the cap a summary is
+  skipped and regenerated on the next stop event.
+- **The thread limiter is raised to 120.** Sync endpoints run in anyio's pool; the default 40
+  tokens is the real ceiling on in-flight requests, and once they were all parked in `tmux`
+  subprocesses every later request — `/api/health` included — queued behind them. That is
+  what "Backend not reachable" was: starvation, not a dead process.
+- **Read-only tmux calls on the poll path have short timeouts** (3-4s instead of the 10s
+  default), so a wedged tmux server fails a poll instead of holding a request thread.
+- **Frontend reads carry a 20s deadline** (`api/client.js`). The session poll schedules its
+  next tick from `.then`, so one hung read stopped the polling loop with no error shown.
+  GET only: a mutation may already have been applied when a client gives up, and aborting
+  would leave the two disagreeing about whether it happened.
+
 ### Input path
 
 ```

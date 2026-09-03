@@ -2198,3 +2198,47 @@ class TestScriptsAPI:
         r = client.post("/api/scripts/no-such-id/run", json={"cwd": "/tmp/x"})
         assert r.status_code == 200
         assert "error" in r.json()
+
+
+from backend import api as _api
+
+
+class TestDockBadge:
+    """The badge used to ask macOS for the Automation permission on every change.
+
+    `tell application "Quarterdeck"` is an Apple event; a count that flickers
+    with each 2s poll therefore reopened the permission prompt on a loop and
+    left an unreaped osascript behind each time. The badge is this process's own
+    dock tile, so it is set in-process, and an unchanged count does nothing.
+    """
+
+    def test_an_unchanged_count_does_no_work(self):
+        with patch.object(_api, "_set_badge_native", return_value=True) as native:
+            _api._badge_label = None
+            assert client.post("/api/badge", json={"count": 2}).json()["ok"] is True
+            second = client.post("/api/badge", json={"count": 2}).json()
+        assert second.get("unchanged") is True
+        assert native.call_count == 1
+
+    def test_zero_clears_the_label(self):
+        with patch.object(_api, "_set_badge_native", return_value=True) as native:
+            _api._badge_label = "3"
+            client.post("/api/badge", json={"count": 0})
+        assert native.call_args[0][0] == ""
+
+    def test_a_silly_count_is_capped(self):
+        with patch.object(_api, "_set_badge_native", return_value=True) as native:
+            _api._badge_label = None
+            client.post("/api/badge", json={"count": 100000})
+        assert native.call_args[0][0] == "999+"
+
+    def test_a_non_number_is_refused(self):
+        _api._badge_label = None
+        assert "error" in client.post("/api/badge", json={"count": "seven"}).json()
+
+    def test_the_script_fallback_gives_up_after_repeated_failures(self):
+        """Otherwise a denied Automation permission is a prompt on every change."""
+        _api._badge_script_failures = _api._BADGE_SCRIPT_LIMIT
+        with patch.object(api.threading, "Thread") as thread:
+            _api._set_badge_via_script("4")
+        thread.assert_not_called()

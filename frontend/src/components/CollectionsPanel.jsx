@@ -449,6 +449,7 @@ export default function CollectionsPanel({
   archiveQuery,
   archiveResults,
   archiveTotal,
+  archiveError,
   archiveSelected,
   onArchiveSearch,
   onToggleArchiveSelect,
@@ -594,6 +595,11 @@ export default function CollectionsPanel({
               onChange={e => onArchiveSearch(e.target.value)}
               onFocus={() => { if (!archiveResults.length) onArchiveSearch('') }}
             />
+            {archiveError && (
+              <div className="archive-error" role="alert">
+                Search failed: {archiveError}
+              </div>
+            )}
             <div className="archive-list">
               {archiveResults.map(s => (
                 <div
