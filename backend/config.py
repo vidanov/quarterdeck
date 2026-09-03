@@ -105,6 +105,89 @@ SPAWN_HOOK_GRACE = 1.5
 KIRO_CLI = "kiro-cli"
 TMUX_PREFIX = "kiro-"  # tmux session name for a resolved kiro session
 PENDING_PREFIX = "osa-pending-"  # tmux session name before the id is known
+
+# --- the tmux server Quarterdeck spawns into ---
+# Every tmux invocation carries `-f TMUX_CONF`. tmux reads that file exactly
+# once, when a server is started, and ignores it when a client connects to a
+# server that is already running — so this only takes effect on the cold start
+# Quarterdeck itself causes, and a server the user started from their terminal
+# keeps their own configuration.
+#
+# It deliberately does not load ~/.tmux.conf. A user config that ends in tpm
+# and sets `@continuum-restore 'on'` turns any cold start into a fleet
+# resurrection: tmux-continuum replays its last tmux-resurrect snapshot,
+# recreating every session in it and re-running each pane's saved command. One
+# dispatch did exactly that here — 38 sessions and ~40 kiro-cli processes in
+# six seconds, load average 14, the API answering in 25s. From the outside it
+# is indistinguishable from a spawn leak in Quarterdeck: `ps` shows dozens of
+# lines all reading `tmux new-session -d -s osa-pending-<nonce>`, because the
+# forked children of the server wear the argv of the command that started it.
+# Nothing was leaking. The snapshot was eight days old and none of those
+# sessions were asked for.
+#
+# Set QUARTERDECK_TMUX_CONF to a path to use a different config, or to "none"
+# to pass no -f at all and inherit whatever the user's config does.
+_TMUX_CONF_ENV = os.environ.get("QUARTERDECK_TMUX_CONF", "").strip()
+TMUX_CONF: Path | None = (
+    None if _TMUX_CONF_ENV.lower() == "none"
+    else Path(_TMUX_CONF_ENV).expanduser() if _TMUX_CONF_ENV
+    else STATE_DIR / "tmux.conf"
+)
+# Only a config at the default path is ours to (re)write; a path the user
+# pointed us at is theirs. Kept in one string so a stale copy is replaced
+# rather than drifting silently.
+TMUX_CONF_MANAGED = TMUX_CONF == (STATE_DIR / "tmux.conf")
+TMUX_CONF_BODY = """# Written by Quarterdeck (backend/config.py) — edits are overwritten.
+#
+# This is the config for a tmux server that Quarterdeck cold-starts. It loads
+# no plugins on purpose: with tpm and tmux-continuum's @continuum-restore on,
+# starting a server replays the last tmux-resurrect snapshot and re-runs every
+# saved pane command, which spawns a whole fleet of agents nobody asked for.
+#
+# To use your own config instead: QUARTERDECK_TMUX_CONF=~/.tmux.conf, or
+# QUARTERDECK_TMUX_CONF=none to pass no config at all.
+set -g default-terminal "screen-256color"
+set -g history-limit 50000
+set -g escape-time 10
+set -g mouse on
+# Belt and braces: if this file is ever made to load plugins, restore stays off.
+set -g @continuum-restore 'off'
+"""
+
+
+# How many stray `kiro-*` tmux sessions reconcile() will adopt in one pass.
+# Adoption exists so a restarted backend re-owns its own sessions, and for a
+# handful that is exactly right. A burst is a different animal: 38 sessions
+# appeared at once from a tmux-continuum restore, reconcile adopted every one,
+# and from then on the UI presented them as the user's work and the auto-summary
+# worker queued a summary for each. Past this many at once, record them and let
+# a human say whether they are wanted.
+ADOPT_LIMIT = int(os.environ.get("QUARTERDECK_ADOPT_LIMIT", "8"))
+# How long a dead pane is kept before the reaper kills its tmux session.
+# Sessions are created with remain-on-exit so a kiro-cli crash stays readable
+# instead of vanishing, which is worth a day and not worth a month. Only panes
+# whose process has already exited are ever touched. 0 disables the reaper.
+DEAD_PANE_TTL = float(os.environ.get("QUARTERDECK_DEAD_PANE_TTL", 24 * 3600))
+
+
+def tmux_base_argv() -> list[str]:
+    """argv prefix for every tmux call: the binary plus our server config.
+
+    Writes the config on first use. A missing or unwritable state directory is
+    not worth failing a spawn over — the flag is simply dropped.
+    """
+    if TMUX_CONF is None:
+        return ["tmux"]
+    if TMUX_CONF_MANAGED:
+        try:
+            if not TMUX_CONF.exists() or TMUX_CONF.read_text() != TMUX_CONF_BODY:
+                TMUX_CONF.parent.mkdir(parents=True, exist_ok=True)
+                TMUX_CONF.write_text(TMUX_CONF_BODY)
+        except OSError:
+            return ["tmux"]
+    elif not TMUX_CONF.is_file():
+        return ["tmux"]
+    return ["tmux", "-f", str(TMUX_CONF)]
 SPAWN_TIMEOUT = 45.0  # seconds to wait for kiro-cli to report its session id.
 # Generous on purpose: correlation runs on a background thread, so waiting costs
 # nothing, and a shell prelude (login shell + nvm/venv) can push startup past 15s.
@@ -149,6 +232,13 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # therefore written inside the app bundle, which a
 # reinstall overwrites and a signed or read-only bundle refuses outright — the
 # reported "settings do not survive a restart".
+# Where the remote-proxy LaunchAgent's stdout and stderr go. launchd appends to
+# this and never rotates it, and the agent is KeepAlive — so a uvicorn that will
+# not start writes a traceback per restart, forever. 133MB of that was found on
+# this machine. backend/logs.rotate_if_big caps it; see that module for why the
+# rotation is a truncate and not a rename.
+REMOTE_LOG = STATE_DIR / "remote.log"
+REMOTE_LOG_MAX_BYTES = 8 * 1024 * 1024
 SETTINGS_FILE = STATE_DIR / "settings.json"
 CLIENT_PREFS_FILE = STATE_DIR / "client-prefs.json"  # UI state that must survive WKWebView restarts
 # Snapshots and favourites live beside it, for the same reason and it is worth

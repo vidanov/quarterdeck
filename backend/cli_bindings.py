@@ -20,7 +20,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .config import STATE_DIR
+from .config import STATE_DIR, tmux_base_argv
 
 BINDINGS_FILE = STATE_DIR / "cli_bindings.json"
 FOOTER_LINES = 12
@@ -50,16 +50,21 @@ def _save(bindings: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _tmux(*args: str) -> str:
-    """Run a tmux command and return stdout. Returns '' on failure."""
+    """Run a tmux command and return stdout. Returns '' on failure.
+
+    Goes through config.tmux_base_argv so this module talks to the same tmux
+    server, started from the same config, as tmux_manager does.
+    """
     try:
-        r = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([*tmux_base_argv(), *args],
+                           capture_output=True, text=True, timeout=5)
         return r.stdout
     except Exception:
         return ""
 
 
 def _session_exists(name: str) -> bool:
-    r = subprocess.run(["tmux", "has-session", "-t", name],
+    r = subprocess.run([*tmux_base_argv(), "has-session", "-t", name],
                        capture_output=True, timeout=3)
     return r.returncode == 0
 

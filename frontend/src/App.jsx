@@ -46,7 +46,7 @@ import DetailPanel from './components/DetailPanel'
 import CollectionsPanel from './components/CollectionsPanel'
 import { CardReply, SessionCard, AttentionBar, ListView } from './components/SessionGrid'
 import StacksView from './components/StacksView'
-import { QuickCreate, CommandBar, NewSessionLauncher } from './components/Launcher'
+import { QuickCreate, CommandBar, PaletteBar, NewSessionLauncher } from './components/Launcher'
 import Markdown from './components/Markdown'
 import { PasteAttachments, PasteTileCompact } from './components/PasteAttachments'
 import { usePasteAttachments } from './hooks/usePasteAttachments'
@@ -385,8 +385,10 @@ export default function App() {
   const [wallGrouped, setWallGrouped] = useState(() => localStorage.getItem('wall-grouped') === '1')
   const [wallCollections, setWallCollections] = useState([])
   const [cmdBarOpen, setCmdBarOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const [controlFilter, setControlFilter] = useState(() => localStorage.getItem('control-filter') || 'managed')
   const [statusFilter, setStatusFilter] = useState(() => localStorage.getItem('status-filter') || null)
+  const [folderFilter, setFolderFilter] = useState(() => localStorage.getItem('folder-filter') || null)
   const [sessionViewMode, setSessionViewMode] = useState(() => {
     const isMobile = window.innerWidth <= 768
     const deviceKey = isMobile ? 'session-view-mode-mobile' : 'session-view-mode-desktop'
@@ -437,6 +439,11 @@ export default function App() {
       localStorage.removeItem('status-filter')
       settingsApi.saveSettings({ 'status-filter': '' }).catch(() => {})
     }
+  }
+  const changeFolderFilter = (v) => {
+    setFolderFilter(v || null)
+    if (v) localStorage.setItem('folder-filter', v)
+    else localStorage.removeItem('folder-filter')
   }
   const changeSessionViewMode = (v) => {
     // Remember the last non-wall mode so wall exit restores it
@@ -529,6 +536,10 @@ export default function App() {
     const onKey = (e) => {
       if (e.key === 'k' && e.metaKey && !e.shiftKey && !e.altKey) {
         e.preventDefault()
+        setPaletteOpen(v => !v)
+      }
+      if (e.key === 'j' && e.metaKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault()
         setCmdBarOpen(v => !v)
       }
       if (e.key === 'Enter' && e.metaKey && !e.shiftKey && !e.altKey) {
@@ -596,6 +607,7 @@ export default function App() {
   const [archiveQuery, setArchiveQuery] = useState('')
   const [archiveResults, setArchiveResults] = useState([])
   const [archiveTotal, setArchiveTotal] = useState(0)
+  const [archiveError, setArchiveError] = useState(null)
   const [favourites, setFavourites] = useState([])
   const [stats, setStats] = useState(null)
   const [statsPeriod, setStatsPeriod] = useState('all')
@@ -1162,8 +1174,10 @@ export default function App() {
       changeView('projects')
       if (!projectsData) loadProjects()
     } else if (action.action === 'search') {
-      changeView('archive')
+      changeView('collections')
+      changeCollectionSource('archive')
       setArchiveQuery(action.query || '')
+      runArchiveSearch(action.query || '')
     }
   }
 
@@ -1193,13 +1207,43 @@ export default function App() {
       .catch(() => setSnapshots(prev => prev.filter(s => s.id !== snapId)))
   }
 
+  // Immediate search — used for the initial tab load and programmatic calls.
+  // A sequence counter drops any response that arrives after a newer request,
+  // so a slow query for "cap" can't overwrite the results for "captain".
+  const archiveSeq = useRef(0)
+  const archiveTimer = useRef(null)
+  const runArchiveSearch = (query) => {
+    const seq = ++archiveSeq.current
+    collectionsApi.searchArchive(query)
+      .then(d => {
+        if (seq !== archiveSeq.current) return  // stale response, ignore
+        setArchiveResults(d.sessions || []); setArchiveTotal(d.total || 0); setArchiveError(null)
+      })
+      .catch(err => {
+        if (seq !== archiveSeq.current) return
+        setArchiveResults([]); setArchiveTotal(0); setArchiveError(err.message || 'Search failed')
+      })
+  }
+
+  // Keystroke-driven search: update the input immediately, debounce the network
+  // call. Without this, typing "captain" fired seven requests; now only the
+  // pause at the end hits the backend.
   const searchArchive = (query) => {
     setArchiveQuery(query)
-    collectionsApi.searchArchive(query)
-      .then(d => { setArchiveResults(d.sessions || []); setArchiveTotal(d.total || 0) })
-      .catch(() => {})
+    if (archiveTimer.current) clearTimeout(archiveTimer.current)
+    archiveTimer.current = setTimeout(() => runArchiveSearch(query), 200)
   }
   const handleArchiveSearch = searchArchive
+
+  // Load the archive list when its tab opens, not only when the search box is
+  // focused. Without this the panel shows an empty list until the user clicks in.
+  useEffect(() => {
+    if (view === 'collections' && collectionSource === 'archive'
+        && !archiveResults.length && !archiveQuery) {
+      runArchiveSearch('')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, collectionSource])
 
   const handleToggleArchiveSelect = (id) => {
     setArchiveSelected(prev => {
@@ -1410,7 +1454,8 @@ export default function App() {
       // A session still starting will become managed, so keep it in that view.
       (controlFilter === 'managed' && s.control === 'starting') ||
       // Group cards have no single control value — show in all views.
-      s._isGroupCard))
+      s._isGroupCard) &&
+    (!folderFilter || s.cwd === folderFilter || s._isGroupCard))
 
   // Annotate with is_favourite so cards can show the star and sort to top.
   const favSet = new Set(favourites.map(f => f.id))
@@ -1702,6 +1747,32 @@ export default function App() {
                     🧭 Captain
                   </button>
                   )}
+                  {/* Folder filter — only rendered when there are 2+ distinct cwds */}
+                  {(() => {
+                    const folders = [...new Map(
+                      active.filter(s => s.cwd).map(s => [s.cwd, s.folder || s.cwd.split('/').pop() || s.cwd])
+                    ).entries()]
+                    if (folders.length < 2) return null
+                    return (
+                      <>
+                        <span className="toolbar-divider" />
+                        <select
+                          className={`folder-filter-select ${folderFilter ? 'active' : ''}`}
+                          value={folderFilter || ''}
+                          onChange={e => changeFolderFilter(e.target.value)}
+                          title="Filter by folder"
+                        >
+                          <option value="">📁 All folders</option>
+                          {folders.map(([cwd, label]) => (
+                            <option key={cwd} value={cwd}>{label}</option>
+                          ))}
+                        </select>
+                        {folderFilter && (
+                          <button className="folder-filter-clear" onClick={() => changeFolderFilter(null)} title="Clear folder filter">✕</button>
+                        )}
+                      </>
+                    )
+                  })()}
                 </div>
                 {/* View mode switcher — cards/list only; visible when not in wall view */}
                 {sessionViewMode !== 'wall' && (
@@ -1862,6 +1933,7 @@ export default function App() {
               archiveQuery={archiveQuery}
               archiveResults={archiveResults}
               archiveTotal={archiveTotal}
+              archiveError={archiveError}
               archiveSelected={archiveSelected}
               onArchiveSearch={handleArchiveSearch}
               onToggleArchiveSelect={handleToggleArchiveSelect}
@@ -2114,6 +2186,30 @@ export default function App() {
           )}
         </div>
         <AttentionBar sessions={sessions} selectedId={selected?.id} onPick={selectSession} />
+        <PaletteBar
+          open={paletteOpen}
+          onClose={() => setPaletteOpen(false)}
+          favourites={favourites}
+          onOpenSession={(id) => {
+            const session = sessions.find(s => s.id === id)
+            if (session) selectSession(session)
+            else api.getSession(id).then(d => { if (!d.error) selectSession({ id, ...d }) })
+          }}
+          onCommand={(cmd) => {
+            if (cmd.type === 'view') {
+              changeView(cmd.view)
+              if (cmd.view === 'collections' && !projectsData) loadProjects()
+              if (cmd.view === 'stats' && !stats) loadStats()
+            } else if (cmd.type === 'archive') {
+              changeView('collections')
+              changeCollectionSource('archive')
+            } else if (cmd.type === 'new') {
+              setLauncherOpen(true)
+            } else if (cmd.type === 'ask') {
+              setCmdBarOpen(true)
+            }
+          }}
+        />
         <CommandBar open={cmdBarOpen} onClose={() => setCmdBarOpen(false)} onAction={handleCmdBarAction} onOpenSession={(id) => {
           // Find the session and open it in the detail panel
           const session = sessions.find(s => s.id === id)

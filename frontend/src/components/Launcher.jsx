@@ -271,6 +271,146 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
   )
 }
 
+// Subsequence fuzzy match: every char of `q` appears in `text` in order.
+// Returns a score (lower = better) or -1 for no match. Contiguous runs and
+// early matches score better, so "auth" ranks "auth bug" above "a big truth".
+function fuzzyScore(text, q) {
+  if (!q) return 0
+  text = text.toLowerCase()
+  q = q.toLowerCase()
+  let ti = 0, score = 0, lastHit = -1
+  for (let qi = 0; qi < q.length; qi++) {
+    const c = q[qi]
+    const found = text.indexOf(c, ti)
+    if (found === -1) return -1
+    if (lastHit >= 0) score += found - lastHit  // gap penalty
+    else score += found                          // penalise late first hit
+    lastHit = found
+    ti = found + 1
+  }
+  return score
+}
+
+// ⌘K — fast local command palette. No network, no LLM. Fuzzy-matches open
+// sessions, favourites, and static navigation commands. Keyboard-first:
+// ↑/↓ to move, Enter to run the highlighted row. The AI concierge lives on ⌘J.
+function PaletteBar({ open, onClose, onOpenSession, onCommand, favourites = [] }) {
+  const { sessions } = useSessions()
+  const [query, setQuery] = useState('')
+  const [active, setActive] = useState(0)
+  const inputRef = useRef(null)
+  const listRef = useRef(null)
+
+  useEffect(() => {
+    if (open) {
+      setQuery('')
+      setActive(0)
+      setTimeout(() => inputRef.current?.focus(), 40)
+    }
+  }, [open])
+
+  // Static navigation commands. `run` is dispatched to the parent by key.
+  const commands = useMemo(() => [
+    { id: 'cmd:active', label: 'Go to Active grid', hint: 'view', run: () => onCommand({ type: 'view', view: 'active' }) },
+    { id: 'cmd:collections', label: 'Go to Collections', hint: 'view', run: () => onCommand({ type: 'view', view: 'collections' }) },
+    { id: 'cmd:archive', label: 'Go to Archive', hint: 'view', run: () => onCommand({ type: 'archive' }) },
+    { id: 'cmd:stats', label: 'Go to Stats', hint: 'view', run: () => onCommand({ type: 'view', view: 'stats' }) },
+    { id: 'cmd:stacks', label: 'Go to Stacks', hint: 'view', run: () => onCommand({ type: 'view', view: 'stacks' }) },
+    { id: 'cmd:settings', label: 'Open Settings', hint: 'view', run: () => onCommand({ type: 'view', view: 'settings' }) },
+    { id: 'cmd:new', label: 'New session…', hint: 'action', run: () => onCommand({ type: 'new' }) },
+    { id: 'cmd:ask', label: 'Ask the assistant… (⌘J)', hint: 'AI', run: () => onCommand({ type: 'ask' }) },
+  ], [onCommand])
+
+  // Build the ranked candidate list. Sessions + favourites + commands, all
+  // scored against the query. Empty query shows commands then recent sessions.
+  const rows = useMemo(() => {
+    const q = query.trim()
+    const favIds = new Set(favourites.map(f => f.id))
+    const sessionRows = sessions.map(s => ({
+      kind: 'session',
+      id: s.id,
+      label: s.title || s.name || s.id,
+      hint: s.status || '',
+      sub: showPath(s),
+      raw: s,
+    }))
+    const favRows = favourites
+      .filter(f => !sessions.some(s => s.id === f.id))
+      .map(f => ({ kind: 'session', id: f.id, label: f.title || f.id, hint: '★', sub: showPath(f), raw: f }))
+    const cmdRows = commands.map(c => ({ kind: 'command', id: c.id, label: c.label, hint: c.hint, run: c.run }))
+
+    if (!q) {
+      // No query: commands first, then most-recent sessions.
+      return [...cmdRows, ...sessionRows.slice(0, 8)]
+    }
+    const scored = []
+    for (const r of [...cmdRows, ...sessionRows, ...favRows]) {
+      const hay = r.kind === 'session' ? `${r.label} ${r.sub}` : r.label
+      const sc = fuzzyScore(hay, q)
+      if (sc >= 0) scored.push({ ...r, _score: sc + (r.kind === 'command' ? 0 : 2) })
+    }
+    scored.sort((a, b) => a._score - b._score)
+    return scored.slice(0, 12)
+  }, [query, sessions, favourites, commands])
+
+  useEffect(() => { setActive(0) }, [query])
+
+  const runRow = (row) => {
+    if (!row) return
+    if (row.kind === 'command') { row.run(); onClose() }
+    else if (row.kind === 'session') { onOpenSession(row.id); onClose() }
+  }
+
+  const onKeyDown = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, rows.length - 1)) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => Math.max(a - 1, 0)) }
+    else if (e.key === 'Enter') { e.preventDefault(); runRow(rows[active]) }
+    else if (e.key === 'Escape') { e.preventDefault(); onClose() }
+  }
+
+  // Keep the highlighted row in view.
+  useEffect(() => {
+    const el = listRef.current?.querySelector(`[data-idx="${active}"]`)
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [active])
+
+  if (!open) return null
+  return (
+    <div className="cmdbar-backdrop" onClick={onClose}>
+      <div className="cmdbar" onClick={(e) => e.stopPropagation()}>
+        <div className="cmdbar-input-row">
+          <span className="cmdbar-icon">⌘K</span>
+          <input ref={inputRef} className="cmdbar-input" value={query}
+                 onChange={(e) => setQuery(e.target.value)}
+                 onKeyDown={onKeyDown}
+                 placeholder="Jump to a session, view, or command…" />
+        </div>
+        <div className="palette-list" ref={listRef}>
+          {rows.length === 0 && (
+            <div className="palette-empty">No matches. Press ⌘J to ask the assistant.</div>
+          )}
+          {rows.map((r, i) => (
+            <div key={r.id} data-idx={i}
+                 className={`palette-row ${i === active ? 'active' : ''}`}
+                 onMouseEnter={() => setActive(i)}
+                 onClick={() => runRow(r)}>
+              <span className={`palette-kind palette-kind-${r.kind}`}>
+                {r.kind === 'command' ? '›' : '▸'}
+              </span>
+              <span className="palette-label">{r.label}</span>
+              {r.sub && <span className="palette-sub">{r.sub}</span>}
+              {r.hint && <span className="palette-hint">{r.hint}</span>}
+            </div>
+          ))}
+        </div>
+        <div className="palette-footer">
+          <span>↑↓ navigate · ↵ open · esc close · ⌘J assistant</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function CommandBar({ open, onClose, onAction, onOpenSession }) {
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
@@ -761,4 +901,4 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
 // list the panel was opened from.
 
 
-export { QuickCreate, CommandBar, NewSessionLauncher }
+export { QuickCreate, CommandBar, PaletteBar, NewSessionLauncher }

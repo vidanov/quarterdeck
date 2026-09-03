@@ -6,6 +6,7 @@ import shlex
 import signal
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import time
 from pathlib import Path
@@ -32,12 +33,15 @@ from . import screenshots
 from . import shell
 from . import tmux_manager as tmux
 from . import v3 as v3mod
+from .cache import LruCache
+from .logs import rotate_if_big
 from .config import (
     AGENTS_DIR, BUILTIN_AGENTS, CAPTURE_LINES, DEFAULT_AGENT_KEY, CORRECTIONS_DIR, DELIVERY_DIR, EFFORTS,
     GATES_DIR, HIDDEN_CWD_PREFIXES, KIRO_CLI_SETTINGS, MAX_CAPTURE_LINES, OWNERS_DIR, PORT, QUICK_COMMANDS,
     PASTES_DIR, PASTE_MIN_CHARS, PASTE_MIN_LINES, PASTE_RETENTION_DAYS,
     RECENT_SESSIONS_LIMIT, REMOTE_PORT, STATE_DIR, STACKS_DIR,
     SESSIONS_DIR, CREW_SESSIONS_DIR, TAIL_LINES, TERMINALS, VITE_PORT, WORKSPACE_AGENTS_SUBDIR,
+    REMOTE_LOG, REMOTE_LOG_MAX_BYTES,
     SETTINGS_FILE, SNAPSHOTS_FILE, FAVOURITES_FILE, SUMMARIES_DIR, SLASH_QUEUES_DIR,
     TEMPLATES_FILE,
     TEMPLATE_SNAPSHOTS_DIR,
@@ -108,10 +112,29 @@ async def lifespan(_app: FastAPI):
     # Install the verify-claim stop-hook script into ~/.osa-kiro/hooks/ so
     # the stop hook can call it without knowing the repo location.
     _install_claim_hook_script()
+    if rotate_if_big(REMOTE_LOG, REMOTE_LOG_MAX_BYTES):
+        print(f"[deck] rotated oversized {REMOTE_LOG}")
+
+    # Every sync endpoint runs in anyio's thread pool, and the poll path blocks
+    # in `tmux` subprocesses. The default 40 tokens is the ceiling on how many
+    # requests can be in flight at once: once they are all parked, every later
+    # request queues behind them — including /api/health — and the UI reports
+    # the backend as unreachable when it is only starved. Poll fan-out is per
+    # session card, so the ceiling has to sit above a realistic fleet.
+    try:
+        import anyio.to_thread
+        anyio.to_thread.current_default_thread_limiter().total_tokens = 120
+    except Exception as exc:  # pragma: no cover - anyio internals
+        print(f"[deck] could not raise thread limiter: {exc}", file=sys.stderr)
+
     if tmux.tmux_available():
         result = tmux.reconcile()
         if any(result.values()):
             print(f"[deck] tmux reconcile: {result}")
+        reaped = _reap_if_due(force=True)
+        if reaped and reaped.get("killed"):
+            print(f"[deck] reaped {len(reaped['killed'])} dead pane(s): "
+                  f"{', '.join(reaped['killed'])}")
     else:
         print("[deck] tmux not found — monitoring only, session control disabled")
 
@@ -165,6 +188,13 @@ async def lifespan(_app: FastAPI):
     # Stop the persistent summary worker subprocess.
     from . import acp_worker as _acp_worker
     _acp_worker.shutdown()
+
+
+# Summaries are best-effort background work, so they get a small fixed pool
+# rather than a thread each. max_workers=2 because acp_worker serialises the
+# actual query on one lock anyway — more workers would only queue deeper.
+_summary_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="summary")
+_SUMMARY_QUEUE_MAX = 8  # in-flight + queued; past this, skip and retry later
 
 
 def _auto_advance_loop():
@@ -281,7 +311,16 @@ def _check_auto_advance(last_seen: dict, summarising: set | None = None):
                     current_seq = 0
                 cached_seq = (existing or {}).get("last_seq", -1)
                 needs_summary = not existing or (current_seq > cached_seq + 2)
-                if needs_summary:
+                if needs_summary and (summarising is None
+                                      or len(summarising) < _SUMMARY_QUEUE_MAX):
+                    # Bounded on purpose. This used to start a thread per
+                    # finished turn, and every one of them then queued on
+                    # acp_worker's single lock with a 40s timeout — 38 sessions
+                    # finishing meant 38 parked threads and a summary backlog
+                    # measured in half-hours. Two workers drain it in order;
+                    # past the queue cap a summary is skipped and regenerated on
+                    # the session's next stop event, which is what the
+                    # last_seq check already handles.
                     if summarising is not None:
                         summarising.add(session_id)
                     def _run_summary(sid=session_id, seq=current_seq):
@@ -290,7 +329,7 @@ def _check_auto_advance(last_seen: dict, summarising: set | None = None):
                         finally:
                             if summarising is not None:
                                 summarising.discard(sid)
-                    threading.Thread(target=_run_summary, daemon=True).start()
+                    _summary_pool.submit(_run_summary)
             # Only advance if this session has auto-advance on
             if not settings.get(f"stack-auto:{session_id}"):
                 # Slash queue drains unconditionally — no opt-in needed.
@@ -759,7 +798,9 @@ def read_metadata(session_id: str) -> dict | None:
 
 # ponytail: per-session mtime+size cache for tail_jsonl; avoids re-reading unchanged files
 # on every poll cycle. Key: session_id, value: (mtime, size, lines_list).
-_tail_cache: dict[str, tuple[float, int, list[str]]] = {}
+# Capped, not a bare dict: each entry is up to 64KB of decoded text, and a bare
+# dict kept one per session the process ever read — 558 of them in this archive.
+_tail_cache: LruCache = LruCache(maxsize=64)
 
 def tail_jsonl(session_id: str, lines: int = TAIL_LINES) -> list[str]:
     """Read last N lines from .jsonl file, skipping the read when the file hasn't changed."""
@@ -1173,7 +1214,9 @@ def read_crew_transcript(session_id: str, after: int = -1,
 
 # Cached by (mtime, size), because the sessions listing asks for this on every
 # poll and the answer only changes when the file does.
-_last_message_cache: dict[str, tuple[float, int, str]] = {}
+# Capped for the same reason as _tail_cache. Only ever popped when the file
+# disappeared, so without a cap this grew for the life of the process.
+_last_message_cache: LruCache = LruCache(maxsize=64)
 
 
 def last_message(session_id: str, max_chars: int = LAST_MESSAGE_MAX) -> str:
@@ -1766,6 +1809,57 @@ def _sweep_if_due() -> None:
     tmux.sweep_turn_marks()
     tmux.sweep_approvals()
     tmux.sweep_gates()
+    # The LaunchAgent log: launchd will not rotate it and cannot be asked to.
+    if rotate_if_big(REMOTE_LOG, REMOTE_LOG_MAX_BYTES):
+        print(f"[deck] rotated {REMOTE_LOG.name} (kept its tail in "
+              f"{REMOTE_LOG.name}.1)", file=sys.stderr)
+    # Observers whose subprocess died: detach() only runs on the paths where we
+    # end a session ourselves, so an agent that exited on its own left its ACP
+    # side-channel — and its subprocess tree — behind for good.
+    try:
+        gone = acp_observer.prune()
+        if gone:
+            print(f"[deck] pruned {len(gone)} dead ACP observer(s): "
+                  f"{', '.join(gone)}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[deck] observer prune failed: {exc}", file=sys.stderr)
+
+
+_last_reap_ts: float = 0.0
+_REAP_INTERVAL = 3600.0  # seconds between dead-pane reaps
+
+
+def _reap_ttl() -> float:
+    """How long a dead pane is kept, in seconds. 0 disables the reaper."""
+    hours = _load_settings().get("reap_dead_panes_hours")
+    if hours is None:
+        return tmux.DEAD_PANE_TTL
+    try:
+        return max(0.0, float(hours)) * 3600
+    except (TypeError, ValueError):
+        return tmux.DEAD_PANE_TTL
+
+
+def _reap_if_due(force: bool = False) -> dict | None:
+    """Kill long-dead panes at most once an hour.
+
+    Cheap in absolute terms (one list-panes per live managed session) but not
+    free, and nothing about a corpse changes minute to minute — an hour is
+    plenty often for something measured in a day.
+    """
+    global _last_reap_ts
+    now = time.time()
+    if not force and now - _last_reap_ts < _REAP_INTERVAL:
+        return None
+    _last_reap_ts = now
+    ttl = _reap_ttl()
+    if ttl <= 0:
+        return None
+    try:
+        return tmux.reap_dead_panes(ttl=ttl)
+    except Exception as exc:  # housekeeping must never break a poll
+        print(f"[deck] dead-pane reap failed: {exc}", file=sys.stderr)
+        return None
 
 
 def _run_sessions_scan() -> dict:
@@ -1886,6 +1980,8 @@ def _do_sessions_scan() -> dict:
     # Sweeps scan directories with many files (turns: 1000+ items) and can take
     # 100-1800ms. Run at most once every 30 seconds rather than on every poll.
     _sweep_if_due()
+    # Dead panes are a slower leak on a longer clock — hourly, not every poll.
+    _reap_if_due()
     gated = tmux.gated_sessions()
     pending_owners = tmux.pending_owners()
     starting_ids = set(pending_owners.values())
@@ -3475,6 +3571,78 @@ def respond_to_prompt(session_id: str, payload: dict):
             return {"error": result.get("error", "send failed")}
         time.sleep(0.12)  # let the TUI redraw between navigation keys
     return {"ok": True, "keys": keys}
+
+
+# --- housekeeping: strays we did not spawn, corpses we did ---
+
+@app.get("/api/tmux/strays")
+def list_strays():
+    """Stray kiro-* tmux sessions reconcile() held back instead of adopting.
+
+    Non-empty means sessions Quarterdeck did not spawn are sitting on the tmux
+    server — typically a tmux-continuum restore replaying a saved snapshot.
+    They are deliberately left out of the session list until claimed, so the
+    UI does not present them as the user's work and the summary worker does not
+    queue one summary per resurrected agent.
+    """
+    strays = tmux.unclaimed_sessions()
+    return {"strays": strays, "count": len(strays),
+            "adopt_limit": tmux.ADOPT_LIMIT}
+
+
+@app.post("/api/tmux/strays/claim")
+def claim_strays(payload: dict | None = None):
+    """Adopt strays into managed state. Omit `names` to claim all of them."""
+    return tmux.claim_unclaimed((payload or {}).get("names"))
+
+
+@app.post("/api/tmux/strays/kill")
+def kill_strays(payload: dict | None = None):
+    """Kill strays. Dry run unless `dry_run: false` is passed explicitly.
+
+    These panes hold live kiro-cli processes. Unwanted is not the same as
+    empty — a resurrected pane can be parked in a half-finished login — so the
+    default answer is a list of what would go, not a kill.
+    """
+    body = payload or {}
+    return tmux.kill_unclaimed(body.get("names"),
+                               dry_run=bool(body.get("dry_run", True)))
+
+
+@app.post("/api/tmux/reap-idle")
+def reap_idle_sessions_now(payload: dict | None = None):
+    """Quit managed sessions alive but idle longer than `hours` (default 6).
+
+    Dry run unless `dry_run: false`. This ends running agents — the answer to
+    "kill what nobody is using" — so it never runs on a timer, and sessions
+    with a gate, a pending approval, or a queued stack item are left alone
+    whatever their idle time says.
+    """
+    body = payload or {}
+    try:
+        hours = float(body.get("hours", 6))
+    except (TypeError, ValueError):
+        return {"error": "hours must be a number"}
+    return tmux.reap_idle_sessions(idle=max(0.0, hours) * 3600,
+                                   dry_run=bool(body.get("dry_run", True)))
+
+
+@app.post("/api/tmux/reap")
+def reap_dead_panes_now(payload: dict | None = None):
+    """Kill tmux sessions whose process exited and stayed dead past the TTL.
+
+    Runs hourly on its own; this is the on-demand version. `hours` overrides
+    the configured TTL for this call, `dry_run: false` actually kills. Only
+    panes tmux reports as dead are eligible, so a running agent is never a
+    candidate whatever is passed.
+    """
+    body = payload or {}
+    hours = body.get("hours")
+    try:
+        ttl = max(0.0, float(hours)) * 3600 if hours is not None else _reap_ttl()
+    except (TypeError, ValueError):
+        return {"error": "hours must be a number"}
+    return tmux.reap_dead_panes(ttl=ttl, dry_run=bool(body.get("dry_run", True)))
 
 
 @app.get("/api/sessions/{session_id}/pane")
@@ -7041,12 +7209,15 @@ def launchagent_install(request: Request):
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>{Path.home()}/.osa-kiro/remote.log</string>
-  <key>StandardErrorPath</key><string>{Path.home()}/.osa-kiro/remote.log</string>
+  <key>StandardOutPath</key><string>{REMOTE_LOG}</string>
+  <key>StandardErrorPath</key><string>{REMOTE_LOG}</string>
 </dict>
 </plist>"""
     LAUNCHAGENT_PLIST.parent.mkdir(parents=True, exist_ok=True)
     LAUNCHAGENT_PLIST.write_text(plist)
+    # A KeepAlive agent that crash-loops appends a traceback per restart, so
+    # start it against a log of a known size rather than whatever was there.
+    rotate_if_big(REMOTE_LOG, REMOTE_LOG_MAX_BYTES)
     subprocess.run(["launchctl", "load", str(LAUNCHAGENT_PLIST)], capture_output=True)
     return {"ok": True, "path": str(LAUNCHAGENT_PLIST)}
 
@@ -8748,22 +8919,100 @@ frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 # Dock badge
 # ---------------------------------------------------------------------------
 
+_badge_label: str | None = None      # last label actually applied
+_badge_script_failures: int = 0       # consecutive osascript failures
+_BADGE_SCRIPT_LIMIT = 2               # after this, stop asking
+
+
+def _set_badge_native(label: str) -> bool:
+    """Set our own dock tile in-process. True if it was applied.
+
+    The backend runs inside the app process (see app.py), so the dock tile is
+    ours to set directly — no Apple event, and therefore no Automation
+    permission prompt and no subprocess. Dock tile updates are AppKit UI work,
+    so this hands the call to the main queue rather than doing it on uvicorn's
+    worker thread.
+    """
+    try:
+        from AppKit import NSApplication, NSOperationQueue
+    except Exception:
+        return False
+
+    def _apply():
+        try:
+            tile = NSApplication.sharedApplication().dockTile()
+            tile.setBadgeLabel_(label)
+            tile.display()
+        except Exception:
+            pass
+
+    try:
+        NSOperationQueue.mainQueue().addOperationWithBlock_(_apply)
+        return True
+    except Exception:
+        return False
+
+
+def _set_badge_via_script(label: str) -> None:
+    """Fallback for a backend running outside the app process.
+
+    `tell application "Quarterdeck"` is an Apple event, which macOS gates behind
+    the Automation permission. When that is denied, every badge change reopens
+    the same prompt and leaves an unreaped osascript behind — which is how a
+    count that flickers with each poll turned into a permission dialog on a
+    loop. So: run it on a thread, wait for it, and after two failures stop
+    trying for the rest of the process's life.
+    """
+    global _badge_script_failures
+    if _badge_script_failures >= _BADGE_SCRIPT_LIMIT:
+        return
+
+    def _run():
+        global _badge_script_failures
+        script = (f'tell application "Quarterdeck" to set the badge of the '
+                  f'dock tile to "{label}"')
+        try:
+            result = subprocess.run(["osascript", "-e", script],
+                                    capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            _badge_script_failures += 1
+            return
+        if result.returncode == 0:
+            _badge_script_failures = 0
+            return
+        _badge_script_failures += 1
+        if _badge_script_failures == _BADGE_SCRIPT_LIMIT:
+            print("[deck] dock badge via osascript failed twice — giving up on "
+                  "it for this run (Automation permission is the usual cause)",
+                  file=sys.stderr)
+
+    threading.Thread(target=_run, daemon=True, name="dock-badge").start()
+
+
 @app.post("/api/badge")
 async def set_dock_badge(req: Request):
     """Set the macOS dock badge to the given count (0 clears it)."""
-    body = await req.json()
-    count = int(body.get("count", 0))
-    import subprocess, sys
-    if sys.platform == "darwin":
-        label = str(count) if count > 0 else ""
-        script = (
-            f'tell application "Quarterdeck" to set the badge of the dock tile to "{label}"'
-            if label else
-            'tell application "Quarterdeck" to set the badge of the dock tile to ""'
-        )
-        subprocess.Popen(["osascript", "-e", script],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return {"ok": True}
+    global _badge_label
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    try:
+        count = max(0, int(body.get("count", 0)))
+    except (TypeError, ValueError):
+        return {"error": "count must be a number"}
+    # A label is a dock badge, not a readout: three digits is already more than
+    # the tile can show, and the value is interpolated into AppleScript below.
+    label = "999+" if count > 999 else (str(count) if count else "")
+    if label == _badge_label:
+        return {"ok": True, "unchanged": True}
+    _badge_label = label
+    if sys.platform != "darwin":
+        return {"ok": True, "skipped": "not darwin"}
+    if _set_badge_native(label):
+        return {"ok": True, "via": "dock-tile"}
+    _set_badge_via_script(label)
+    return {"ok": True, "via": "osascript"}
 
 
 import mimetypes as _mimetypes

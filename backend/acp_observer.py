@@ -122,8 +122,17 @@ def attach(session_id: str, cwd: str | None = None) -> bool:
     Called from a background thread in the dispatch path — must not block long.
     """
     with _registry_lock:
-        if session_id in _registry:
+        existing = _registry.get(session_id)
+        if existing is not None and existing.sess.is_alive:
             return True
+    if existing is not None:
+        # A dead observer used to be indistinguishable from a live one here:
+        # the id was in the registry, so attach() returned True and no new
+        # side-channel was ever started. The session's V3 streaming then stayed
+        # silently dead for as long as the process lived, and the corpse's
+        # subprocess tree (kiro-cli-chat → bun → tui.js) was never reaped.
+        log.info("ACP observer for %s is dead — replacing it", session_id)
+        detach(session_id)
 
     sess = ACPSession(engine="v2", timeout=15.0)
     store = _EventStore()
@@ -198,6 +207,42 @@ def detach_all() -> None:
         ids = list(_registry.keys())
     for sid in ids:
         detach(sid)
+
+
+def prune(live_session_ids: set[str] | None = None) -> list[str]:
+    """Detach observers whose subprocess died or whose session is gone.
+
+    detach() is called from the paths where Quarterdeck ends a session itself —
+    kill, handoff, takeover. Sessions do not only end that way: the agent can
+    exit on its own, kiro-cli can crash, someone can `tmux kill-session` from a
+    terminal. Every one of those left an entry here holding a live ACP
+    subprocess tree of its own, hundreds of megabytes each, for the life of the
+    backend. Ten sessions had grown to fifty-odd kiro-cli processes that way.
+
+    Pass `live_session_ids` to also drop observers for sessions that no longer
+    exist; with no argument only dead subprocesses are collected.
+    """
+    with _registry_lock:
+        candidates = list(_registry.items())
+    stale = []
+    for session_id, entry in candidates:
+        try:
+            alive = entry.sess.is_alive
+        except Exception:
+            alive = False
+        if not alive:
+            stale.append(session_id)
+        elif live_session_ids is not None and session_id not in live_session_ids:
+            stale.append(session_id)
+    for session_id in stale:
+        detach(session_id)
+    return stale
+
+
+def attached_count() -> int:
+    """How many observers are registered — for diagnostics."""
+    with _registry_lock:
+        return len(_registry)
 
 
 # ── observation ───────────────────────────────────────────────────────────────

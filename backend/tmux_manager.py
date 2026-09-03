@@ -16,10 +16,12 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 
+from .cache import LruCache
 from .config import (
     CAPTURE_LINES,
     DEFAULT_COLS,
@@ -41,7 +43,11 @@ from .config import (
     SPAWN_TIMEOUT,
     SPAWNS_DIR,
     STATE_DIR,
+    ADOPT_LIMIT,
+    DEAD_PANE_TTL,
+    TMUX_CONF,
     TMUX_PREFIX,
+    tmux_base_argv,
     TURN_MARK_TTL,
     TURNS_DIR,
     APPROVALS_DIR,
@@ -61,11 +67,46 @@ class TmuxError(RuntimeError):
 # get uninstalled while the server is running).
 _tmux_available_cache: bool | None = None
 
+_server_start_reported = False
+
+
+def _note_cold_start(args: tuple[str, ...]) -> None:
+    """Print a line when this process is the one starting the tmux server.
+
+    A cold start is the only moment a tmux config is read, and therefore the
+    only moment a plugin-driven session restore can fire. When a burst of
+    sessions appears seconds after Quarterdeck dispatched one, this line is the
+    difference between "Quarterdeck leaked spawns" and "Quarterdeck started a
+    server and something else filled it".
+    """
+    global _server_start_reported
+    if _server_start_reported or not args or args[0] != "new-session":
+        return
+    _server_start_reported = True
+    try:
+        probe = subprocess.run(
+            [*tmux_base_argv(), "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return  # diagnostics are never worth failing a spawn over
+    if probe.returncode == 0 and probe.stdout.strip():
+        return  # server already up — our config is not in play
+    conf = TMUX_CONF or "user config (QUARTERDECK_TMUX_CONF=none)"
+    print(f"[deck] cold-starting tmux server with {conf}", file=sys.stderr)
+
+
 def _tmux(*args: str, check: bool = True, timeout: float = 10) -> str:
-    """Run a tmux command and return stdout. Raises TmuxError on failure."""
+    """Run a tmux command and return stdout. Raises TmuxError on failure.
+
+    Every call carries `-f` with Quarterdeck's own server config — see
+    config.tmux_base_argv. tmux only reads it when it has to start a server,
+    so this changes nothing when one is already running.
+    """
+    _note_cold_start(args)
     try:
         result = subprocess.run(
-            ["tmux", *args], capture_output=True, text=True, timeout=timeout
+            [*tmux_base_argv(), *args], capture_output=True, text=True, timeout=timeout
         )
     except FileNotFoundError:
         raise TmuxError("tmux not installed — brew install tmux")
@@ -109,7 +150,9 @@ def list_tmux_sessions() -> list[str]:
     cached = _list_sessions_cache.get("data")
     if cached is not None and (now - _list_sessions_cache.get("ts", 0)) < 1.0:
         return cached
-    out = _tmux("list-sessions", "-F", "#{session_name}", check=False)
+    # Short timeout: this runs on the poll path, and a tmux server that has
+    # wedged must fail the poll rather than park a request thread for 10s.
+    out = _tmux("list-sessions", "-F", "#{session_name}", check=False, timeout=3)
     result = [line for line in out.splitlines() if line]
     _list_sessions_cache["data"] = result
     _list_sessions_cache["ts"] = now
@@ -127,7 +170,7 @@ def session_exists(name: str) -> bool:
 
 def pane_pid(name: str) -> int:
     """Pid of the process running in the session's pane, or 0 if unknown."""
-    out = _tmux("list-panes", "-t", name, "-F", "#{pane_pid}", check=False)
+    out = _tmux("list-panes", "-t", name, "-F", "#{pane_pid}", check=False, timeout=3)
     first = out.strip().splitlines()
     try:
         return int(first[0])
@@ -141,7 +184,7 @@ def pane_dead(name: str) -> bool:
     Sessions are created with remain-on-exit so a crashed kiro-cli leaves its
     error visible in the pane instead of taking the tmux session down with it.
     """
-    out = _tmux("list-panes", "-t", name, "-F", "#{pane_dead}", check=False)
+    out = _tmux("list-panes", "-t", name, "-F", "#{pane_dead}", check=False, timeout=3)
     return out.strip().startswith("1")
 
 
@@ -157,7 +200,10 @@ def attach_command(session_id: str) -> str:
 # --- state persistence ---
 
 def _empty_state() -> dict:
-    return {"managed": {}, "pending": {}}
+    # `unclaimed` holds stray kiro-* tmux sessions reconcile() refused to adopt
+    # because too many showed up at once — see ADOPT_LIMIT. Keyed by tmux name,
+    # because a stray has no entry anywhere else to hang the record off.
+    return {"managed": {}, "pending": {}, "unclaimed": {}}
 
 
 def load_state() -> dict:
@@ -171,7 +217,7 @@ def load_state() -> dict:
     if not isinstance(data, dict):
         return _empty_state()
     state = _empty_state()
-    for key in ("managed", "pending"):
+    for key in ("managed", "pending", "unclaimed"):
         if isinstance(data.get(key), dict):
             state[key] = data[key]
     return state
@@ -1179,7 +1225,10 @@ def resize(session_id: str, cols: int, rows: int) -> dict:
 # ponytail: TTL cache for capture-pane results; avoids spawning a subprocess on
 # every poll for each managed session. TTL of 0.4s is shorter than the 0.5s
 # poll-busy-ms minimum, so a fast poll still sees fresh output.
-_capture_cache: dict[str, tuple[float, int, str]] = {}  # session_id -> (ts, lines, result)
+# session_id -> (ts, lines, result). Capped: an entry can hold MAX_CAPTURE_LINES
+# of pane text, and entries are only dropped when their tmux session is gone —
+# so a long-lived process accumulated one per session it ever captured.
+_capture_cache: LruCache = LruCache(maxsize=64)
 _CAPTURE_TTL = 0.4  # seconds
 
 def capture(session_id: str, lines: int = CAPTURE_LINES) -> str:
@@ -1199,7 +1248,8 @@ def capture(session_id: str, lines: int = CAPTURE_LINES) -> str:
     if not session_exists(name):
         _capture_cache.pop(session_id, None)
         return ""
-    result = _tmux("capture-pane", "-p", "-t", name, "-S", f"-{lines}", check=False)
+    result = _tmux("capture-pane", "-p", "-t", name, "-S", f"-{lines}", check=False,
+                   timeout=4)
     _capture_cache[session_id] = (now, lines, result)
     return result
 
@@ -1271,18 +1321,41 @@ def reconcile() -> dict:
             state["managed"].pop(session_id)
             dropped.append(session_id)
 
-    for name in live:
-        if not name.startswith(TMUX_PREFIX):
-            continue
-        session_id = name[len(TMUX_PREFIX):]
-        if session_id in state["managed"]:
-            continue
-        meta = _read_meta(session_id) or {}
-        state["managed"][session_id] = {
-            "tmux": name, "cwd": meta.get("cwd", ""),
-            "spawned_at": time.time(), "adopted": True,
-        }
-        adopted.append(session_id)
+    # Adoption, bounded. A stray kiro-* session is normally our own work after a
+    # backend restart, so adopting it is right. A pile of them arriving at once
+    # is not: tmux-continuum's restore recreated 38 sessions from an eight-day
+    # old snapshot, reconcile adopted every one, and the UI then presented them
+    # as the user's sessions while the summary worker queued one per session.
+    # Over the limit, nothing is adopted — the strays are recorded instead, and
+    # claiming or killing them is a decision a human makes.
+    strays = [name for name in live
+              if name.startswith(TMUX_PREFIX)
+              and name[len(TMUX_PREFIX):] not in state["managed"]]
+    now = time.time()
+    unclaimed = state["unclaimed"]
+    for name in list(unclaimed):
+        if name not in live:
+            unclaimed.pop(name)  # gone; nothing left to decide about
+    fresh = [name for name in strays if name not in unclaimed]
+
+    if len(fresh) > ADOPT_LIMIT:
+        for name in fresh:
+            unclaimed[name] = {"first_seen": now, "reason": "burst"}
+        print(f"[deck] {len(fresh)} stray tmux sessions appeared at once — not "
+              f"adopting them. Quarterdeck did not spawn these, and something "
+              f"that restores tmux sessions (tmux-continuum) is the usual "
+              f"cause. See GET /api/tmux/strays.", file=sys.stderr)
+        held = list(fresh)
+    else:
+        held = []
+        for name in fresh:
+            session_id = name[len(TMUX_PREFIX):]
+            meta = _read_meta(session_id) or {}
+            state["managed"][session_id] = {
+                "tmux": name, "cwd": meta.get("cwd", ""),
+                "spawned_at": now, "adopted": True,
+            }
+            adopted.append(session_id)
 
     save_state(state)
 
@@ -1304,7 +1377,188 @@ def reconcile() -> dict:
     return {
         "dropped": dropped, "adopted": adopted,
         "resolved": resolved, "pending": still_pending,
+        "unclaimed": held,
     }
+
+
+def last_activity(session_id: str) -> float:
+    """Newest mtime that says something happened in this session. 0 if unknown.
+
+    Three sources, because none of them is complete on its own: the stop hook's
+    turn mark only exists for hooked agents, the .lock only moves when kiro-cli
+    rewrites it, and the .jsonl moves on every exchange but is absent for a
+    session that has not said anything yet.
+    """
+    ts = turn_ended_at(session_id)
+    if not _session_id_ok(session_id):
+        return ts
+    for path in (SESSIONS_DIR / f"{session_id}.jsonl",
+                 SESSIONS_DIR / f"{session_id}.lock"):
+        try:
+            ts = max(ts, path.stat().st_mtime)
+        except OSError:
+            pass
+    return ts
+
+
+def reap_idle_sessions(idle: float, dry_run: bool = True) -> dict:
+    """Quit managed sessions that are alive but have done nothing for `idle`.
+
+    This one ends *running* agents, which is why it is a dry run unless told
+    otherwise and never runs on a timer. Fifty idle kiro-cli processes are what
+    a load average of 30 is made of, and none of them is doing anything — but
+    "idle" is measured from the outside, and a session parked mid-task looks
+    exactly like a session nobody wants.
+
+    Deliberately skipped: sessions with a gate, a pending approval, or a queued
+    stack item (someone is mid-workflow), dead panes (the other reaper's job),
+    and anything whose last activity cannot be established at all — an unknown
+    timestamp is not evidence of idleness.
+    """
+    if idle <= 0:
+        return {"ok": True, "disabled": True, "killed": [], "kept": []}
+    live = set(list_tmux_sessions())
+    now = time.time()
+    gated = gated_sessions()
+    awaiting = {a.get("session_id") for a in pending_approvals()}
+    killed, candidates, kept = [], [], []
+    for session_id, entry in list(load_state()["managed"].items()):
+        name = entry.get("tmux", tmux_name(session_id))
+        if name not in live or pane_dead(name):
+            continue
+        if session_id in gated or session_id in awaiting or stack_get(session_id):
+            kept.append({"session_id": session_id, "why": "mid-workflow"})
+            continue
+        seen = last_activity(session_id)
+        if not seen:
+            kept.append({"session_id": session_id, "why": "no activity timestamp"})
+            continue
+        age = now - seen
+        if age < idle:
+            kept.append({"session_id": session_id, "why": f"active {age / 60:.0f}m ago"})
+            continue
+        candidates.append({"session_id": session_id, "idle_minutes": round(age / 60)})
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_kill": candidates, "kept": kept}
+    for c in candidates:
+        # Graceful: /quit lets kiro-cli flush, so the session stays resumable.
+        result = kill(c["session_id"], graceful=True)
+        killed.append({**c, "mode": result.get("mode", "none")})
+    return {"ok": True, "dry_run": False, "killed": killed, "kept": kept}
+
+
+def unclaimed_sessions() -> list[dict]:
+    """Stray kiro-* tmux sessions reconcile() held back instead of adopting.
+
+    Live check included: a stray the user has since killed by hand is not worth
+    reporting, and the record is dropped the next time reconcile runs.
+    """
+    live = set(list_tmux_sessions())
+    out = []
+    for name, entry in load_state()["unclaimed"].items():
+        if name not in live:
+            continue
+        session_id = name[len(TMUX_PREFIX):]
+        meta = _read_meta(session_id) or {}
+        out.append({
+            "tmux": name,
+            "session_id": session_id,
+            "cwd": meta.get("cwd", ""),
+            "first_seen": entry.get("first_seen", 0),
+            "reason": entry.get("reason", ""),
+            "dead_pane": pane_dead(name),
+            "attach": attach_command(session_id),
+        })
+    return sorted(out, key=lambda r: r["first_seen"])
+
+
+def claim_unclaimed(names: list[str] | None = None) -> dict:
+    """Adopt held-back strays into managed state — the "these are mine" answer."""
+    live = set(list_tmux_sessions())
+    state = load_state()
+    targets = [n for n in (names if names is not None else list(state["unclaimed"]))
+               if n in state["unclaimed"] and n in live]
+    now = time.time()
+    for name in targets:
+        session_id = name[len(TMUX_PREFIX):]
+        meta = _read_meta(session_id) or {}
+        state["managed"][session_id] = {
+            "tmux": name, "cwd": meta.get("cwd", ""),
+            "spawned_at": now, "adopted": True,
+        }
+        state["unclaimed"].pop(name, None)
+    save_state(state)
+    return {"ok": True, "claimed": targets}
+
+
+def kill_unclaimed(names: list[str] | None = None, dry_run: bool = True) -> dict:
+    """Kill held-back strays — the "these are not mine" answer.
+
+    Defaults to a dry run on purpose. These sessions hold live kiro-cli
+    processes that nobody asked Quarterdeck to start, but "nobody asked for it"
+    is not the same as "nothing of value is in it": a resurrected pane can be
+    sitting in a half-finished login, and the caller should see the list before
+    it goes. Restricted to recorded strays, so this can never reach a managed
+    session or a tmux session belonging to something else entirely.
+    """
+    live = set(list_tmux_sessions())
+    state = load_state()
+    targets = [n for n in (names if names is not None else list(state["unclaimed"]))
+               if n in state["unclaimed"] and n in live]
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_kill": targets}
+    for name in targets:
+        _tmux("kill-session", "-t", name, check=False)
+    state = load_state()
+    for name in targets:
+        state["unclaimed"].pop(name, None)
+    save_state(state)
+    return {"ok": True, "dry_run": False, "killed": targets}
+
+
+def reap_dead_panes(ttl: float = DEAD_PANE_TTL, dry_run: bool = False) -> dict:
+    """Kill tmux sessions whose process has already exited and stayed dead.
+
+    remain-on-exit keeps a crashed kiro-cli's last screen readable instead of
+    taking the tmux session down with it, which is the right default and also a
+    slow leak: the corpses accumulate, each one still a tmux session, still
+    listed, still counted. Only panes tmux itself reports as dead are eligible,
+    so nothing running is ever killed — and the first sighting only records the
+    time of death, so a corpse always gets the full ttl before it goes.
+
+    ttl <= 0 disables the reaper entirely.
+    """
+    if ttl <= 0:
+        return {"ok": True, "disabled": True, "killed": [], "watching": []}
+    live = set(list_tmux_sessions())
+    state = load_state()
+    now = time.time()
+    killed, watching, revived = [], [], []
+    for session_id, entry in list(state["managed"].items()):
+        name = entry.get("tmux", tmux_name(session_id))
+        if name not in live:
+            continue
+        if not pane_dead(name):
+            if entry.pop("dead_since", None) is not None:
+                revived.append(session_id)  # resumed in place; forget the mark
+            continue
+        dead_since = entry.get("dead_since")
+        if not dead_since:
+            entry["dead_since"] = now
+            watching.append(session_id)
+            continue
+        if now - dead_since < ttl:
+            watching.append(session_id)
+            continue
+        if dry_run:
+            killed.append(session_id)
+            continue
+        _tmux("kill-session", "-t", name, check=False)
+        state["managed"].pop(session_id, None)
+        killed.append(session_id)
+    save_state(state)
+    return {"ok": True, "dry_run": dry_run, "killed": killed,
+            "watching": watching, "revived": revived}
 
 
 def managed_sessions() -> dict:

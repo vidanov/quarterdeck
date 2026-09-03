@@ -27,6 +27,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+
+# Same tmux server config the backend uses (see backend/config.py): a cold
+# start that reads ~/.tmux.conf can trigger tmux-continuum's session restore
+# and fill the machine with resurrected agents.
+_TMUX_CONF = Path.home() / ".osa-kiro" / "tmux.conf"
+
+
+def _tmux_argv() -> list[str]:
+    return ["tmux", "-f", str(_TMUX_CONF)] if _TMUX_CONF.is_file() else ["tmux"]
+
 KIRO_CLI = "kiro-cli"
 V3_SESSIONS_BASE = Path.home() / ".kiro" / "sessions"
 ROADMAP = Path(__file__).parent.parent / "docs" / "ROADMAP.md"
@@ -204,7 +214,7 @@ def run_probe() -> dict:
         # ── Step 1: spawn a throwaway V3 session via tmux ─────────────────
         log("Spawning throwaway V3 session in tmux...")
         tmux_proc = subprocess.run([
-            "tmux", "new-session", "-d", "-s", tmux_name,
+            *_tmux_argv(), "new-session", "-d", "-s", tmux_name,
             "-x", "220", "-y", "50", "-c", scratch,
             "--",
             KIRO_CLI, "chat", "--agent-engine", "v3",
@@ -260,7 +270,7 @@ def run_probe() -> dict:
         log(f"messages.jsonl lines after load: {findings['messages_jsonl_after_load']}")
 
         # ── Step 3: check tmux session still alive ─────────────────────────
-        check = subprocess.run(["tmux", "has-session", "-t", tmux_name],
+        check = subprocess.run([*_tmux_argv(), "has-session", "-t", tmux_name],
                                capture_output=True)
         findings["tmux_survives"] = check.returncode == 0
         log(f"tmux session survives: {findings['tmux_survives']}")
@@ -270,7 +280,7 @@ def run_probe() -> dict:
             log("Driving a turn from the tmux pane...")
             probe.events.clear()
             subprocess.run([
-                "tmux", "send-keys", "-t", tmux_name,
+                *_tmux_argv(), "send-keys", "-t", tmux_name,
                 "What is 2+2?", "Enter",
             ])
             log(f"Waiting {TIMEOUT_EVENTS}s for ACP events...")
@@ -296,7 +306,7 @@ def run_probe() -> dict:
 
     finally:
         # Clean up tmux session
-        subprocess.run(["tmux", "kill-session", "-t", tmux_name],
+        subprocess.run([*_tmux_argv(), "kill-session", "-t", tmux_name],
                        capture_output=True)
         # Leave scratch + V3 session dir for a few minutes in case needed
         log(f"Probe complete. Scratch kept at {scratch} for inspection.")
