@@ -539,6 +539,12 @@ def install(app) -> None:
             #      the local-token check.
             if request.method == "OPTIONS":
                 return await call_next(request)
+            # The dev-mode token bootstrap must be reachable without a token —
+            # it is how the Vite browser page obtains the token in the first
+            # place. The endpoint itself enforces DECK_DEV and loopback-only,
+            # and returns 404 in the installed app.
+            if request.url.path == "/api/dev/token":
+                return await call_next(request)
             if request.url.path.startswith("/app/") or request.url.path == "/app":
                 return await call_next(request)
             if request.url.path in PUBLIC_PATHS:
