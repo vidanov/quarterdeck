@@ -22,6 +22,7 @@ import logging
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,11 @@ DEFAULT_RPC_TIMEOUT = 30.0
 
 # How long the client waits for the subprocess to die after kill().
 TERMINATE_TIMEOUT = 3.0
+
+# How many trailing stderr lines to retain for crash diagnostics.  The pipe is
+# drained continuously: an unread stderr pipe fills its ~64KB OS buffer and
+# then blocks the child mid-write, which looks like a hang or a silent exit.
+STDERR_TAIL_LINES = 50
 
 
 class ACPError(Exception):
@@ -89,6 +95,14 @@ class ACPSession:
 
         self._proc: subprocess.Popen | None = None
         self._reader_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+
+        # Trailing stderr of the current (or last) subprocess, plus its exit
+        # code once it has been reaped.  Without this, an ACP subprocess that
+        # dies during the handshake surfaces only as "connection closed".
+        self._stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+        self._stderr_lock = threading.Lock()
+        self._exit_code: int | None = None
 
         # Pending RPC calls: id → (result_holder, event)
         self._pending: dict[int, tuple[dict, threading.Event]] = {}
@@ -143,10 +157,17 @@ class ACPSession:
         )
         self._alive = True
         self._stop_event.clear()
+        with self._stderr_lock:
+            self._stderr_tail.clear()
+        self._exit_code = None
         self._reader_thread = threading.Thread(
             target=self._reader_loop, daemon=True, name="acp-reader"
         )
         self._reader_thread.start()
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_loop, daemon=True, name="acp-stderr"
+        )
+        self._stderr_thread.start()
 
     def stop(self) -> None:
         """Terminate the subprocess and clean up."""
@@ -160,6 +181,10 @@ class ACPSession:
             try:
                 self._proc.wait(timeout=TERMINATE_TIMEOUT)
             except subprocess.TimeoutExpired:
+                pass
+            try:
+                self._exit_code = self._proc.poll()
+            except Exception:
                 pass
             self._proc = None
         # Unblock any waiting callers with a closed error
@@ -181,6 +206,21 @@ class ACPSession:
             return False
         return self._proc.poll() is None
 
+    @property
+    def exit_code(self) -> int | None:
+        """Exit status of the subprocess, or None while it is still running."""
+        return self._exit_code
+
+    def stderr_tail(self, limit: int = STDERR_TAIL_LINES) -> str:
+        """Last stderr lines from the subprocess, newest last, newline-joined.
+
+        Empty when the subprocess wrote nothing to stderr.  This is the only
+        place the reason for an unexpected close is recorded.
+        """
+        with self._stderr_lock:
+            lines = list(self._stderr_tail)
+        return "\n".join(lines[-limit:])
+
     # ── RPC ──────────────────────────────────────────────────────────────────
 
     def call(
@@ -197,7 +237,11 @@ class ACPSession:
         is not running.
         """
         if not self.is_alive:
-            raise RuntimeError("ACPSession not started or subprocess died")
+            tail = self.stderr_tail(limit=5)
+            detail = f" (rc={self._exit_code}): {tail}" if tail else ""
+            raise RuntimeError(
+                f"ACPSession not started or subprocess died{detail}"
+            )
         t = timeout if timeout is not None else self._default_timeout
         with self._pending_lock:
             rid = self._next_id
@@ -310,6 +354,27 @@ class ACPSession:
             except Exception:
                 log.exception("ACP callback %r raised", cb)
 
+    def _stderr_loop(self) -> None:
+        """Drain the subprocess stderr into the bounded tail buffer.
+
+        Runs for the life of the subprocess.  Draining is mandatory, not just
+        diagnostic: a piped-but-unread stderr blocks the child once the OS
+        buffer fills.
+        """
+        stream = self._proc.stderr if self._proc else None
+        if stream is None:
+            return
+        try:
+            for raw in stream:
+                line = raw.rstrip()
+                if not line:
+                    continue
+                with self._stderr_lock:
+                    self._stderr_tail.append(line)
+                log.debug("ACP stderr: %s", line)
+        except Exception:
+            log.debug("ACP stderr loop exited", exc_info=True)
+
     def _reader_loop(self) -> None:
         """Read lines from the subprocess stdout and dispatch."""
         try:
@@ -357,6 +422,13 @@ class ACPSession:
             # proc.poll() still returns None — don't flip _alive in that case.
             if self._proc and self._proc.poll() is not None:
                 self._alive = False
+                self._exit_code = self._proc.poll()
+                if not self._stop_event.is_set():
+                    log.warning(
+                        "ACP subprocess exited unexpectedly rc=%s: %s",
+                        self._exit_code,
+                        self.stderr_tail() or "<no stderr output>",
+                    )
             self._stop_event.set()
             # Unblock any waiters
             with self._pending_lock:

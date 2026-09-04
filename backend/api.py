@@ -1318,6 +1318,91 @@ def pane_awaiting_approval(pane: str) -> bool:
 FOOTER_LINES = 12
 
 
+# What kiro-cli prints when its agent link drops mid-session. The TUI itself
+# survives: the composer still takes keystrokes, but every submit dies the same
+# way and never reaches the JSONL, so the session cannot be recovered in place.
+# Observed twice on 2026-09-04 (sessions 4ed031ea and 43be4af1) — retrying by
+# hand reproduced the banner immediately both times, which is why reanimate
+# respawns rather than nudging.
+LINK_DROPPED_BANNER = "Agent connection closed unexpectedly"
+
+
+def _pane_body(pane: str) -> list[str]:
+    """Pane lines above the footer rule, i.e. the conversation itself.
+
+    kiro-cli always draws a full-width rule between the transcript and its
+    footer, which is a steadier landmark than a fixed line count: the footer
+    grows and shrinks with wrapping.
+    """
+    lines = pane.rstrip().splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip().startswith("──"):
+            return lines[:i]
+    return lines
+
+
+def pane_link_dropped(pane: str) -> bool:
+    """True when the last thing the TUI said is that its agent link closed.
+
+    Deliberately anchored to the *last* transcript line rather than anywhere in
+    the tail: the banner stays in scrollback, and a session that recovered has
+    agent output below it. Anchoring this way makes the state self-clearing.
+    """
+    if not pane or LINK_DROPPED_BANNER not in pane:
+        return False
+    for line in reversed(_pane_body(pane)):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return stripped.endswith(LINK_DROPPED_BANNER)
+    return False
+
+
+def pane_unsent_prompt(pane: str) -> str:
+    """The prompt sitting above the link-dropped banner, never delivered.
+
+    A submit into a dropped link writes nothing to the JSONL, so the pane is
+    the only copy of what the user asked. Reanimate carries it across to the
+    resumed session — without this, the last thing you typed is simply gone.
+
+    The discriminator is the turn rule, not indentation. kiro-cli renders a
+    user prompt as unprefixed text directly below a full-width rule, and its
+    own prose exactly the same way minus the rule — so requiring the rule is
+    what stops the agent's half-finished narration being fed back to it as a
+    question. Observed on 43be4af1: a drop mid-answer left "No new replies
+    since I posted mine…" as the last unprefixed block, which an
+    indentation-only reading carried as a prompt.
+
+    Returns "" whenever the block above the banner is not provably a prompt.
+    Carrying nothing loses a retype; carrying the wrong thing puts words in
+    the user's mouth.
+    """
+    if not pane_link_dropped(pane):
+        return ""
+    body = _pane_body(pane)
+    # Walk back past the banner itself, then collect until a stop mark.
+    idx = len(body) - 1
+    while idx >= 0 and not body[idx].strip().endswith(LINK_DROPPED_BANNER):
+        idx -= 1
+    collected: list[str] = []
+    stopped_on_rule = False
+    for line in reversed(body[:idx]):
+        stripped = line.strip()
+        if not stripped:
+            if collected:
+                break
+            continue
+        if stripped.startswith("──"):
+            stopped_on_rule = True
+            break
+        if stripped.startswith(("●", "╰")):
+            break
+        collected.append(stripped)
+    if not stopped_on_rule:
+        return ""
+    return " ".join(reversed(collected))[:2000]
+
+
 def pane_status(pane: str) -> str | None:
     """Status read straight off the TUI, or None if the pane is inconclusive.
 
@@ -1331,6 +1416,11 @@ def pane_status(pane: str) -> str | None:
         return None
     if pane_awaiting_approval(pane):
         return "awaiting-approval"
+    # Before idle: a link-dropped session shows the same composer line as an
+    # idle one, so matching idle first would hide the stall behind "waiting for
+    # you" — and the session would sit there accepting input that goes nowhere.
+    if pane_link_dropped(pane):
+        return "stalled"
     # Only the footer, and matched at the start of a line. Searching the whole
     # tail for "Kiro is working" caught kiro-cli's own tip — "Type while Kiro is
     # working to steer it mid-turn" — which sits above the composer of an *idle*
@@ -1367,6 +1457,13 @@ def detect_status(session_id: str, lock_data: dict | None, pane: str = "") -> st
     # V3 sessions without ACP: use messages.jsonl payload.type
     if v3mod.is_v3_session(session_id):
         return v3mod.detect_status(session_id)
+
+    # kiro-cli drops its .lock when the agent link dies, while its TUI keeps
+    # running. That made every link-dropped session report Done — no live
+    # actions on the card, and the pane below it still showing a live composer.
+    # The pane is the only witness to this state, so it is consulted first.
+    if pane and pane_link_dropped(pane):
+        return "stalled"
 
     if lock_data is None:
         return "done"
@@ -2072,6 +2169,63 @@ def _do_sessions_scan() -> dict:
             "delivery_notes": _delivery_notes(session_id,
                                                record.get("agent", "") if is_managed else "",
                                                raw_cwd),
+        })
+
+    # Second pass (1.5): managed sessions that have no lock file.
+    # These are alive tmux windows whose kiro process has finished (no .lock),
+    # so pass 1 (lock-file scan) never sees them. They must appear in the grid
+    # regardless of sort order or RECENT_SESSIONS_LIMIT cutoff.
+    for session_id, record in managed.items():
+        if session_id in seen_ids:
+            continue
+        if not record.get("alive"):
+            continue  # dead tmux session — handled by the mtime pass below
+
+        seen_ids.add(session_id)
+        meta = read_metadata(session_id)
+        if meta is None:
+            continue
+
+        raw_cwd = meta.get("cwd") or ""
+        if any(raw_cwd.startswith(p) for p in HIDDEN_CWD_PREFIXES):
+            continue
+
+        raw_title = clean_title(meta_title(meta) or "Untitled", session_id)
+        pane = tmux.capture(session_id, 30)
+        status = detect_status(session_id, None, pane)
+
+        sessions.append({
+            "id": session_id,
+            "title": raw_title[:200],
+            "name": (raw_title[:120] if raw_title and raw_title != "Untitled"
+                     else (Path(raw_cwd).name if raw_cwd else "")),
+            "folder": Path(raw_cwd).name if raw_cwd else "",
+            "cwd": raw_cwd,
+            "cwd_display": shorten_path(raw_cwd),
+            "status": status,
+            "last_message": (last_message(session_id)
+                             if status in LAST_MESSAGE_STATUSES else ""),
+            "control": "managed",
+            "attach": record["attach"],
+            "agent": record.get("agent", ""),
+            "status_source": "pane",
+            "gated": session_id in gated,
+            "created_at": meta.get("created_at") or "",
+            "updated_at": meta.get("updated_at") or "",
+            "last_activity": get_last_activity(session_id),
+            "parent_id": meta.get("parent_id") or "",
+            "branch_point": meta.get("branch_point"),
+            "summary": (_read_summary(session_id) or {}).get("text") or "",
+            "stalled": _is_stalled(session_id, status, meta),
+            "trust_until": _trust_until(session_id) or None,
+            "context_pct": _context_pct(pane),
+            "subagent_count": 0,
+            **_ownership_fields(session_id),
+            **dict(zip(("model", "effort"), _session_model_effort(meta))),
+            "sq_depth": len(sq_list(session_id)),
+            "delivery_notes": _delivery_notes(session_id, record.get("agent", ""), raw_cwd),
+            "jsonl_mtime": (SESSIONS_DIR / f"{session_id}.jsonl").stat().st_mtime
+                           if (SESSIONS_DIR / f"{session_id}.jsonl").exists() else 0,
         })
 
     # Second pass: recent non-active sessions (by modification time)
@@ -3067,6 +3221,188 @@ def resume_session(session_id: str, payload: dict | None = None):
     if not result.get("ok"):
         return {"error": result.get("error", "spawn failed")}
     return {"ok": True, "id": session_id, "attach": tmux.attach_command(session_id)}
+
+
+def _trim_dangling_tool_use(session_id: str) -> dict:
+    """Drop a trailing JSONL turn that asks for a tool and never got a result.
+
+    Bedrock rejects a conversation whose final turn carries a toolUse with no
+    matching toolUseResult, so a resume from that file fails on its first turn.
+    Most stalls happen between turns and leave a perfectly valid file — session
+    43be4af1 ended on a clean AssistantMessage — so this only fires when the
+    shape is actually broken, and keeps a .bak when it does.
+    """
+    path = SESSIONS_DIR / f"{session_id}.jsonl"
+    if not path.exists():
+        return {"trimmed": False, "reason": "no jsonl"}
+    try:
+        lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+    except OSError as exc:
+        return {"trimmed": False, "reason": str(exc)}
+    if not lines:
+        return {"trimmed": False, "reason": "empty jsonl"}
+
+    try:
+        last = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        # A half-written line is itself unusable; dropping it is the repair.
+        pass
+    else:
+        used: set[str] = set()
+        answered: set[str] = set()
+
+        def walk(node, in_result=False):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    hit = in_result or key in ("toolUseResults", "toolUseResult", "toolResult")
+                    if key == "toolUseId" and isinstance(value, str):
+                        (answered if hit else used).add(value)
+                    else:
+                        walk(value, hit)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item, in_result)
+
+        walk(last)
+        if not (used - answered):
+            return {"trimmed": False, "reason": "trailing turn is complete"}
+
+    backup = path.with_suffix(".jsonl.bak")
+    try:
+        backup.write_text("\n".join(lines) + "\n")
+        path.write_text(("\n".join(lines[:-1]) + "\n") if len(lines) > 1 else "")
+    except OSError as exc:
+        return {"trimmed": False, "reason": str(exc)}
+    return {"trimmed": True, "backup": str(backup), "dropped_lines": 1}
+
+
+def _kill_and_resume(session_id: str, cwd: str, spawn_kwargs: dict | None = None) -> str:
+    """Stop a session's process tree and start it again on the same id.
+
+    Extracted from restart_visible_sessions — every wait in here answers a race
+    that bit once already: the lock has to be gone before tmux dies, the tmux
+    session has to be gone before spawn runs, and the managed.json entry has to
+    be gone or spawn refuses with "already managed".
+
+    Returns "ok" or an error string.
+    """
+    lock_data = read_lock(session_id)
+    pid = lock_data.get("pid") if lock_data else None
+    if pid and is_process_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.time() + 5
+            while is_process_alive(pid) and time.time() < deadline:
+                time.sleep(0.1)
+        except Exception:
+            pass
+
+    lock_path = SESSIONS_DIR / f"{session_id}.lock"
+    lock_deadline = time.time() + 5
+    while lock_path.exists() and time.time() < lock_deadline:
+        time.sleep(0.1)
+    if lock_path.exists():
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+    tmux_session_name = tmux.tmux_name(session_id)
+    if tmux.session_exists(tmux_session_name):
+        tmux._tmux("kill-session", "-t", tmux_session_name, check=False)
+        dead_deadline = time.time() + 3
+        while tmux.session_exists(tmux_session_name) and time.time() < dead_deadline:
+            time.sleep(0.05)
+
+    state = tmux.load_state()
+    if session_id in state["managed"]:
+        state["managed"].pop(session_id, None)
+        tmux.save_state(state)
+
+    result = tmux.spawn(cwd, resume_id=session_id, **(spawn_kwargs or {}))
+    return "ok" if result.get("ok") else result.get("error", "failed")
+
+
+# How long to wait for a reanimated session to reach its composer before giving
+# up on delivering the carried prompt. A resume replays the JSONL, so a long
+# conversation takes a while to be ready.
+REANIMATE_READY_TIMEOUT = 90.0
+
+# How often to look at the pane while waiting for that composer.
+REANIMATE_POLL_SECONDS = 1.0
+
+
+def _deliver_carried_prompt(session_id: str, text: str,
+                            timeout: float = REANIMATE_READY_TIMEOUT) -> bool:
+    """Send *text* once the reanimated session is ready to take it.
+
+    Waiting for idle rather than sending straight away matters: a resume
+    replays the whole JSONL first, and text typed into the composer before the
+    TUI is ready is dropped on the floor. Returns whether it was delivered.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(REANIMATE_POLL_SECONDS)
+        if pane_status(tmux.capture(session_id)) == "idle":
+            tmux.send_text(session_id, text)
+            print(f"[deck] reanimate: carried prompt delivered to {session_id}")
+            return True
+    print(f"[deck] reanimate: {session_id} never reached its composer, "
+          f"prompt not sent: {text[:120]!r}", file=sys.stderr)
+    return False
+
+
+@app.post("/api/sessions/{session_id}/reanimate")
+def reanimate_session(session_id: str, payload: dict | None = None):
+    """Recover a session whose agent link dropped, keeping its id and history.
+
+    Respawn, not a nudge. Typing into a dropped link reproduces the banner
+    instead of reconnecting — verified by hand on 43be4af1, twice — so there is
+    nothing to be gained by sending keystrokes first.
+
+    The prompt the user typed into the dead link exists nowhere but the pane, so
+    it is read off the pane before the kill and re-sent once the resumed session
+    reaches its composer. `prompt` in the body overrides what was scraped;
+    `carry: false` skips the re-send. `force` allows reanimating a session the
+    pane does not report as stalled.
+    """
+    payload = payload or {}
+    meta = read_metadata(session_id)
+    if not meta:
+        return {"error": "Session not found"}
+    cwd = meta.get("cwd", "")
+    if not cwd:
+        return {"error": "No cwd for session"}
+
+    pane = tmux.capture(session_id)
+    stalled = pane_link_dropped(pane)
+    if not stalled and not payload.get("force"):
+        lock_data = read_lock(session_id)
+        if lock_data and is_process_alive(lock_data.get("pid") or 0):
+            return {"error": "Session is running — reanimate is for a dropped link"}
+        return {"error": "Session does not show a dropped link — use resume or restart"}
+
+    carry = ""
+    if payload.get("carry", True):
+        carry = str(payload.get("prompt") or pane_unsent_prompt(pane))
+
+    repair = _trim_dangling_tool_use(session_id)
+    outcome = _kill_and_resume(session_id, cwd, _spawn_kwargs(payload, session_id))
+    if outcome != "ok":
+        return {"error": outcome, "repair": repair}
+
+    if carry:
+        threading.Thread(target=_deliver_carried_prompt,
+                         args=(session_id, carry), daemon=True).start()
+
+    return {
+        "ok": True,
+        "id": session_id,
+        "was_stalled": stalled,
+        "carried_prompt": carry,
+        "repair": repair,
+        "attach": tmux.attach_command(session_id),
+    }
 
 
 @app.post("/api/sessions/{session_id}/duplicate")
@@ -5720,53 +6056,8 @@ def restart_visible_sessions(payload: dict):
             if not cwd:
                 results[session_id] = "no cwd"
                 continue
-            # Kill if running
-            lock_data = read_lock(session_id)
-            pid = lock_data.get("pid") if lock_data else None
-            if pid and is_process_alive(pid):
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    deadline = time.time() + 5
-                    while is_process_alive(pid) and time.time() < deadline:
-                        time.sleep(0.1)
-                except Exception:
-                    pass
-            # Wait for kiro-cli to release its lock before killing tmux.
-            # The lock disappearing is the signal that the process has exited
-            # cleanly; without this wait the resumed process can start and
-            # find a stale lock that makes it treat the session as already
-            # running. Mirrors the same pattern in takeover_session.
-            lock_path = SESSIONS_DIR / f"{session_id}.lock"
-            lock_deadline = time.time() + 5
-            while lock_path.exists() and time.time() < lock_deadline:
-                time.sleep(0.1)
-            if lock_path.exists():
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
-            # Kill the tmux session itself so spawn's session_exists check
-            # doesn't see a stale session and refuse with "already managed".
-            # remain-on-exit keeps the pane alive after the process dies, so
-            # the tmux session outlives the kill above.
-            tmux_session_name = tmux.tmux_name(session_id)
-            if tmux.session_exists(tmux_session_name):
-                tmux._tmux("kill-session", "-t", tmux_session_name, check=False)
-                # Wait for the tmux session to actually disappear — the kill is
-                # async and spawn's session_exists check races it without this.
-                dead_deadline = time.time() + 3
-                while tmux.session_exists(tmux_session_name) and time.time() < dead_deadline:
-                    time.sleep(0.05)
-            # Also remove from managed.json so spawn() doesn't get confused
-            # by a stale "already managed" entry during the brief window
-            # between kill and the new session appearing.
-            state = tmux.load_state()
-            if session_id in state["managed"]:
-                state["managed"].pop(session_id, None)
-                tmux.save_state(state)
-            # Resume under tmux
-            result = tmux.spawn(cwd, resume_id=session_id)
-            results[session_id] = "ok" if result.get("ok") else result.get("error", "failed")
+            results[session_id] = _kill_and_resume(session_id, cwd)
+            continue
         except Exception as e:
             results[session_id] = str(e)
     ok_count = sum(1 for v in results.values() if v == "ok")

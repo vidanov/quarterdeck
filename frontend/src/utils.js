@@ -5,6 +5,9 @@ export const STATUS_CONFIG = {
   running: { color: '#16a34a', label: '● Running', bg: '#f0fdf4' },
   'awaiting-approval': { color: '#ca8a04', label: '◉ Awaiting', bg: '#fefce8' },
   idle: { color: '#64748b', label: '○ Idle', bg: '#f8fafc' },
+  // Link dropped: the TUI is up but nothing you type reaches the agent. Amber
+  // rather than red — the conversation is intact and one click recovers it.
+  stalled: { color: '#d97706', label: '⚠ Link lost', bg: '#fffbeb' },
   done: { color: '#94a3b8', label: '○ Done', bg: '#ffffff' },
   error: { color: '#dc2626', label: '✕ Error', bg: '#fef2f2' },
 }

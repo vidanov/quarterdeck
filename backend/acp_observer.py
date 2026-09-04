@@ -160,7 +160,8 @@ def attach(session_id: str, cwd: str | None = None) -> bool:
         sess.initialize(client_name="quarterdeck-observer")
         acp_sid = sess.new_session(cwd=cwd)
     except (ACPError, TimeoutError, RuntimeError) as exc:
-        log.warning("ACP attach failed for %s: %s", session_id, exc)
+        log.warning("ACP attach failed for %s: %s (stderr: %s)", session_id, exc,
+                    sess.stderr_tail(limit=10) or "<none>")
         try:
             sess.stop()
         except Exception:
@@ -231,6 +232,12 @@ def prune(live_session_ids: set[str] | None = None) -> list[str]:
         except Exception:
             alive = False
         if not alive:
+            try:
+                reason = entry.sess.stderr_tail(limit=10) or "<no stderr output>"
+                rc = entry.sess.exit_code
+            except Exception:
+                reason, rc = "<unavailable>", None
+            log.warning("ACP observer for %s died rc=%s: %s", session_id, rc, reason)
             stale.append(session_id)
         elif live_session_ids is not None and session_id not in live_session_ids:
             stale.append(session_id)
