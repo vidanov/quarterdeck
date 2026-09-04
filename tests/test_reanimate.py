@@ -81,6 +81,19 @@ cmux · auto · 13%                    ~/kiro-workspace/scratch/ai-ready-repo ·
  ask a question or describe a task
 """
 
+# A resumed session whose agent backend never answers. Different banner, same
+# state: live composer in front of an agent that cannot take work. Real capture
+# from 43be4af1 after a successful --resume-id.
+PANE_AGENT_NOT_RESPONDING = """\
+● Cancelled
+──────────────────────────────────────────────────────────────
+  ping
+● Agent not responding. The backend may be misconfigured or unresponsive. Press Ctrl+C to cancel.
+──────────────────────────────────────────────────────────────
+cmux · auto · 8%                     ~/kiro-workspace/scratch/ai-ready-repo · (docs/gate3)
+ ask a question or describe a task
+"""
+
 PANE_WORKING = """\
 ● Reading files
 ──────────────────────────────────────────────────────────────
@@ -108,6 +121,15 @@ class TestPaneLinkDropped:
     def test_empty_pane_is_not_a_drop(self):
         assert pane_link_dropped("") is False
 
+    def test_agent_not_responding_counts_as_the_same_state(self):
+        """Resuming does not clear it, so it has to be visible as a stall.
+
+        Without this the session fell through to the missing-lock branch and
+        reported Done — running, unusable, and hidden from the grid.
+        """
+        assert pane_link_dropped(PANE_AGENT_NOT_RESPONDING) is True
+        assert pane_status(PANE_AGENT_NOT_RESPONDING) == "stalled"
+
 
 class TestPaneStatus:
     def test_dropped_link_reports_stalled_not_idle(self):
@@ -133,6 +155,9 @@ class TestUnsentPrompt:
 
     def test_no_prompt_when_the_link_is_up(self):
         assert pane_unsent_prompt(PANE_IDLE) == ""
+
+    def test_prompt_above_a_not_responding_banner_is_recovered(self):
+        assert pane_unsent_prompt(PANE_AGENT_NOT_RESPONDING) == "ping"
 
     def test_agent_prose_is_not_carried_as_a_prompt(self):
         """A drop mid-answer leaves the agent's own words above the banner.
