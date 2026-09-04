@@ -1324,7 +1324,27 @@ FOOTER_LINES = 12
 # Observed twice on 2026-09-04 (sessions 4ed031ea and 43be4af1) — retrying by
 # hand reproduced the banner immediately both times, which is why reanimate
 # respawns rather than nudging.
-LINK_DROPPED_BANNER = "Agent connection closed unexpectedly"
+# There is more than one way for kiro-cli to say its agent is unusable while
+# the TUI carries on. The close is what a dropped link looks like mid-session;
+# the not-responding line is what a *resumed* session shows when the agent
+# backend never answers at all — observed on 43be4af1 after a successful
+# --resume-id, which is why resuming did not help. Both leave a live composer
+# in front of an agent that cannot take work, so both are the same state here.
+LINK_DROPPED_BANNERS = (
+    "Agent connection closed unexpectedly",
+    "Agent not responding. The backend may be misconfigured or unresponsive",
+)
+
+# Kept for callers and tests that name the original single banner.
+LINK_DROPPED_BANNER = LINK_DROPPED_BANNERS[0]
+
+
+def _banner_on(line: str) -> str:
+    """The stall banner this line ends with, or "" if it is not one."""
+    for banner in LINK_DROPPED_BANNERS:
+        if banner in line:
+            return banner
+    return ""
 
 
 def _pane_body(pane: str) -> list[str]:
@@ -1348,13 +1368,13 @@ def pane_link_dropped(pane: str) -> bool:
     the tail: the banner stays in scrollback, and a session that recovered has
     agent output below it. Anchoring this way makes the state self-clearing.
     """
-    if not pane or LINK_DROPPED_BANNER not in pane:
+    if not pane or not any(b in pane for b in LINK_DROPPED_BANNERS):
         return False
     for line in reversed(_pane_body(pane)):
         stripped = line.strip()
         if not stripped:
             continue
-        return stripped.endswith(LINK_DROPPED_BANNER)
+        return bool(_banner_on(stripped))
     return False
 
 
@@ -1382,7 +1402,7 @@ def pane_unsent_prompt(pane: str) -> str:
     body = _pane_body(pane)
     # Walk back past the banner itself, then collect until a stop mark.
     idx = len(body) - 1
-    while idx >= 0 and not body[idx].strip().endswith(LINK_DROPPED_BANNER):
+    while idx >= 0 and not _banner_on(body[idx].strip()):
         idx -= 1
     collected: list[str] = []
     stopped_on_rule = False
@@ -3216,6 +3236,18 @@ def resume_session(session_id: str, payload: dict | None = None):
     kwargs = _spawn_kwargs(payload, session_id)
     if title and not kwargs.get("task"):
         kwargs["task"] = title
+
+    # spawn() refuses a resume whenever a tmux session of that name exists, and
+    # it exists for exactly the sessions most in need of resuming: a stalled
+    # agent leaves the window and the TUI behind with no lock file. Resume then
+    # failed with "already managed" and left the user no way forward from the
+    # UI. Clearing the corpse first is what the caller meant by resume.
+    if tmux.session_exists(tmux.tmux_name(session_id)):
+        outcome = _kill_and_resume(session_id, cwd, kwargs)
+        if outcome != "ok":
+            return {"error": outcome}
+        return {"ok": True, "id": session_id, "replaced": True,
+                "attach": tmux.attach_command(session_id)}
 
     result = tmux.spawn(cwd, resume_id=session_id, **kwargs)
     if not result.get("ok"):
