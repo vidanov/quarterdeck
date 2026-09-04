@@ -169,6 +169,33 @@ class TestUnsentPrompt:
         assert pane_unsent_prompt(PANE_DROPPED_MID_ANSWER) == ""
 
 
+# ── status when no lock file exists ───────────────────────────────────────────
+
+class TestDetectStatusWithoutLock:
+    """A missing .lock is not evidence a session ended.
+
+    kiro-cli drops it when the agent link dies, and a resumed session can run
+    without ever writing one: 43be4af1 was caught mid-turn, thinking, with no
+    lock at all — and reported "done", which is what hid it from the grid.
+    """
+
+    def test_working_pane_beats_a_missing_lock(self, monkeypatch):
+        monkeypatch.setattr(api_mod.acp_observer, "is_attached", lambda sid: False)
+        monkeypatch.setattr(api_mod.v3mod, "is_v3_session", lambda sid: False)
+        assert api_mod.detect_status("sid", None, PANE_WORKING) == "thinking"
+
+    def test_stalled_pane_beats_a_missing_lock(self, monkeypatch):
+        monkeypatch.setattr(api_mod.acp_observer, "is_attached", lambda sid: False)
+        monkeypatch.setattr(api_mod.v3mod, "is_v3_session", lambda sid: False)
+        assert api_mod.detect_status("sid", None, PANE_DROPPED_AFTER_PROMPT) == "stalled"
+
+    def test_no_lock_and_no_pane_is_still_done(self, monkeypatch):
+        """With nothing to go on, a missing lock keeps its old meaning."""
+        monkeypatch.setattr(api_mod.acp_observer, "is_attached", lambda sid: False)
+        monkeypatch.setattr(api_mod.v3mod, "is_v3_session", lambda sid: False)
+        assert api_mod.detect_status("sid", None, "") == "done"
+
+
 # ── jsonl repair ──────────────────────────────────────────────────────────────
 
 CLEAN_TURN = {"kind": "AssistantMessage", "data": {"content": [{"text": "All done."}]}}

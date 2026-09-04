@@ -1478,14 +1478,19 @@ def detect_status(session_id: str, lock_data: dict | None, pane: str = "") -> st
     if v3mod.is_v3_session(session_id):
         return v3mod.detect_status(session_id)
 
-    # kiro-cli drops its .lock when the agent link dies, while its TUI keeps
-    # running. That made every link-dropped session report Done — no live
-    # actions on the card, and the pane below it still showing a live composer.
-    # The pane is the only witness to this state, so it is consulted first.
-    if pane and pane_link_dropped(pane):
-        return "stalled"
-
     if lock_data is None:
+        # A missing .lock is not evidence the session ended. kiro-cli drops it
+        # when its agent link dies, and a resumed session can run without ever
+        # writing one — 43be4af1 was observed mid-turn, thinking, with no lock
+        # at all. Reporting "done" for those hid live sessions from the grid
+        # and left stalled ones with no recovery action on the card.
+        #
+        # The pane is the witness the lock is not: it shows the composer, the
+        # working line, or the stall banner as of right now. Only when the pane
+        # says nothing definite does a missing lock mean the session is over.
+        from_pane = pane_status(pane)
+        if from_pane:
+            return from_pane
         return "done"
 
     pid = lock_data.get("pid")
