@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response as FastAPIResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response as FastAPIResponse, StreamingResponse
 
 from . import acp_observer
 from . import audit
