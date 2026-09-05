@@ -7009,18 +7009,37 @@ def switch_profile(payload: dict):
     data_path = _profile_data_path(name)
     if not data_path.exists():
         return {"error": f"Profile '{name}' not found"}
-    # Auto-save current as _previous
     current_rows = _dump_auth_rows()
-    if current_rows:
-        prev_path = _profile_data_path("_previous")
-        prev_path.write_text("\n".join(json.dumps(r) for r in current_rows) + "\n")
-        prev_path.chmod(0o600)  # contains live OAuth tokens — owner-only
-    # Restore target auth tokens
     try:
         rows = [json.loads(line) for line in data_path.read_text().splitlines() if line.strip()]
-        _restore_auth_rows(rows)
     except Exception as e:
         return {"error": f"Failed to switch: {e}"}
+
+    # Switching to the profile that is already live used to rewrite auth_kv
+    # anyway, and _restore_auth_rows starts with DELETE FROM auth_kv. Every
+    # running kiro-cli reads its bearer token from that table, so the rewrite
+    # pulled the credentials out from under every live session on the machine:
+    # the agent link died mid-turn with "Agent connection closed unexpectedly",
+    # then recovered on its own once the session re-read the new-but-valid
+    # token. Captain calls this endpoint whenever Bosun starts, which is why
+    # launching Captain dropped every Quarterdeck session at once.
+    #
+    # A switch to the active profile has nothing to do, so it now does nothing.
+    # A real switch still rewrites the table — it has to — and still costs the
+    # live sessions their link, which is inherent to swapping credentials.
+    already_live = bool(current_rows) and _token_fingerprint(rows) != "" and \
+        _token_fingerprint(rows) == _token_fingerprint(current_rows)
+
+    if not already_live:
+        # Auto-save current as _previous
+        if current_rows:
+            prev_path = _profile_data_path("_previous")
+            prev_path.write_text("\n".join(json.dumps(r) for r in current_rows) + "\n")
+            prev_path.chmod(0o600)  # contains live OAuth tokens — owner-only
+        try:
+            _restore_auth_rows(rows)
+        except Exception as e:
+            return {"error": f"Failed to switch: {e}"}
     meta_path = _profile_meta_path(name)
     email = "?"
     profile_arn = ""
@@ -7117,7 +7136,8 @@ def switch_profile(payload: dict):
             meta_path.write_text(json.dumps(existing_meta))
         except Exception:
             pass
-    return {"ok": True, "name": name, "email": email, "profile_arn": profile_arn}
+    return {"ok": True, "name": name, "email": email, "profile_arn": profile_arn,
+            "unchanged": already_live}
 
 
 @app.post("/api/profiles/delete")
