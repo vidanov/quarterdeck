@@ -287,3 +287,55 @@ class TestToolCallNotification:
         assert len(received["ToolCall"]) == 1
         assert len(received["ToolCallUpdate"]) == 1
         assert len(received["session/update"]) == 1
+
+
+# ── stderr capture ────────────────────────────────────────────────────────────
+
+def _session_with_stderr(lines: list[str], poll: int | None = None) -> ACPSession:
+    """Session whose mock proc emits *lines* on stderr and polls as *poll*."""
+    proc = MagicMock()
+    proc.poll.return_value = poll
+    proc.stdin = MagicMock()
+    proc.stdout = iter([])
+    proc.stderr = iter(lines)
+    sess = ACPSession()
+    with patch("backend.acp_session.subprocess.Popen", return_value=proc):
+        sess.start()
+    for _ in range(100):                       # let the drain thread run
+        if sess.stderr_tail():
+            break
+        time.sleep(0.01)
+    return sess
+
+
+class TestStderrCapture:
+    """The reason for an unexpected close must survive the subprocess."""
+
+    def test_stderr_lines_are_captured(self):
+        sess = _session_with_stderr(["boom: bad flag\n", "\n", "second line\n"])
+        tail = sess.stderr_tail()
+        assert "boom: bad flag" in tail
+        assert "second line" in tail
+        assert "\n\n" not in tail          # blank lines dropped
+
+    def test_stderr_tail_is_bounded(self):
+        from backend.acp_session import STDERR_TAIL_LINES
+        sess = _session_with_stderr([f"line {i}\n" for i in range(STDERR_TAIL_LINES + 20)])
+        for _ in range(100):
+            if len(sess.stderr_tail().splitlines()) >= STDERR_TAIL_LINES:
+                break
+            time.sleep(0.01)
+        lines = sess.stderr_tail().splitlines()
+        assert len(lines) == STDERR_TAIL_LINES
+        assert lines[-1] == f"line {STDERR_TAIL_LINES + 19}"
+
+    def test_call_on_dead_process_reports_stderr(self):
+        """A died-during-handshake subprocess names its reason, not just 'died'."""
+        sess = _session_with_stderr(["auth: token expired\n"], poll=1)
+        with pytest.raises(RuntimeError) as exc:
+            sess.call("initialize", {})
+        assert "auth: token expired" in str(exc.value)
+
+    def test_stderr_tail_empty_when_nothing_written(self):
+        sess = _live_session()
+        assert sess.stderr_tail() == ""

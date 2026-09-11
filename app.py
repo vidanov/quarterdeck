@@ -187,6 +187,7 @@ def handle_port_clash(clash: str, port: int) -> int:
 
 
 _uvicorn_server: "uvicorn.Server | None" = None
+_runtime_diagnostics = None
 
 
 def start_backend(port: int):
@@ -195,7 +196,9 @@ def start_backend(port: int):
     project_root = Path(__file__).parent
     sys.path.insert(0, str(project_root))
     from backend.api import app
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    observed_app = _runtime_diagnostics.wrap(app) if _runtime_diagnostics else app
+    config = uvicorn.Config(observed_app, host="127.0.0.1", port=port,
+                            log_level="info", access_log=False)
     _uvicorn_server = uvicorn.Server(config)
     _uvicorn_server.run()
 
@@ -414,6 +417,14 @@ def _handle_open_url(url: str) -> None:
 
 
 def main():
+    global _runtime_diagnostics
+    from backend.runtime_diagnostics import install
+    log_name = 'runtime-dev' if os.environ.get('DECK_DEV') else 'runtime'
+    try:
+        _runtime_diagnostics, _diagnostics_stop = install(
+            Path.home() / '.osa-kiro' / 'logs', log_name)
+    except OSError as exc:
+        print(f'[deck] persistent logging unavailable: {exc}', file=sys.stderr)
     missing = preflight()
     if missing:
         # Say so plainly rather than letting every action fail one by one.
@@ -481,6 +492,18 @@ def main():
     def install_menus():
         install_edit_menu()
         install_session_menu(window)
+        # Only the GUI process owns a dock tile. Import Cocoa here, after
+        # pywebview initializes it, and perform all tile work on its main queue.
+        from Foundation import NSOperationQueue
+        from AppKit import NSApplication
+        from backend.dock_badge import badge
+
+        def apply_badge(label):
+            tile = NSApplication.sharedApplication().dockTile()
+            tile.setBadgeLabel_(label)
+            tile.display()
+
+        badge.install(NSOperationQueue.mainQueue().addOperationWithBlock_, apply_badge)
 
     # local_token was set during keychain pre-warm above; reused here for injection.
     def inject_local_token():
@@ -535,48 +558,17 @@ def main():
 
     window.events.loaded += inject_local_token
 
-    # Dock badge — show count of sessions that need attention.
-    # Runs in a daemon thread so it dies with the app.
-    def _badge_worker():
-        import urllib.request
-        import json as _json
-        _last = None
-        while True:
-            time.sleep(5)
-            try:
-                req = urllib.request.Request(
-                    f"http://127.0.0.1:{port}/api/sessions",
-                    headers={"X-Local-Token": local_token},
-                )
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    data = _json.loads(resp.read())
-                count = sum(
-                    1 for s in data.get("sessions", [])
-                    if s.get("status") in ("awaiting-approval", "error")
-                )
-                if count != _last:
-                    _last = count
-                    label = str(count) if count > 0 else ""
-                    # AppKit is not thread-safe. Mutating NSApplication from a
-                    # background thread corrupts KVO state and causes crashes
-                    # (AttributeError: NSKVONotifying_NSApplication has no
-                    # attribute abortModal_). Dispatch to the main queue instead,
-                    # same pattern as install_edit_menu / install_session_menu.
-                    try:
-                        from Foundation import NSOperationQueue
-                        def _set_badge(lbl=label):
-                            try:
-                                from AppKit import NSApplication
-                                NSApplication.sharedApplication().dockTile().setBadgeLabel_(lbl)
-                            except Exception:
-                                pass
-                        NSOperationQueue.mainQueue().addOperationWithBlock_(_set_badge)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    threading.Thread(target=_badge_worker, daemon=True).start()
+    # Dock badge is driven entirely by the frontend, which POSTs /api/badge
+    # whenever its "needs you" count changes (see App.jsx). The backend sets its
+    # own dock tile in-process there (backend.dock_badge), debounced against the
+    # last applied label. A second writer here — a daemon thread polling
+    # /api/sessions on its own cadence and counting only awaiting-approval+error
+    # — computed a *different* number from the same state and wrote the same
+    # tile, so the two raced and the badge flipped between two values whenever a
+    # session needed approval ("multiple badge numbers"). It also added a
+    # /api/sessions poll every 5s to a backend whose thread pool is the thing
+    # that starves under poll fan-out. One writer, one count: keep the frontend
+    # path and drop this one.
 
     # Register quarterdeck:// URL scheme handler
     _url_handler_instance = None  # module-level reference would shadow; keep local
@@ -607,8 +599,15 @@ def main():
 
     webview.start(install_menus, private_mode=False)
 
-    # Window closed — shut down the backend gracefully so the socket is released
+    # Window closed — clear the dock badge (its only writer, the frontend, is
+    # gone now, so a leftover count would sit on the dock until the OS redraws
+    # the tile), then shut the backend down gracefully so the socket is released
     # immediately instead of lingering in TIME_WAIT for minutes.
+    try:
+        from AppKit import NSApplication
+        NSApplication.sharedApplication().dockTile().setBadgeLabel_("")
+    except Exception:
+        pass
     stop_backend()
     backend_thread.join(timeout=3)
 
