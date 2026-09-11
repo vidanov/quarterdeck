@@ -22,6 +22,9 @@ export const renameSession = (id, title) => postJSON(`/api/sessions/${id}/rename
 export const killSession = (id) => post(`/api/sessions/${id}/kill`)
 export const resumeSession = (id) => post(`/api/sessions/${id}/resume`)
 export const takeoverSession = (id) => post(`/api/sessions/${id}/takeover`)
+// Recover a session whose agent link dropped: same id, same history, and the
+// prompt that died with the link is re-sent once the resumed session is ready.
+export const reanimateSession = (id) => post(`/api/sessions/${id}/reanimate`)
 export const branchSession = (id) => post(`/api/sessions/${id}/branch`)
 export const branchAt = (id, afterSeq) => postJSON(`/api/sessions/${id}/branch-at`, { after_seq: afterSeq })
 export const getMessages = (id, after = -1, limit = 200) =>

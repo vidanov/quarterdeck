@@ -221,10 +221,29 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
     openTimer.current = setTimeout(() => onClick(session), CARD_DOUBLE_CLICK_MS)
   }
 
+  // Reanimate lives on the card rather than in App because it is a recovery
+  // action, not navigation: the card is the only place the stalled state is
+  // visible, and the session keeps its id so nothing above needs to re-key.
+  const [reanimating, setReanimating] = useState(false)
+  const handleReanimate = (e) => {
+    e.stopPropagation()
+    setReanimating(true)
+    api.reanimateSession(session.id)
+      .then(d => {
+        if (d.error) { notify(d.error, 'error'); return }
+        notify(d.carried_prompt
+          ? 'Reanimated — your last prompt will be re-sent when it is ready'
+          : 'Reanimated', 'info')
+      })
+      .catch(() => notify('Could not reanimate — backend unreachable', 'error'))
+      .finally(() => setReanimating(false))
+  }
+
   const classes = ['card']
   if (isSelected) classes.push('card-selected')
   if (session.status === 'awaiting-approval' && !acked) classes.push('card-awaiting')
   if (session.status === 'thinking' || session.status === 'running') classes.push('card-thinking')
+  if (session.status === 'stalled') classes.push('card-stalled')
   if (notified) classes.push('card-notified')
 
   return (
@@ -261,6 +280,12 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
           )}
           {/* A spawn that never correlated has no session id, so it needs its
               own dismissal path — without one the card was unremovable. */}
+          {session.status === 'stalled' && (
+            <button className="card-reanimate" onClick={handleReanimate} disabled={reanimating}
+                    title="Reanimate: the agent link dropped. Restarts on the same id, keeps the conversation, and re-sends the prompt that never arrived.">
+              {reanimating ? '⟳' : '⚡'}
+            </button>
+          )}
           {session.nonce ? (
             <button className="card-kill" onClick={(e) => { e.stopPropagation(); onCancelPending(session.nonce) }}
                     title="Give up on this spawn and kill its tmux session">×</button>
@@ -764,7 +789,7 @@ function ListRow({ s, a, selected, onSelect, onOpenFull, onKill, onCancelPending
     </li>
   )
 }
-const STATUS_ORDER = { 'awaiting-approval': 0, 'thinking': 1, 'running': 2, 'idle': 3, 'done': 4, 'error': 5 }
+const STATUS_ORDER = { 'awaiting-approval': 0, 'stalled': 1, 'thinking': 2, 'running': 3, 'idle': 4, 'done': 5, 'error': 6 }
 
 function ListView({ needsYou, working, selected, onSelect, onOpenFull, onKill, onCancelPending, onTakeover, killing, heldBySession, onRespondApproval }) {
   const all = [...needsYou.map(({ s, a }) => ({ s, a })), ...working.map(({ s, a }) => ({ s, a }))]

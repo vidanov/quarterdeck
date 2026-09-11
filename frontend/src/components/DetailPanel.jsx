@@ -892,9 +892,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   // Derived from detail (once loaded) or the session prop while loading.
   // Declared here — before any effect — so every effect can reference them.
+  const [reanimating, setReanimating] = useState(false)
   const control = detail?.control || session.control
   const status = detail?.status || session.status
-  const canSend = control === 'managed' || control === 'acp'
+  // A stalled session is still 'managed' and its composer still accepts
+  // keystrokes — which is the trap: every submit dies at the dropped link and
+  // never reaches the JSONL. Lock the composer until it is reanimated so no
+  // prompt is typed into the void.
+  const canSend = (control === 'managed' || control === 'acp') && status !== 'stalled'
 
   // Transcript is always the default. Raw pane requires an explicit override.
   const isWorking = status === 'thinking' || status === 'running' || status === 'awaiting-approval'
@@ -2893,7 +2898,27 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           </>
         ) : (
           <div className="composer-locked">
-            {control === 'foreign'
+            {status === 'stalled' ? (
+              <>
+                The agent link dropped — anything typed here would not reach it.
+                Reanimating restarts on the same id and keeps the conversation.
+                <button className="composer-reanimate" disabled={reanimating}
+                        onClick={() => {
+                          setReanimating(true)
+                          api.reanimateSession(session.id)
+                            .then(d => {
+                              if (d.error) { notify(d.error, 'error'); return }
+                              notify(d.carried_prompt
+                                ? `Reanimated — re-sending: "${d.carried_prompt.slice(0, 60)}"`
+                                : 'Reanimated', 'info')
+                            })
+                            .catch(() => notify('Could not reanimate — backend unreachable', 'error'))
+                            .finally(() => setReanimating(false))
+                        }}>
+                  {reanimating ? '⟳ Reanimating…' : '⚡ Reanimate'}
+                </button>
+              </>
+            ) : control === 'foreign'
               ? 'Started outside the app — take it over to send input.'
               : 'Not running — resume it to send input.'}
           </div>

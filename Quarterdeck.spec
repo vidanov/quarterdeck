@@ -31,10 +31,15 @@ a = Analysis(
         'uvicorn.protocols.websockets',
         'uvicorn.protocols.websockets.auto',
         'uvicorn.protocols.websockets.websockets_impl',
+        # What `websockets.auto` actually resolves to on uvicorn >= 0.35 when
+        # the websockets package is installed. websockets_impl above is the
+        # legacy path, kept only for an explicit --ws websockets.
+        'uvicorn.protocols.websockets.websockets_sansio_impl',
         'websockets',
         'websockets.connection',
         'websockets.frames',
-        'websockets.handshake',
+        # websockets.handshake existed until websockets 13; removed in 14.
+        # Nothing in the uvicorn path imports it — do not re-add it.
         'websockets.http11',
         'websockets.server',
         'websockets.legacy',
