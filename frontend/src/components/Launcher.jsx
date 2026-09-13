@@ -635,6 +635,7 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
   const [templates, setTemplates] = useState(null) // null = not loaded yet
   const [selectedTemplate, setSelectedTemplate] = useState(null)
   const [templateVars, setTemplateVars] = useState({})
+  const [templateTask, setTemplateTask] = useState('')  // for snapshot templates with no built-in task
   const [intakeRunning, setIntakeRunning] = useState(false)
   const recognitionRef = useRef(null)
   const inputRef = useRef(null)
@@ -700,6 +701,7 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
     const vars = {}
     ;(t.vars || []).forEach(v => { vars[v.name] = '' })
     setTemplateVars(vars)
+    setTemplateTask('')
   }
 
   const launchFromTemplate = () => {
@@ -708,6 +710,7 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
     api.intake({
       template: selectedTemplate.id,
       vars: templateVars,
+      task: templateTask || undefined,
       cwd: cwd || selectedTemplate.cwd || '',
       model: model || '',
       effort: effort || '',
@@ -718,6 +721,7 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
           setShowTemplatePicker(false)
           setSelectedTemplate(null)
           setTemplateVars({})
+          setTemplateTask('')
           onCancel()
         } else {
           alert(d.error || 'Intake failed')
@@ -868,6 +872,20 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
               {selectedTemplate.task && (
                 <p className="template-task template-task-preview">{selectedTemplate.task.slice(0, 200)}</p>
               )}
+              {!selectedTemplate.task && selectedTemplate.snapshot_id && (
+                <div className="template-vars-form">
+                  <label className="sat-label">
+                    What should the agent do?<span className="template-required"> *</span>
+                    <textarea
+                      className="sat-input"
+                      rows={3}
+                      value={templateTask}
+                      onChange={e => setTemplateTask(e.target.value)}
+                      placeholder="Describe the task to continue from this context…"
+                    />
+                  </label>
+                </div>
+              )}
               {(selectedTemplate.vars || []).length > 0 && (
                 <div className="template-vars-form">
                   {selectedTemplate.vars.map(v => (
@@ -884,7 +902,7 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
                   ))}
                 </div>
               )}
-              <button type="button" className="dispatch-btn" disabled={intakeRunning}
+              <button type="button" className="dispatch-btn" disabled={intakeRunning || (!selectedTemplate.task && !!selectedTemplate.snapshot_id && !templateTask.trim())}
                       onClick={launchFromTemplate}>
                 {intakeRunning ? 'Launching…' : '▶ Launch from template'}
               </button>
