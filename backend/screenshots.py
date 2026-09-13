@@ -136,40 +136,60 @@ def recent(n: int = 10) -> list[dict]:
         return list(_recent[-n:])
 
 
-def recent_files(minutes: int = 5) -> list[dict]:
-    """Scan the watched folder for image files modified in the last N minutes.
+_files_lock = threading.Lock()
+_files_cache = {"folder": "", "at": 0, "items": []}
+_files_scanning = False
 
-    Independent of the watcher queue — catches files created before the watcher
-    started or while Quarterdeck was not running.
-    """
+
+def _scan_recent_files(folder):
+    results = []
+    cutoff = time.time() - 24 * 3600
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            if entry.name.startswith('.') or Path(entry.name).suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            try:
+                st = entry.stat()
+                if st.st_mtime >= cutoff and entry.is_file():
+                    results.append({"path": entry.path, "name": entry.name,
+                                    "size": st.st_size, "at": st.st_mtime})
+            except OSError:
+                continue
+    return sorted(results, key=lambda item: item['at'])
+
+
+def recent_files(minutes: int = 5) -> list[dict]:
+    """Return cached recent images while one background directory scan refreshes."""
+    global _files_scanning
     folder = configured_path()
     if not folder:
         return []
-    p = Path(folder).expanduser()
-    if not p.is_dir():
-        return []
-    cutoff = time.time() - minutes * 60
-    results = []
-    try:
-        for f in sorted(p.iterdir(), key=lambda x: x.stat().st_mtime):
-            if f.suffix.lower() not in IMAGE_EXTENSIONS:
-                continue
-            if f.name.startswith('.'):
-                continue
+    folder = str(Path(folder).expanduser())
+    with _files_lock:
+        matching = _files_cache['folder'] == folder
+        items = _files_cache['items'] if matching else []
+        if not _files_scanning and (not matching or time.monotonic() - _files_cache['at'] >= 5):
+            _files_scanning = True
+
+            def refresh():
+                global _files_scanning
+                try:
+                    results = _scan_recent_files(folder)
+                    with _files_lock:
+                        _files_cache.update(folder=folder, at=time.monotonic(), items=results)
+                except OSError:
+                    pass
+                finally:
+                    with _files_lock:
+                        _files_scanning = False
+
             try:
-                st = f.stat()
-                if st.st_mtime >= cutoff:
-                    results.append({
-                        "path": str(f),
-                        "name": f.name,
-                        "size": st.st_size,
-                        "at": st.st_mtime,
-                    })
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return results
+                threading.Thread(target=refresh, daemon=True, name='screenshots-scan').start()
+            except BaseException:
+                _files_scanning = False
+                raise
+    cutoff = time.time() - max(1, min(minutes, 1440)) * 60
+    return [item for item in items if item['at'] >= cutoff]
 
 
 def status() -> dict:

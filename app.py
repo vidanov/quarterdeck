@@ -613,4 +613,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:2] == ["--pty-exec"]:
+        from backend.pty_child import exec_shell
+        exec_shell(sys.argv[2:])
+    else:
+        main()
