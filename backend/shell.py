@@ -187,6 +187,7 @@ def close_named(shell_id: str) -> dict:
     existed = tmux.session_exists(name)
     if existed:
         tmux._tmux("kill-session", "-t", name, check=False)
+        tmux.invalidate_session_cache()
     return {"ok": True, "closed": existed}
 
 
@@ -376,6 +377,7 @@ def close() -> dict:
         existed = tmux.session_exists(SHELL_TMUX_NAME)
         if existed:
             tmux._tmux("kill-session", "-t", SHELL_TMUX_NAME, check=False)
+            tmux.invalidate_session_cache()
     return {"ok": True, "closed": existed}
 
 

@@ -139,6 +139,15 @@ def tmux_available() -> bool:
 _list_sessions_cache: dict = {}
 
 
+def invalidate_session_cache() -> None:
+    """Expire the session-list cache immediately.
+
+    Call this after kill-session so the next session_exists() call reflects
+    the kill rather than returning a stale True for up to 1 second.
+    """
+    _list_sessions_cache.pop("ts", None)
+
+
 def list_tmux_sessions() -> list[str]:
     """Names of all live tmux sessions. Empty when no server is running.
     
