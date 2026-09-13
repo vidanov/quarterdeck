@@ -6,6 +6,9 @@ export const listSecrets = (cwd) =>
 export const addSecret = (cwd, name, value) =>
   postJSON('/api/secrets', { cwd, name, value })
 
+// Alias — DetailPanel calls setSecret; POST /api/secrets upserts.
+export const setSecret = addSecret
+
 export const deleteSecret = (cwd, name) =>
   fetch(`/api/secrets/${encodeURIComponent(name)}?cwd=${encodeURIComponent(cwd)}`, {
     method: 'DELETE',

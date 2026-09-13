@@ -55,3 +55,11 @@ export function partitionByAttention(sessions, held, stableAwaitingIds = null) {
     working: withAttention.filter(x => !x.a.needs),
   }
 }
+
+// Dock notifications are for blockers, not an idle composer's "Your turn".
+// Use the same debounced approval decision as the visible cards.
+export function dockBadgeCount(attentionEntries) {
+  return attentionEntries.filter(({ s, a }) =>
+    a.needs && (s.status === 'awaiting-approval' || s.status === 'error')
+  ).length
+}

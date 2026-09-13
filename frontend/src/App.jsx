@@ -40,7 +40,7 @@ import { useToast } from './state/ToastContext'
 import { useConfirm, useConfirmPending } from './state/ConfirmContext'
 import { useSessions } from './state/SessionsContext'
 import { useApprovals } from './state/ApprovalsContext'
-import { partitionByAttention } from './state/attention'
+import { partitionByAttention, dockBadgeCount } from './state/attention'
 import SettingsPanel from './components/SettingsPanel'
 import DetailPanel from './components/DetailPanel'
 import CollectionsPanel from './components/CollectionsPanel'
@@ -49,33 +49,29 @@ import StacksView from './components/StacksView'
 import { QuickCreate, CommandBar, PaletteBar, NewSessionLauncher } from './components/Launcher'
 import Markdown from './components/Markdown'
 import { PasteAttachments, PasteTileCompact } from './components/PasteAttachments'
+import { useProfiles } from './hooks/useProfiles'
 import { usePasteAttachments } from './hooks/usePasteAttachments'
 import { timeAgo, showPath, STATUS_CONFIG, loadHistoryFromPrefs } from './utils'
 
 function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
   const notify = useToast()
   const [open, setOpen] = useState(false)
-  const [current, setCurrent] = useState(null)
-  const [profiles, setProfiles] = useState([])
+  const { current, profiles, switching, load } = useProfiles()
   const [busy, setBusy] = useState('')
   const [loginOpen, setLoginOpen] = useState(false)
   const [loginUrl, setLoginUrl] = useState('')
   const [loginRegion, setLoginRegion] = useState('')
   const ref = useRef(null)
 
-  const load = () => {
-    profilesApi.currentProfile().then(d => {
-      setCurrent(d)
-      if (onCurrentProfile) onCurrentProfile(d?.active_profile || '')
-    }).catch(() => {})
-    profilesApi.listProfiles().then(d => setProfiles(d.profiles || [])).catch(() => {})
-  }
+  useEffect(() => {
+    onCurrentProfile?.(current?.active_profile || '')
+  }, [current, onCurrentProfile])
 
   useEffect(() => {
-    load()
-    const t = setInterval(load, 30000)
-    return () => clearInterval(t)
-  }, [])
+    const changed = ({ detail }) => { if (detail.current) onProfileSwitch?.() }
+    window.addEventListener('quarterdeck:profile-change', changed)
+    return () => window.removeEventListener('quarterdeck:profile-change', changed)
+  }, [onProfileSwitch])
 
   // Close on outside click
   useEffect(() => {
@@ -90,10 +86,8 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
     const d = await profilesApi.switchProfile(name).catch(() => ({ error: 'Network error' }))
     setBusy('')
     if (d.error) { notify(d.error, 'error'); return }
-    notify(`Switched to "${name}" (${d.email})`, 'info')
-    load()
-    setOpen(false)
-    if (onProfileSwitch) onProfileSwitch()
+    if (d.warning) notify(d.warning, 'error')
+    else notify(d.unchanged ? `"${name}" is already active` : `"${name}" is active. Restart existing sessions to apply it there.`, 'info')
   }
 
   const handleLogout = async () => {
@@ -134,7 +128,7 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
     <div className="profile-pill-wrap" ref={ref}>
       <button className={`profile-pill ${open ? 'active' : ''}`} onClick={() => setOpen(v => !v)} title={email}>
         <span className="profile-pill-icon">◉</span>
-        <span className="profile-pill-label">{label}</span>
+        <span className="profile-pill-label">{switching ? `Switching to ${switching}…` : label}</span>
       </button>
 
       {open && (
@@ -148,11 +142,11 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
 
           {profiles.length > 0 && (
             <div className="profile-dropdown-section">
-              <div className="profile-dropdown-label">Switch to</div>
+              <div className="profile-dropdown-label">Profile for new sessions</div>
               {profiles.map(p => (
                 <button key={p.name}
                         className={`profile-dropdown-item ${current?.active_profile === p.name ? 'active' : ''}`}
-                        disabled={!!busy}
+                        disabled={!!busy || !!switching || current?.active_profile === p.name}
                         title={p.profile_arn || p.email}
                         onClick={() => handleSwitch(p.name)}>
                   <span className="profile-dropdown-name">{p.name}</span>
@@ -166,18 +160,18 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
 
           <div className="profile-dropdown-section">
             <div className="profile-dropdown-label">Actions</div>
-            <button className="profile-dropdown-item" disabled={!!busy}
+            <button className="profile-dropdown-item" disabled={!!busy || !!switching}
                     onClick={() => { setLoginOpen(v => !v) }}>
               🔑 Login…
             </button>
-            <button className="profile-dropdown-item" disabled={!!busy}
+            <button className="profile-dropdown-item" disabled={!!busy || !!switching}
                     onClick={handleLogout}>
               {busy === 'logout' ? '⟳ Logging out…' : '⎋ Logout'}
             </button>
-            <button className="profile-dropdown-item" disabled={!!busy || !visibleSessionIds?.length}
+            <button className="profile-dropdown-item" disabled={!!busy || !!switching || !visibleSessionIds?.length}
                     title={`Restart ${visibleSessionIds?.length || 0} visible session(s)`}
                     onClick={handleRestartVisible}>
-              {busy === 'restart' ? '⟳ Restarting…' : `↺ Restart visible (${visibleSessionIds?.length || 0})`}
+              {busy === 'restart' ? '⟳ Restarting…' : `↺ Apply profile to visible sessions (${visibleSessionIds?.length || 0})`}
             </button>
           </div>
 
@@ -188,7 +182,7 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
                      value={loginUrl} onChange={e => setLoginUrl(e.target.value)} />
               <input className="profile-login-input" placeholder="Region (e.g. eu-central-1)"
                      value={loginRegion} onChange={e => setLoginRegion(e.target.value)} />
-              <button className="dispatch-btn" disabled={!!busy} onClick={handleLogin}>
+              <button className="dispatch-btn" disabled={!!busy || !!switching} onClick={handleLogin}>
                 {busy === 'login' ? '⟳ Opening…' : 'Open login in Terminal'}
               </button>
             </div>
@@ -1493,17 +1487,26 @@ export default function App() {
       if (!awaitingFirstSeenRef.current.has(id)) awaitingFirstSeenRef.current.set(id, now)
     }
     // Stable = awaiting for longer than the delay
-    const next = new Set(
+    const computeNext = () => new Set(
       [...awaitingFirstSeenRef.current.entries()]
-        .filter(([, t]) => now - t >= APPROVAL_ATTENTION_DELAY_MS)
+        .filter(([, t]) => Date.now() - t >= APPROVAL_ATTENTION_DELAY_MS)
         .map(([id]) => id)
     )
-    // Only update state if the set actually changed — avoids re-render when
-    // the timer fires but nothing graduated to stable yet.
-    setStableAwaitingIds(prev => {
+    const apply = () => setStableAwaitingIds(prev => {
+      const next = computeNext()
+      // Only update state if the set actually changed — avoids re-render when
+      // the timer fires but nothing graduated to stable yet.
       if (prev.size === next.size && [...next].every(id => prev.has(id))) return prev
       return next
     })
+    apply()
+    // This effect only re-runs when awaitingKey changes. A session that enters
+    // awaiting-approval and then just sits there never changes the key again, so
+    // without a timer it would never graduate to "stable" — the badge would
+    // either never light for it, or (paired with the separately-polled held
+    // path) flip between two counts. Schedule one re-evaluation past the delay.
+    const timer = setTimeout(apply, APPROVAL_ATTENTION_DELAY_MS + 50)
+    return () => clearTimeout(timer)
   }, [awaitingKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A working agent needs nothing from you, so it does not deserve the same
@@ -1516,15 +1519,33 @@ export default function App() {
   const working = sortFav(workingRaw)
   const visibleSessionIds = shownActiveWithFav.filter(s => s.id && !s.nonce).map(s => s.id)
 
-  // Dock badge — update when needsYou count changes
-  const prevBadgeRef = useRef(-1)
+  const badgeCount = dockBadgeCount(needsYou)
+
+  // Dock badge — approvals and errors, excluding ordinary idle sessions.
+  //
+  // The tile is a persistent OS artifact: it survives a backend restart, a
+  // window close, and a tab that stopped re-rendering. Writing it only when the
+  // count *changes* therefore lets it go stale — the true count drops to 0 but
+  // no transition is observed, so the old number sticks on the dock. So this
+  // re-asserts the current count on a heartbeat and whenever the window is shown
+  // again, not just on change. The backend dedupes against the last applied
+  // label (_set_badge_native), so re-posting an unchanged count is a no-op there
+  // and costs nothing.
   useEffect(() => {
-    const count = needsYou.length
-    if (count === prevBadgeRef.current) return
-    prevBadgeRef.current = count
-    fetch('/api/badge', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ count }) }).catch(() => {})
-  }, [needsYou.length])
+    const count = badgeCount
+    const push = () => fetch('/api/badge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count }),
+    }).catch(() => {})
+    push()
+    const onVisible = () => { if (!document.hidden) push() }
+    document.addEventListener('visibilitychange', onVisible)
+    const beat = setInterval(push, 5000)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      clearInterval(beat)
+    }
+  }, [badgeCount])
 
   return (
     <div className="app">
@@ -2431,4 +2452,3 @@ export default function App() {
     </div>
   )
 }
-

@@ -18,3 +18,4 @@ pyinstaller==6.21.0
 # Testing
 pytest==8.4.1
 httpx2
+httpx

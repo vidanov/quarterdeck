@@ -29,15 +29,26 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+from .cache import LruCache
+from .delivery_index import DeliveryIndex
+
+_index = None
+_static_cache = LruCache(maxsize=512)
+
 _delivery_dir: Optional[Path] = None
 _agents_dir: Optional[Path] = None
 
 
 def init(delivery_dir: Path, agents_dir: Path) -> None:
-    global _delivery_dir, _agents_dir
+    global _delivery_dir, _agents_dir, _index
     _delivery_dir = delivery_dir
     _agents_dir = agents_dir
     delivery_dir.mkdir(parents=True, exist_ok=True)
+    _static_cache.clear()
+    if _index is not None:
+        _index.stop.set()
+    _index = DeliveryIndex(delivery_dir)
+    _index.start()
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +115,7 @@ def _steering_files_for_agent(agent_name: str, workspace_steering_dir: Path,
 def _collect_always_files(steering_dir: Path) -> list[Path]:
     """Collect steering files that use always mode (no frontmatter, or inclusion:always)."""
     result = []
-    if not steering_dir.exists():
+    if steering_dir is None or not steering_dir.exists():
         return result
     for f in sorted(steering_dir.rglob("*.md")):
         try:
@@ -139,19 +150,26 @@ def _append(record: dict) -> None:
     record.setdefault("ts", time.time())
     with _today_file().open("a") as f:
         f.write(json.dumps(record) + "\n")
+    if _index is not None:
+        _index.add(record)
 
 
 def record_session_delivery(session_id: str, agent_name: str,
                              workspace_dir: str) -> dict:
     """Compute and record what steering should have been delivered for a session turn.
 
-    Call this once per session poll (not per turn — it's stable until agent changes).
+    Repeated polls reuse the inference; unchanged observations are not appended.
     Returns the delivery record.
     """
     if not _delivery_dir:
         return {}
 
-    workspace_steering = Path(workspace_dir) / ".kiro" / "steering" if workspace_dir else Path()
+    key = (session_id, agent_name, workspace_dir)
+    previous = _static_cache.get(key)
+    if previous and time.monotonic() - previous[0] < 30:
+        return previous[1]
+
+    workspace_steering = Path(workspace_dir) / ".kiro" / "steering" if workspace_dir else None
     global_steering = Path.home() / ".kiro" / "steering"
 
     info = _steering_files_for_agent(agent_name, workspace_steering, global_steering)
@@ -165,7 +183,12 @@ def record_session_delivery(session_id: str, agent_name: str,
         "notes": info["notes"],
         "probe_observations": [],  # filled by record_probe_observation()
     }
-    _append(record)
+    # Polling observes state; only a changed inference is a new observation.
+    if not previous or {k: v for k, v in previous[1].items() if k != "ts"} != record:
+        _append(record)
+    else:
+        record = previous[1]
+    _static_cache[key] = (time.monotonic(), record)
     return record
 
 
@@ -206,25 +229,7 @@ def get_session_delivery(session_id: str) -> dict:
     if not _delivery_dir:
         return {}
 
-    static_records = []
-    probe_records = []
-
-    for day_file in sorted(_delivery_dir.glob("*.jsonl"), reverse=True):
-        try:
-            for line in day_file.read_text().splitlines():
-                if not line.strip():
-                    continue
-                rec = json.loads(line)
-                if rec.get("session_id") != session_id:
-                    continue
-                if rec.get("method") == "static_inference":
-                    static_records.append(rec)
-                elif rec.get("method") == "probe_echo":
-                    probe_records.append(rec)
-        except (OSError, json.JSONDecodeError):
-            continue
-
-    latest = static_records[0] if static_records else {}
+    latest, probe_records, complete = _index.get(session_id) if _index else ({}, [], False)
     return {
         "session_id": session_id,
         "agent": latest.get("agent", ""),
@@ -234,4 +239,5 @@ def get_session_delivery(session_id: str) -> dict:
         "probe_results": probe_records,
         "probes_run": len(probe_records),
         "last_recorded": latest.get("ts"),
+        "history_loading": not complete,
     }
