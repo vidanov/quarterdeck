@@ -7,6 +7,7 @@ import * as secretsApi from '../api/secrets'
 import * as scriptsApi from '../api/scripts'
 import * as sessionsApi from '../api/sessions'
 import { useToast } from '../state/ToastContext'
+import { useProfiles } from '../hooks/useProfiles'
 import { useConfirm } from '../state/ConfirmContext'
 
 function copyText(text) {
@@ -1461,17 +1462,9 @@ function AuditSettings() {
 function ProfileSettings() {
   const notify = useToast()
   const askConfirm = useConfirm()
-  const [profiles, setProfiles] = useState([])
-  const [current, setCurrent] = useState(null)
+  const { profiles, current, switching, load } = useProfiles()
   const [newName, setNewName] = useState('')
   const [busy, setBusy] = useState(false)
-
-  const load = () => {
-    profilesApi.listProfiles().then(d => setProfiles(d.profiles || [])).catch(() => {})
-    profilesApi.currentProfile().then(setCurrent).catch(() => {})
-  }
-
-  useEffect(() => { load() }, [])
 
   const handleSave = async () => {
     const name = newName.trim()
@@ -1490,8 +1483,8 @@ function ProfileSettings() {
     const d = await profilesApi.switchProfile(name).catch(() => ({ error: 'Network error' }))
     setBusy(false)
     if (d.error) { notify(d.error, 'error'); return }
-    notify(`Switched to "${name}" (${d.email}). New sessions will use this identity.`, 'info')
-    load()
+    if (d.warning) notify(d.warning, 'error')
+    else notify(d.unchanged ? `"${name}" is already active` : `"${name}" is active. Restart existing sessions to apply it there.`, 'info')
   }
 
   const handleDelete = async (name) => {
@@ -1513,7 +1506,7 @@ function ProfileSettings() {
       <h3 className="settings-title">Identity profiles</h3>
       <p className="cleanup-hint">
         Save multiple kiro-cli logins and switch between them without re-authenticating.
-        Running sessions keep their original identity; new sessions pick up the switch.
+        New sessions use the selected profile. Restart existing sessions to reliably apply it there.
       </p>
 
       {current && (
@@ -1538,15 +1531,15 @@ function ProfileSettings() {
               </div>
               <div className="profile-actions">
                 {current?.active_profile !== p.name && (
-                  <button className="dispatch-btn dispatch-btn-sm" disabled={busy}
+                  <button className="dispatch-btn dispatch-btn-sm" disabled={busy || !!switching}
                           onClick={() => handleSwitch(p.name)}>
-                    Switch
+                    {switching === p.name ? 'Switching…' : 'Switch'}
                   </button>
                 )}
                 {current?.active_profile === p.name && (
                   <span className="profile-badge">active</span>
                 )}
-                <button className="dispatch-btn dispatch-btn-sm dispatch-btn-danger" disabled={busy}
+                <button className="dispatch-btn dispatch-btn-sm dispatch-btn-danger" disabled={busy || !!switching}
                         onClick={() => handleDelete(p.name)}>
                   ✕
                 </button>
@@ -1562,7 +1555,7 @@ function ProfileSettings() {
                value={newName}
                onChange={e => setNewName(e.target.value)}
                onKeyDown={e => e.key === 'Enter' && handleSave()} />
-        <button className="dispatch-btn" disabled={busy || !newName.trim()}
+        <button className="dispatch-btn" disabled={busy || !!switching || !newName.trim()}
                 onClick={handleSave}>
           Save current as…
         </button>
