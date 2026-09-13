@@ -142,7 +142,12 @@ export function SessionsProvider({ children }) {
 
       return newSessions
     })
-    .catch(() => { setError('Backend not reachable'); return [] }), [])
+    .catch(err => {
+      setError(err.status === 503 ? 'Sessions are refreshing. Retrying…'
+        : ['TimeoutError', 'AbortError'].includes(err.name) ? 'Backend is slow to respond. Retrying…'
+        : 'Backend not reachable')
+      return []
+    }), [])
 
   // Spawning, resuming and taking over all finish asynchronously somewhere the
   // poll cannot see — tmux correlating an id, kiro-cli redrawing after input.

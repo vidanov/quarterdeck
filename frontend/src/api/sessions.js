@@ -8,6 +8,10 @@ export const getSession = (id) => getJSON(`/api/sessions/${id}`)
 // and reading back over it is most of the point of the Live view.
 export const getPane = (id, lines) => getJSON(`/api/sessions/${id}/pane?lines=${lines}`)
 
+// In-progress assistant narration for a managed V1 (tmux) session, lifted from
+// the pane. ACP sessions stream over `/stream` instead and return empty here.
+export const getLive = (id) => getJSON(`/api/sessions/${id}/live`)
+
 export const sendInput = (id, text, attachments = []) =>
   postJSON(`/api/sessions/${id}/input`, { text, attachments })
 

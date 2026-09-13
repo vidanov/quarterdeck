@@ -16,9 +16,9 @@ import hashlib
 import os
 import pty
 import select
-import signal
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -62,8 +62,14 @@ class PtySession:
             env = os.environ.copy()
             env["TERM"] = "xterm-256color"
             env["COLORTERM"] = "truecolor"
+            # Acquire the controlling terminal in a fresh interpreter, then
+            # exec the shell. preexec_fn is unsafe in this threaded backend.
+            if getattr(sys, "frozen", False):
+                argv = [sys.executable, "--pty-exec", shell, "-l"]
+            else:
+                argv = [sys.executable, str(Path(__file__).with_name("pty_child.py")), shell, "-l"]
             self.proc = subprocess.Popen(
-                [shell, "-l"],
+                argv,
                 stdin=slave, stdout=slave, stderr=slave,
                 cwd=target,
                 env=env,
