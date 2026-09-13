@@ -1,3 +1,4 @@
+import { autoApprovePrompt } from '../state/autoApproval'
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { errorOf } from '../api/client'
@@ -1140,8 +1141,15 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       api.getMessages(session.id, after, 200).then(d => {
         const newMsgs = d.messages || []
         if (!newMsgs.length) return
-        // If new assistant messages arrived, the streaming bubble is now stale
-        if (newMsgs.some(m => m.role === 'assistant')) {
+        // ACP accumulates streamingText from chunks, so a committed assistant
+        // message makes it stale — clear it and let the real message show.
+        // V1 (managed) drives streamingText from the live pane poll, which is
+        // self-correcting and must NOT be cleared here: a mid-turn tool step
+        // commits an AssistantMessage while the turn continues, and clearing
+        // would blank the live bubble every time a tool ran. The "turn ended"
+        // effect clears V1 when the session actually goes idle.
+        const ctrl = detail?.control || session.control
+        if (ctrl === 'acp' && newMsgs.some(m => m.role === 'assistant')) {
           setStreamingText('')
           streamingCursorRef.current = -1
           if (streamingEsRef.current) { streamingEsRef.current.close(); streamingEsRef.current = null }
@@ -1213,6 +1221,29 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     }
   }, [isWorking, effectiveView, session.id, session.control, detail?.control])
 
+  // V1 (tmux) live narration: managed sessions have no incremental JSONL to
+  // read mid-turn, so the pane is the only source of what the agent is saying
+  // as it says it. Poll the cleaned pane tail into the same streamingText the
+  // ACP path uses, so the transcript shows generation-time text rather than a
+  // bare spinner until the finished message lands. The messages poll clears
+  // streamingText when the real AssistantMessage arrives.
+  useEffect(() => {
+    const ctrl = detail?.control || session.control
+    const isAcp = ctrl === 'acp'
+    const isManaged = ctrl === 'managed'
+    if (isAcp || !isManaged || !isWorking || effectiveView !== 'transcript') return
+
+    let active = true
+    const poll = () => api.getLive(session.id).then(d => {
+      if (!active) return
+      const text = (d && d.text) || ''
+      if (text) setStreamingText(text)
+    }).catch(() => {})
+    poll()
+    const iv = setInterval(poll, 700)
+    return () => { active = false; clearInterval(iv) }
+  }, [isWorking, effectiveView, session.id, session.control, detail?.control])
+
   // When a session finishes a turn (goes idle/done), do one final fetch to
   // catch anything the 2s polling interval might have missed.
   const prevActiveRef = useRef(false)
@@ -1221,6 +1252,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     const wasActive = prevActiveRef.current
     prevActiveRef.current = activeNow
     if (wasActive && !activeNow) {
+      // Turn ended: the finished AssistantMessage is now (or about to be) in
+      // the transcript, so drop the live pane bubble. Safe for ACP too — its
+      // stream already closed. Without this the last narration would flash on
+      // the next turn's first frame before the pane poll overwrites it.
+      setStreamingText('')
+      streamingCursorRef.current = -1
       // Final fetch: always run when the session goes idle, regardless of
       // whether the transcript view is active or messages were pre-loaded.
       // This closes the race where the last answer lands in the JSONL after
@@ -1235,9 +1272,23 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           if (!prev) return newMsgs
           const maxSeen = prev.length ? prev[prev.length - 1].seq : -1
           const fresh = newMsgs.filter(m => m.seq > maxSeen)
-          if (!fresh.length) return prev
-          transcriptMaxSeq.current = fresh[fresh.length - 1].seq
-          const updated = [...prev, ...fresh]
+          // Also replace the last existing message if the backend returned an
+          // updated version of it (same seq, but text grew — this happens when
+          // the initial load raced the final JSONL write and captured a short
+          // or empty last message that was later completed by kiro).
+          let base = prev
+          if (newMsgs.length > 0 && prev.length > 0) {
+            const lastPrev = prev[prev.length - 1]
+            const updated = newMsgs.find(m => m.seq === lastPrev.seq)
+            if (updated && updated.text !== lastPrev.text) {
+              base = [...prev.slice(0, -1), updated]
+            }
+          }
+          if (!fresh.length && base === prev) return prev
+          const updated = fresh.length
+            ? [...base, ...fresh]
+            : base
+          if (fresh.length) transcriptMaxSeq.current = fresh[fresh.length - 1].seq
           transcriptCache.current[session.id] = updated
           return updated
         })
@@ -1442,27 +1493,38 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     api.getSessionDuration(session.id).then(d => setDurationRecord(d?.record || null)).catch(() => {})
   }, [session?.id])
 
-  // Poll for new screenshots every 3 seconds when the composer is visible.
-  // Poll for new screenshots — only while the session can receive input
-  // (composer is visible). No point scanning the filesystem when viewing a
-  // done session or a non-transcript tab.
+  // One screenshot request at a time. An unbounded fetch every five seconds
+  // used to occupy every browser connection when folder scans slowed down.
   useEffect(() => {
     if (!canSend) return
-    const poll = () => {
-      fetch('/api/screenshots/recent-files?minutes=5').then(r => r.json())
-        .then(d => {
-          if (d.items?.length) setPendingScreenshots(prev => {
-            const existing = new Set(prev.map(s => s.name))
-            const fresh = d.items.filter(s => !existing.has(s.name) && !dismissedScreenshots.current.has(s.name))
-            return fresh.length ? [...prev, ...fresh] : prev
-          })
+    let stopped = false
+    let timer
+    let controller
+    const poll = async () => {
+      controller = new AbortController()
+      const deadline = setTimeout(() => controller.abort(), 10000)
+      try {
+        const response = await fetch('/api/screenshots/recent-files?minutes=5', { signal: controller.signal })
+        if (!response.ok) return
+        const d = await response.json()
+        if (!stopped && d.items?.length) setPendingScreenshots(prev => {
+          const existing = new Set(prev.map(s => s.name))
+          const fresh = d.items.filter(s => !existing.has(s.name) && !dismissedScreenshots.current.has(s.name))
+          return fresh.length ? [...prev, ...fresh] : prev
         })
-        .catch(() => {})
+      } catch { /* Retry after temporary folder/backend failures. */ }
+      finally {
+        clearTimeout(deadline)
+        if (!stopped) timer = setTimeout(poll, 5000)
+      }
     }
-    poll()  // immediate on mount
-    const id = setInterval(poll, 5000)
-    return () => clearInterval(id)
-  }, [canSend])
+    poll()
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+      controller?.abort()
+    }
+  }, [canSend, session?.id])
 
   // The transcript is the resting view now, so it loads whenever we land on it
   // rather than only on an explicit tab click.
@@ -1474,19 +1536,54 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     transcriptLoadedFor.current = session.id
     setLoadingMessages(true)
     setMessagesError(null)
-    api.getMessages(session.id, -1, 2000)
+    const sid = session.id
+    api.getMessages(sid, -1, 2000)
       .then(d => {
         const msgs = d.messages || []
         setMessages(msgs)
         if (msgs.length) transcriptMaxSeq.current = msgs[msgs.length - 1].seq
         // Update cache — evict oldest entry if over 20 sessions
-        transcriptCache.current[session.id] = msgs
+        transcriptCache.current[sid] = msgs
         const keys = Object.keys(transcriptCache.current)
         if (keys.length > 20) delete transcriptCache.current[keys[0]]
         // Scroll to end after load — regardless of whether the session is active.
         setTimeout(() => {
           if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight
         }, 50)
+
+        // For sessions that are already idle/done when the panel opens, the
+        // turn-ended effect never fires (no active→idle transition observed).
+        // The initial load can also race the final JSONL write by a few hundred
+        // milliseconds.  Schedule one delayed re-fetch so a late-arriving last
+        // assistant message is always picked up.  The retry is unconditional —
+        // the guard and empty-result early-return make it cheap when there is
+        // nothing new.
+        setTimeout(() => {
+          if (transcriptLoadedFor.current !== sid) return  // session switched
+          const after = transcriptMaxSeq.current
+          api.getMessages(sid, after, 200).then(dd => {
+            const newMsgs = dd.messages || []
+            if (!newMsgs.length) return
+            setMessages(prev => {
+              if (!prev) return newMsgs
+              const maxSeen = prev.length ? prev[prev.length - 1].seq : -1
+              const fresh = newMsgs.filter(m => m.seq > maxSeen)
+              // Also replace the last message if the backend returned a more
+              // complete version (same seq, more text — race with JSONL flush).
+              let base = prev
+              if (newMsgs.length > 0 && prev.length > 0) {
+                const lastPrev = prev[prev.length - 1]
+                const upd = newMsgs.find(m => m.seq === lastPrev.seq)
+                if (upd && upd.text !== lastPrev.text) base = [...prev.slice(0, -1), upd]
+              }
+              if (!fresh.length && base === prev) return prev
+              const next = fresh.length ? [...base, ...fresh] : base
+              if (fresh.length) transcriptMaxSeq.current = fresh[fresh.length - 1].seq
+              transcriptCache.current[sid] = next
+              return next
+            })
+          }).catch(() => {})
+        }, 1500)
       })
       .catch(err => {
         setMessagesError(err?.message || 'Failed to load transcript')
@@ -1504,6 +1601,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   useEffect(() => {
     if (control !== 'managed') { setPane(''); return }
     let alive = true
+    let loadingPane = false
     // Ask for a good deal more than fits. How tall the tmux window is and how
     // much of it is worth reading are different questions: the window has to
     // match the box so the TUI reflows correctly, but capturing only that many
@@ -1512,7 +1610,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     // session that had 771 lines of history behind it.
     const wanted = Math.max((paneRows || 0) * 6, PANE_SCROLLBACK)
     let lastPaneText = ''
-    const load = () => api.getPane(session.id, wanted)
+    const load = () => {
+      if (!alive || loadingPane) return
+      loadingPane = true
+      return api.getPane(session.id, wanted)
       .then(d => {
         if (!alive) return
         const newPane = d.pane || ''
@@ -1527,10 +1628,23 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         if (d.awaiting_prompt && localStorage.getItem(`auto-approve:${session.id}`)) {
           answeredPromptRef.current = Date.now()
           setPrompting(false)
-          api.respond(session.id, 'trust').catch(() => {})
+          autoApprovePrompt(session.id, () => api.respond(session.id, 'trust'))
+            .then(sent => {
+              if (sent && alive) answeredPromptRef.current = Date.now()
+            })
+            .catch(error => {
+              localStorage.removeItem(`auto-approve:${session.id}`)
+              if (!alive) return
+              setAutoApprove(false)
+              answeredPromptRef.current = 0
+              setPrompting(true)
+              notify(`Auto-approve stopped: ${error.message || 'Approval failed'}`, 'error')
+            })
         }
       })
       .catch(() => {})
+      .finally(() => { loadingPane = false })
+    }
     load()
     // Held so `respond` can capture the pane the moment it has acted, instead of
     // waiting out the interval. A ref rather than an effect dependency: nudging
@@ -2974,7 +3088,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           ))}
         </details>
       )}
-      {delivery && delivery.expected_count === 0 && (
+      {delivery && !delivery.history_loading && delivery.expected_count === 0 && (
         <div className="detail-delivery-empty" title="No always-mode steering files found for this session">
           ⚠ no steering rules configured
         </div>

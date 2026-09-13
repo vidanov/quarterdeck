@@ -439,7 +439,7 @@ def _build_source_hash_from(root: Path, patterns: list) -> str:
 
 
 @app.get("/api/health/build")
-async def health_build():
+def health_build():
     """Compare running build stamp against current source tree.
 
     Returns stale=true when backend or frontend source has changed since the
@@ -474,6 +474,7 @@ async def health_build():
             ["git", "rev-parse", "--show-toplevel"],
             text=True, stderr=subprocess.DEVNULL,
             cwd=str(Path.home()),
+            timeout=3,
         ).strip()
         repo_root = Path(repo_root_str)
         # Verify it looks like the right repo
@@ -500,6 +501,7 @@ async def health_build():
             ["git", "rev-parse", "HEAD"],
             text=True, stderr=subprocess.DEVNULL,
             cwd=str(repo_root) if repo_root else str(Path.home()),
+            timeout=3,
         ).strip()
     except Exception:
         running_sha = stamp.get("git_sha", "")
@@ -517,6 +519,7 @@ async def health_build():
                     ["git", "diff", "--name-only", stamp["git_sha"], running_sha],
                     text=True, stderr=subprocess.DEVNULL,
                     cwd=str(repo_root),
+                    timeout=3,
                 ).strip()
                 changed_files = [f for f in diff_out.splitlines() if f][:10]
             except Exception:
@@ -1448,12 +1451,68 @@ def pane_status(pane: str) -> str | None:
     footer = [line.strip() for line in pane.rstrip().splitlines()[-FOOTER_LINES:]]
     # Idle first: when kiro-cli is working, this line is replaced by the working
     # one, so its presence is the stronger claim of the two.
-    if any(line.startswith("ask a question or describe a task") for line in footer):
+    # Current Kiro renders a leading composer marker in capture-pane output.
+    # Without it, recovery waits forever for an already-ready composer.
+    if any(line.startswith(("ask a question or describe a task",
+                            "›  ask a question or describe a task",
+                            "› ask a question or describe a task")) for line in footer):
         return "idle"
     if any(line.startswith("Kiro is working") or line.startswith("esc to cancel")
            for line in footer):
         return "thinking"
     return None
+
+
+# A line that begins a tool call / result block in the TUI, or the agent's own
+# bullet. Anything at or below the last one of these is not in-progress prose.
+_PANE_BLOCK_MARKS = ("●", "◔", "◐", "◑", "◒", "◓", "╭", "╰", "│", "└", "├")
+
+
+def pane_live_text(pane: str) -> str:
+    """The agent's in-progress narration as the TUI is drawing it right now.
+
+    V1 (tmux) sessions commit whole `AssistantMessage` blocks to the JSONL only
+    when a step finishes, so mid-turn there is nothing to read there. The pane
+    is the only witness to what the model is saying as it says it. This lifts
+    that text out of the reflowed TUI.
+
+    kiro-cli interleaves prose and tool blocks: the model narrates, then a
+    `● Tool …` block appears below, then it narrates again. The text we want is
+    the most recent *prose* block. Naively cutting at the last tool marker made
+    the bubble vanish the instant a tool ran (the tail was then the tool line,
+    so the prose above it was skipped and empty was returned). Instead: skip any
+    trailing tool blocks, then collect the prose block above them. That keeps
+    the last thing the model said on screen while a tool runs, rather than
+    blanking to the spinner.
+
+    Returns "" only when there is no prose block at all above the tools.
+    """
+    if not pane:
+        return ""
+    body = _pane_body(pane)
+    idx = len(body) - 1
+    # 1) Walk back over trailing blank + tool/chrome lines to reach real prose.
+    while idx >= 0:
+        stripped = body[idx].strip()
+        if not stripped or stripped in ("esc to cancel", "esc to close") \
+                or stripped.startswith(_PANE_BLOCK_MARKS):
+            idx -= 1
+            continue
+        break
+    # 2) Collect the prose block, stopping at the next marker/blank above it.
+    collected: list[str] = []
+    while idx >= 0:
+        stripped = body[idx].strip()
+        if not stripped:
+            break
+        if stripped.startswith(_PANE_BLOCK_MARKS):
+            break
+        if stripped in ("esc to cancel", "esc to close"):
+            idx -= 1
+            continue
+        collected.append(stripped)
+        idx -= 1
+    return "\n".join(reversed(collected)).strip()
 
 
 def detect_status(session_id: str, lock_data: dict | None, pane: str = "") -> str:
@@ -1881,19 +1940,17 @@ def sessions_debug_timing():
     return steps
 
 
-# requests queue and each one re-runs the full scan. A 1-second TTL means at
-# most one full scan per second regardless of concurrency, and the UI (polling
-# every 2s) never sees stale data older than 1 tick.
+# Only one scan may run at a time, including background and cold-start scans.
+# A slow refresh must not cause polling clients to start competing scans.
 # `dir` records which SESSIONS_DIR produced `data`: a scan of one directory is
 # not an answer about another, and without it the first scan is served for every
 # later caller whatever they are asking about.
 _sessions_cache: dict = {"data": None, "ts": 0.0, "dir": None}
 _sessions_cache_lock = threading.Lock()
+_sessions_scan_lock = threading.Lock()
+_sessions_cache_generation = 0
 _SESSIONS_BG_INTERVAL = 2.5  # background refresh — longer than the 2s UI poll to avoid GIL starvation
-# How old a cached scan may be before a request pays for a fresh one. Longer
-# than the refresh interval, so while the background thread is alive no request
-# ever scans; if that thread dies, requests fall back to scanning themselves
-# instead of serving one scan forever.
+# Stale polls request a background refresh while returning the last good data.
 _SESSIONS_TTL = _SESSIONS_BG_INTERVAL * 2
 
 
@@ -1905,7 +1962,9 @@ def _invalidate_sessions_cache() -> None:
     age — so a dispatch or a kill went on showing the pre-change list until the
     background thread happened to refresh it.
     """
+    global _sessions_cache_generation
     with _sessions_cache_lock:
+        _sessions_cache_generation += 1
         _sessions_cache["data"] = None
         _sessions_cache["ts"] = 0.0
 
@@ -1994,6 +2053,40 @@ def _run_sessions_scan() -> dict:
     return _do_sessions_scan()
 
 
+def _refresh_sessions_cache(background: bool = False):
+    """Reserve one scan without parking polling requests behind its I/O."""
+    if not _sessions_scan_lock.acquire(blocking=False):
+        return None
+    with _sessions_cache_lock:
+        generation = _sessions_cache_generation
+        directory = str(SESSIONS_DIR)
+
+    def scan():
+        try:
+            result = _run_sessions_scan()
+            with _sessions_cache_lock:
+                # A mutation during this scan invalidates its snapshot too.
+                if generation != _sessions_cache_generation or directory != str(SESSIONS_DIR):
+                    return None
+                _sessions_cache.update(data=result, ts=time.time(), dir=directory)
+            return result
+        except Exception as exc:
+            if not background:
+                raise
+            print(f"[deck] sessions refresh failed: {exc}", file=sys.stderr)
+        finally:
+            _sessions_scan_lock.release()
+
+    if background:
+        try:
+            threading.Thread(target=scan, daemon=True, name="sessions-poll-refresh").start()
+        except BaseException:
+            _sessions_scan_lock.release()
+            raise
+        return None
+    return scan()
+
+
 def _sessions_bg_refresh() -> None:
     """Background thread: refresh the sessions cache every ~2 seconds.
 
@@ -2007,11 +2100,7 @@ def _sessions_bg_refresh() -> None:
     reported_error: set[str] = set()
     while True:
         try:
-            result = _do_sessions_scan()
-            with _sessions_cache_lock:
-                _sessions_cache["data"] = result
-                _sessions_cache["ts"] = _time.time()
-                _sessions_cache["dir"] = str(SESSIONS_DIR)
+            _refresh_sessions_cache()
         except Exception as exc:
             key = f"{type(exc).__name__}: {exc}"
             if key not in reported_error:
@@ -2024,8 +2113,8 @@ def _sessions_bg_refresh() -> None:
 def list_sessions(show_hidden: bool = False):
     """List all active and recent sessions.
 
-    Returns the background-refreshed cache instantly. Falls back to a
-    synchronous scan only on the very first request (cache is empty).
+    Returns the last good snapshot while one background scan refreshes it.
+    Only one cold caller scans; concurrent cold polls receive a retry response.
     
     Sessions whose title starts with any prefix in the "hidden-title-prefixes"
     setting are filtered out by default. Pass ?show_hidden=1 to include them.
@@ -2033,19 +2122,17 @@ def list_sessions(show_hidden: bool = False):
     now = time.time()
     with _sessions_cache_lock:
         cached = _sessions_cache["data"]
-        usable = (cached is not None
-                  and _sessions_cache["dir"] == str(SESSIONS_DIR)
-                  and now - _sessions_cache["ts"] < _SESSIONS_TTL)
+        usable = cached is not None and _sessions_cache["dir"] == str(SESSIONS_DIR)
+        stale = now - _sessions_cache["ts"] >= _SESSIONS_TTL
     if usable:
         result = cached
+        if stale:
+            _refresh_sessions_cache(background=True)
     else:
-        # No cache yet, a cache belonging to another directory, or one old
-        # enough that the refresher is evidently not running.
-        result = _do_sessions_scan()
-        with _sessions_cache_lock:
-            _sessions_cache["data"] = result
-            _sessions_cache["ts"] = time.time()
-            _sessions_cache["dir"] = str(SESSIONS_DIR)
+        result = _refresh_sessions_cache()
+        if result is None:
+            return JSONResponse({"error": "Sessions are refreshing; retry shortly"},
+                                status_code=503, headers={"Retry-After": "2"})
     if show_hidden:
         return result
     # Filter out sessions matching hidden title prefixes
@@ -2075,11 +2162,13 @@ def _sorted_json_files() -> list:
     if (cached["files"] and cached["dir"] == str(SESSIONS_DIR)
             and (now - cached["ts"]) < 10.0):
         return cached["files"]
-    files = sorted(
-        SESSIONS_DIR.glob("*.json") if SESSIONS_DIR.exists() else [],
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )
+    entries = []
+    for path in SESSIONS_DIR.glob("*.json") if SESSIONS_DIR.exists() else []:
+        try:
+            entries.append((path.stat().st_mtime, path))
+        except OSError:
+            continue  # deletion can race the directory listing
+    files = [path for _, path in sorted(entries, key=lambda item: item[0], reverse=True)]
     _json_files_cache["ts"] = now
     _json_files_cache["files"] = files
     _json_files_cache["dir"] = str(SESSIONS_DIR)
@@ -4032,6 +4121,25 @@ def get_pane(session_id: str, lines: int = CAPTURE_LINES):
     return {"managed": True, "pane": pane,
             "cols": size[0] if size else 0, "rows": size[1] if size else 0,
             "awaiting_prompt": pane_awaiting_approval(pane)}
+
+
+@app.get("/api/sessions/{session_id}/live")
+def get_live_text(session_id: str, lines: int = CAPTURE_LINES):
+    """In-progress assistant narration for a managed V1 session, from the pane.
+
+    ACP (V3) sessions already stream word-by-word over `/stream`; this is the
+    equivalent for tmux sessions, which have no incremental JSONL to read. The
+    transcript's live bubble polls this so the text appears as it is generated
+    rather than only when the finished `AssistantMessage` lands.
+    """
+    # ACP sessions have a real streaming channel — don't double up.
+    if acp_observer.is_attached(session_id):
+        return {"managed": True, "text": "", "acp": True}
+    if not tmux.is_managed(session_id):
+        return {"managed": False, "text": ""}
+    lines = max(1, min(int(lines), MAX_CAPTURE_LINES))
+    pane = tmux.capture(session_id, lines)
+    return {"managed": True, "text": pane_live_text(pane)}
 
 
 @app.post("/api/sessions/{session_id}/resize")
@@ -6039,6 +6147,11 @@ def _active_profile_name() -> str:
             ).fetchone()
         finally:
             con.close()
+        current_fp = ""
+        try:
+            current_fp = _token_fingerprint(_dump_auth_rows())
+        except Exception:
+            pass
         if row and row[0]:
             try:
                 state_arn = json.loads(row[0]).get("arn", "")
@@ -6051,14 +6164,22 @@ def _active_profile_name() -> str:
                         continue
                     try:
                         meta = json.loads(meta_path.read_text())
-                        if meta.get("profile_arn", "") == state_arn:
-                            return name
                     except Exception:
                         continue
+                    if meta.get("profile_arn", "") != state_arn:
+                        continue
+                    # The state-table ARN and the live OAuth tokens can disagree:
+                    # switching to a profile whose meta has no state_profile/ARN
+                    # leaves the *previous* profile's ARN in the table. Trusting
+                    # the ARN then keeps reporting the old profile as active and
+                    # the switch looks like it never happened. Only believe the
+                    # ARN when that profile's tokens are the live ones.
+                    saved_fp = meta.get("token_fingerprint", "")
+                    if not current_fp or not saved_fp or saved_fp == current_fp:
+                        return name
+                    break
 
         # Fallback: token fingerprint match (profiles without ARN metadata)
-        current_rows = _dump_auth_rows()
-        current_fp = _token_fingerprint(current_rows)
         if not current_fp:
             return ""
         for data_path in sorted(_PROFILES_DIR.glob("*.jsonl")):
@@ -6939,13 +7060,18 @@ def list_profiles():
 @app.get("/api/profiles/current")
 def current_profile():
     """Return the currently active identity."""
-    info = _current_profile_identity()
-    # Match active profile by ARN first (authoritative for same-SSO profiles),
-    # fall back to token fingerprint for older profiles without ARN metadata.
     active_name = _active_profile_name()
+    info = {}
+    if active_name:
+        try:
+            info = json.loads(_profile_meta_path(active_name).read_text())
+        except (OSError, ValueError):
+            pass
+    if not info:
+        info = _current_profile_identity()
     return {
-        "email": info["email"],
-        "provider": info["provider"],
+        "email": info.get("email", ""),
+        "provider": info.get("provider", ""),
         "profile_arn": info.get("profile_arn", ""),
         "active_profile": active_name or None,
     }
@@ -7000,144 +7126,105 @@ def save_profile(payload: dict):
     return {"ok": True, "email": info["email"]}
 
 
+_profile_switch_lock = threading.Lock()
+
+
 @app.post("/api/profiles/switch")
 def switch_profile(payload: dict):
-    """Switch to a saved profile."""
-    name = payload.get("name", "").strip()
-    if not name:
-        return {"error": "Profile name is required"}
+    """Commit credentials and subscription together, or leave both unchanged."""
+    name = payload.get("name", "")
+    if not isinstance(name, str) or not name.strip() or name.strip() == "_previous" or any(c in name for c in "/\\"):
+        return {"error": "Invalid profile name"}
+    name = name.strip()
+    if not _profile_switch_lock.acquire(blocking=False):
+        return {"error": "Another profile switch is in progress. Please retry shortly."}
+    try:
+        return _switch_profile(name)
+    except Exception:
+        # Do not include SQLite values or credential-file contents in errors.
+        return {"error": "Could not switch profiles. Your previous login is unchanged. Please retry."}
+    finally:
+        _profile_switch_lock.release()
+
+
+def _switch_profile(name: str) -> dict:
     data_path = _profile_data_path(name)
     if not data_path.exists():
         return {"error": f"Profile '{name}' not found"}
-    current_rows = _dump_auth_rows()
     try:
         rows = [json.loads(line) for line in data_path.read_text().splitlines() if line.strip()]
-    except Exception as e:
-        return {"error": f"Failed to switch: {e}"}
+        meta = json.loads(_profile_meta_path(name).read_text())
+        if not rows or any(not isinstance(r, dict) or not isinstance(r.get("key"), str)
+                           or not isinstance(r.get("value"), str) for r in rows):
+            raise ValueError("Invalid credentials")
+        if len({r["key"] for r in rows}) != len(rows) or not _token_fingerprint(rows):
+            raise ValueError("Missing token")
+        state_profile = meta.get("state_profile", "")
+        profile_arn = meta.get("profile_arn", "")
+        if state_profile:
+            saved_state = json.loads(state_profile)
+            arn = saved_state.get("arn", "")
+            if profile_arn and arn != profile_arn:
+                raise ValueError("Conflicting subscription metadata")
+            profile_arn = arn
+        elif profile_arn:
+            return {"error": f"Profile '{name}' is missing its saved subscription details. Log in to that account and save it again. No changes were made."}
+        if not profile_arn:
+            return {"error": f"Profile '{name}' is missing its subscription. Log in to that account and save the profile again. No changes were made."}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"error": f"Profile '{name}' is incomplete or damaged. Log in to that account and save it again. No changes were made."}
 
-    # Switching to the profile that is already live used to rewrite auth_kv
-    # anyway, and _restore_auth_rows starts with DELETE FROM auth_kv. Every
-    # running kiro-cli reads its bearer token from that table, so the rewrite
-    # pulled the credentials out from under every live session on the machine:
-    # the agent link died mid-turn with "Agent connection closed unexpectedly",
-    # then recovered on its own once the session re-read the new-but-valid
-    # token. Captain calls this endpoint whenever Bosun starts, which is why
-    # launching Captain dropped every Quarterdeck session at once.
-    #
-    # A switch to the active profile has nothing to do, so it now does nothing.
-    # A real switch still rewrites the table — it has to — and still costs the
-    # live sessions their link, which is inherent to swapping credentials.
-    already_live = bool(current_rows) and _token_fingerprint(rows) != "" and \
-        _token_fingerprint(rows) == _token_fingerprint(current_rows)
-
-    if not already_live:
-        # Auto-save current as _previous
-        if current_rows:
-            prev_path = _profile_data_path("_previous")
-            prev_path.write_text("\n".join(json.dumps(r) for r in current_rows) + "\n")
-            prev_path.chmod(0o600)  # contains live OAuth tokens — owner-only
-        try:
-            _restore_auth_rows(rows)
-        except Exception as e:
-            return {"error": f"Failed to switch: {e}"}
-    meta_path = _profile_meta_path(name)
-    email = "?"
-    profile_arn = ""
-    state_profile = ""
-    if meta_path.exists():
-        try:
-            meta_data = json.loads(meta_path.read_text())
-            email = meta_data.get("email", "?")
-            profile_arn = meta_data.get("profile_arn", "")
-            state_profile = meta_data.get("state_profile", "")
-        except Exception:
-            meta_data = {}
-
-    # If critical metadata is missing (profile saved before ARN tracking, or
-    # meta.json was clobbered), back-fill what we can.  The tokens have already
-    # been restored, so `kiro-cli whoami` reflects this profile's SSO identity
-    # (email, provider).  However the profile_arn and state_profile in the DB
-    # may still be the *previous* profile's values — we haven't written them
-    # yet — so we must NOT read those from the live DB.  Only back-fill the
-    # email and token fingerprint; the ARN stays empty until the user re-saves.
-    meta_backfill = False
-    if email in ("?", ""):
-        try:
-            live_info = _current_profile_identity()
-            if live_info.get("email") and live_info["email"] != "unknown":
-                email = live_info["email"]
-                meta_backfill = True
-        except Exception:
-            pass
-    if not _token_fingerprint(rows) == "":
-        meta_backfill = True  # always worth persisting the fingerprint
-    if meta_backfill:
-        try:
-            existing = {}
-            if meta_path.exists():
-                try:
-                    existing = json.loads(meta_path.read_text())
-                except Exception:
-                    pass
-            if email not in ("?", ""):
-                existing.setdefault("email", email)
-            existing.setdefault("token_fingerprint", _token_fingerprint(rows))
-            existing.setdefault("saved_at", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
-            meta_path.write_text(json.dumps(existing))
-        except Exception:
-            pass  # best-effort
-
-    # Also update the state table so kiro-cli uses the correct profile ARN.
-    # kiro-cli reads api.codewhisperer.profile from the state table to determine
-    # which CodeWhisperer profile (and therefore which account/subscription) to
-    # use — swapping the OAuth tokens alone is not enough.
-    if _KIRO_AUTH_DB.exists():
-        try:
-            import sqlite3 as _sqlite3
-            # Use the full saved state_profile if we have it; fall back to
-            # reconstructing from the profile_arn in the meta file.
-            if not state_profile and profile_arn:
-                state_profile = json.dumps({"arn": profile_arn, "profile_name": "QDevProfile-eu-central-1"})
-            if state_profile:
-                con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=5)
-                con.execute(
-                    "INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)",
-                    ("api.codewhisperer.profile", state_profile),
-                )
-                con.commit()
-                con.close()
-        except Exception:
-            pass  # Non-fatal: token switch still happened
-    # Invalidate the cached active profile so the new name shows immediately
-    global _active_profile_cache, _last_profile_switch_at
-    _active_profile_cache = (0.0, "")
-    _last_profile_switch_at = time.time()
-    # Refresh model list synchronously — different profiles have different
-    # entitlements and the frontend fetches /api/options immediately after switch.
-    # Takes ~1-2s but avoids the race where the old list is returned.
-    # Also persist the list in meta.json so /api/options?session_id=... can serve
-    # the session-scoped list even after a subsequent switch (Tier 2 memoisation).
+    if not _KIRO_AUTH_DB.exists():
+        return {"error": "Kiro login database was not found. Log in first."}
+    con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=3)
     try:
-        from .config import available_models as _am
-        refreshed_models = list(_am(force=True))
-    except Exception:
-        refreshed_models = []
-    if refreshed_models:
+        # Serializes switches across dev/stable processes too. A failed state
+        # write rolls back the credential write in this same transaction.
+        con.execute("BEGIN IMMEDIATE")
+        current_rows = [{"key": k, "value": v} for k, v in
+                        con.execute("SELECT key, value FROM auth_kv").fetchall()]
+        row = con.execute("SELECT value FROM state WHERE key='api.codewhisperer.profile'").fetchone()
+        current_state = row[0] if row else ""
         try:
-            meta_path = _profile_meta_path(name)
-            existing_meta: dict = {}
-            if meta_path.exists():
-                try:
-                    existing_meta = json.loads(meta_path.read_text())
-                except Exception:
-                    pass
-            existing_meta["models"] = refreshed_models
-            existing_meta["models_refreshed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            meta_path.write_text(json.dumps(existing_meta))
-        except Exception:
-            pass
-    return {"ok": True, "name": name, "email": email, "profile_arn": profile_arn,
-            "unchanged": already_live}
+            current_arn = json.loads(current_state).get("arn", "")
+        except (ValueError, AttributeError):
+            current_arn = ""
+        same_tokens = _token_fingerprint(rows) == _token_fingerprint(current_rows)
+        unchanged = same_tokens and current_arn == profile_arn
+        if not unchanged:
+            if current_rows:
+                prev_path = _profile_data_path("_previous")
+                prev_path.write_text("\n".join(json.dumps(r) for r in current_rows) + "\n")
+                prev_path.chmod(0o600)
+                _profile_meta_path("_previous").write_text(json.dumps({"state_profile": current_state}))
+            if not same_tokens:
+                con.execute("DELETE FROM auth_kv")
+                con.executemany("INSERT INTO auth_kv (key, value) VALUES (?, ?)",
+                                [(r["key"], r["value"]) for r in rows])
+            con.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)",
+                        ("api.codewhisperer.profile", state_profile))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+    global _active_profile_cache, _last_profile_switch_at
+    _active_profile_cache = (time.time(), name)
+    if not unchanged:
+        _last_profile_switch_at = time.time()
+        _invalidate_sessions_cache()
+    # Saved entitlements make switching immediate; options can discover models
+    # lazily if this old snapshot does not contain a model list.
+    from . import config as cfg
+    models = meta.get("models")
+    cfg._models_cache = ((time.time(), tuple(models)) if isinstance(models, list)
+                         and models and all(isinstance(m, str) for m in models) else None)
+    return {"ok": True, "name": name, "active_profile": name,
+            "email": meta.get("email", ""), "provider": meta.get("provider", ""),
+            "profile_arn": profile_arn, "unchanged": unchanged,
+            "state_profile_written": True}
 
 
 @app.post("/api/profiles/delete")
@@ -9184,6 +9271,11 @@ async def intake(req: Request):
         for k, v in vars_.items():
             task = task.replace("{{" + k + "}}", str(v))
 
+        # If the template has no task (e.g. snapshot-only template), fall back to
+        # an explicit task in the payload so the caller can provide one at launch time.
+        if not task.strip():
+            task = (payload.get("task") or "").strip()
+
         # Check required vars still present as unfilled slots
         missing = [
             v["name"] for v in (tmpl.get("vars") or [])
@@ -9267,100 +9359,24 @@ frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 # Dock badge
 # ---------------------------------------------------------------------------
 
-_badge_label: str | None = None      # last label actually applied
-_badge_script_failures: int = 0       # consecutive osascript failures
-_BADGE_SCRIPT_LIMIT = 2               # after this, stop asking
-
-
-def _set_badge_native(label: str) -> bool:
-    """Set our own dock tile in-process. True if it was applied.
-
-    The backend runs inside the app process (see app.py), so the dock tile is
-    ours to set directly — no Apple event, and therefore no Automation
-    permission prompt and no subprocess. Dock tile updates are AppKit UI work,
-    so this hands the call to the main queue rather than doing it on uvicorn's
-    worker thread.
-    """
-    try:
-        from AppKit import NSApplication, NSOperationQueue
-    except Exception:
-        return False
-
-    def _apply():
-        try:
-            tile = NSApplication.sharedApplication().dockTile()
-            tile.setBadgeLabel_(label)
-            tile.display()
-        except Exception:
-            pass
-
-    try:
-        NSOperationQueue.mainQueue().addOperationWithBlock_(_apply)
-        return True
-    except Exception:
-        return False
-
-
-def _set_badge_via_script(label: str) -> None:
-    """Fallback for a backend running outside the app process.
-
-    `tell application "Quarterdeck"` is an Apple event, which macOS gates behind
-    the Automation permission. When that is denied, every badge change reopens
-    the same prompt and leaves an unreaped osascript behind — which is how a
-    count that flickers with each poll turned into a permission dialog on a
-    loop. So: run it on a thread, wait for it, and after two failures stop
-    trying for the rest of the process's life.
-    """
-    global _badge_script_failures
-    if _badge_script_failures >= _BADGE_SCRIPT_LIMIT:
-        return
-
-    def _run():
-        global _badge_script_failures
-        script = (f'tell application "Quarterdeck" to set the badge of the '
-                  f'dock tile to "{label}"')
-        try:
-            result = subprocess.run(["osascript", "-e", script],
-                                    capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            _badge_script_failures += 1
-            return
-        if result.returncode == 0:
-            _badge_script_failures = 0
-            return
-        _badge_script_failures += 1
-        if _badge_script_failures == _BADGE_SCRIPT_LIMIT:
-            print("[deck] dock badge via osascript failed twice — giving up on "
-                  "it for this run (Automation permission is the usual cause)",
-                  file=sys.stderr)
-
-    threading.Thread(target=_run, daemon=True, name="dock-badge").start()
+from .dock_badge import badge as _dock_badge
 
 
 @app.post("/api/badge")
 async def set_dock_badge(req: Request):
     """Set the macOS dock badge to the given count (0 clears it)."""
-    global _badge_label
     try:
         body = await req.json()
     except Exception:
         body = {}
+    if not isinstance(body, dict):
+        return {"error": "body must be an object"}
     try:
         count = max(0, int(body.get("count", 0)))
     except (TypeError, ValueError):
         return {"error": "count must be a number"}
-    # A label is a dock badge, not a readout: three digits is already more than
-    # the tile can show, and the value is interpolated into AppleScript below.
     label = "999+" if count > 999 else (str(count) if count else "")
-    if label == _badge_label:
-        return {"ok": True, "unchanged": True}
-    _badge_label = label
-    if sys.platform != "darwin":
-        return {"ok": True, "skipped": "not darwin"}
-    if _set_badge_native(label):
-        return {"ok": True, "via": "dock-tile"}
-    _set_badge_via_script(label)
-    return {"ok": True, "via": "osascript"}
+    return _dock_badge.set(label)
 
 
 import mimetypes as _mimetypes
