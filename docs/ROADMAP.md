@@ -74,6 +74,18 @@ Sequencing: after sections 7b's data-layer extraction. Claude Code is the obviou
 - [ ] Visual countdown on card/detail.
 - [ ] Audit: trust-grant, trust-expire, trust-renew.
 
+### 10b. Deny patterns
+
+- [x] Default deny-pattern set covering `rm -rf /`, force-push, destructive SQL,
+      fork bomb. (`deny.py` DEFAULT_PATTERNS) — shipped.
+- [x] AWS Safety Pack — blocks dangerous AWS CLI operations (account/org deletion,
+      public S3 exposure, IAM escalation, CloudTrail disabling). (`deny.py` PACKS)
+      — shipped.
+- [x] Crew Safety Pack — protects against the most dangerous kirocrew autonomous
+      operations. (`deny.py` PACKS) — shipped.
+- [x] Settings UI — view, add, enable/disable, delete patterns; install/remove
+      named packs in one click. (`SettingsPanel.jsx` via `denyApi`) — shipped.
+
 ### 10c. Session resource protection
 
 - [ ] Stall detection (no jsonl write for N minutes while "working").
@@ -99,6 +111,14 @@ Sequencing: after sections 7b's data-layer extraction. Claude Code is the obviou
 ### 10f. Sub-agent visibility
 
 - [ ] Timeout awareness for stuck sub-agents.
+
+### 10g. Side chat
+
+- [x] `/side` command opens a lightweight kiro-cli session against a frozen
+      snapshot of the parent session's tail. (`SideChat.jsx` component) — shipped.
+- [x] Side-chat messages never enter the parent's log; tools available via
+      `fs_read` for file questions. (backend side-chat routes) — shipped.
+- [x] Side-chat tab in detail panel. (`SideChat.jsx` component) — shipped.
 
 ### 10h. Team sharing — skills, agents, sessions
 
