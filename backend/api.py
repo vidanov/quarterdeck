@@ -43,6 +43,7 @@ from .config import (
     SESSIONS_DIR, CREW_SESSIONS_DIR, TAIL_LINES, TERMINALS, VITE_PORT, WORKSPACE_AGENTS_SUBDIR,
     REMOTE_LOG, REMOTE_LOG_MAX_BYTES,
     SETTINGS_FILE, SNAPSHOTS_FILE, FAVOURITES_FILE, SUMMARIES_DIR, SLASH_QUEUES_DIR,
+    CHECKPOINTS_DIR,
     TEMPLATES_FILE,
     TEMPLATE_SNAPSHOTS_DIR,
     available_models, ensure_tool_path, migrate_settings,
@@ -235,6 +236,23 @@ def _sq_send_delayed(session_id: str, text: str, delay: float = 3.5) -> None:
     For V3 sessions with an ACP observer, slash commands are routed through
     _kiro.dev/commands/execute (no timing dependency). Falls back to tmux.
     """
+    # A queued rewind is not a command we can simply type: /rewind opens a TUI
+    # picker that has to be navigated. Hand it to the driver instead, which
+    # knows which turn the seq refers to.
+    rewind_seq = re.fullmatch(r"/rewind (\d+)", text.strip())
+    if rewind_seq:
+        seq = int(rewind_seq.group(1))
+        cp = next((c for c in cp_list(session_id) if c.get("seq") == seq), None)
+        target = (cp or {}).get("text", "")
+        if not target:
+            entry = next((m for m in read_transcript(
+                session_id, after=-1, limit=MESSAGE_LIMIT_MAX).get("messages", [])
+                if m.get("seq") == seq), None)
+            target = (entry or {}).get("text", "")
+        if target:
+            _rewind_run_async(session_id, seq, target)
+            return
+
     def _do():
         # Task 5: ACP path for slash commands on observed sessions.
         if text.startswith("/") and acp_observer.is_attached(session_id):
@@ -875,9 +893,11 @@ def get_last_output(session_id: str) -> str:
 # the start of the file rather than from the tail — a tail-relative index moves
 # every time the agent writes.
 
-# Per-message caps. Generous enough to read, small enough that a 400-turn
-# session does not become a megabyte of JSON on the wire.
-MESSAGE_TEXT_MAX = 16000
+# Per-message caps. Generous enough that a full agent turn is never cut mid-thought
+# (the old 16k ceiling silently dropped the tail of long turns), while still bounding
+# any single message so a runaway line can't turn the session into a megabyte of JSON.
+# Tool-result lines are excluded upstream, so this only applies to prose.
+MESSAGE_TEXT_MAX = 100000
 MESSAGE_LIMIT_DEFAULT = 200
 MESSAGE_LIMIT_MAX = 2000
 # A single jsonl line above this is not parsed. Tool results are one line each
@@ -985,6 +1005,15 @@ def _oversized_entry(seq: int, size: int) -> dict:
         "message_id": "",
         "bytes": size,
     }
+
+
+def _v3_jsonl_mtime(session_id: str) -> float:
+    """Modification time of a V3 session's messages.jsonl, 0 when absent."""
+    try:
+        path = v3mod.messages_jsonl(session_id)
+        return path.stat().st_mtime if path and path.exists() else 0
+    except OSError:
+        return 0
 
 
 def _is_crew_session(session_id: str) -> bool:
@@ -2440,6 +2469,10 @@ def _do_sessions_scan() -> dict:
             "trust_until": None,
             "context_pct": ctx_pct,
             "format": "v3",
+            # Same signal the V1 branch reports: the detail panel syncs its
+            # transcript when this moves, so a line written after the session
+            # went idle still reaches the open panel.
+            "jsonl_mtime": _v3_jsonl_mtime(v3_id),
             **_ownership_fields(v3_id),
             "delivery_notes": [],
         })
@@ -2916,6 +2949,345 @@ def sq_pop(session_id: str) -> dict | None:
     tmp.write_text(json.dumps(rest))
     tmp.replace(path)
     return item
+
+
+# ---------------------------------------------------------------------------
+# Rewind checkpoints — named turn markers per session. A checkpoint is a label
+# plus the prompt it marks (`seq` for ordering, `text` for identifying it in
+# kiro-cli's picker). Rewinding runs kiro-cli's own /rewind at that prompt, so
+# kiro-cli does the forking; Quarterdeck never truncates a conversation itself.
+# ---------------------------------------------------------------------------
+
+def _cp_path(session_id: str) -> Path:
+    return CHECKPOINTS_DIR / f"{session_id}.json"
+
+
+def cp_list(session_id: str) -> list[dict]:
+    try:
+        return json.loads(_cp_path(session_id).read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def cp_add(session_id: str, label: str, seq: int, text: str = "") -> dict:
+    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    item = {
+        "id": str(__import__("uuid").uuid4())[:8],
+        "label": label.strip() or f"turn {seq}",
+        # The prompt's own text. /rewind selects by prompt, not by index, so
+        # this is what identifies the turn in the picker — and what we check the
+        # highlight against before committing.
+        "text": " ".join((text or label or "").split()),
+        "seq": seq,
+        "created_at": time.time(),
+    }
+    items = [i for i in cp_list(session_id) if i.get("seq") != seq]
+    items.append(item)
+    items.sort(key=lambda i: i.get("seq", 0))
+    path = _cp_path(session_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(items))
+    tmp.replace(path)
+    return item
+
+
+def cp_remove(session_id: str, cp_id: str) -> bool:
+    items = cp_list(session_id)
+    new_items = [i for i in items if i.get("id") != cp_id]
+    if len(new_items) == len(items):
+        return False
+    path = _cp_path(session_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(new_items))
+    tmp.replace(path)
+    return True
+
+
+# --- driving kiro-cli's /rewind picker -------------------------------------
+#
+# `/rewind` has no non-interactive form in kiro-cli 2.21.4: it opens a TUI
+# overlay listing your prompts newest-first, filtered by a search box, moved
+# with the arrow keys and committed with Enter. Verified by driving a live
+# session (see tests/test_rewind_picker.py for the parser against real pane
+# text). So Quarterdeck opens the picker, moves to the checkpoint's own prompt,
+# re-reads the pane to confirm the highlight really landed there, and only then
+# presses Enter. On a mismatch it presses Escape and reports — a rewind to the
+# wrong turn is worse than none.
+#
+# Committing forks the conversation into a NEW session id in the SAME pane, so
+# afterwards the tmux session and Quarterdeck's records are re-pointed at the
+# new id (_rewind_rebind) or the card would sit on a transcript that has
+# stopped growing.
+
+_REWIND_OPEN_MARKERS = ("Fork from a previous prompt", "Enter to fork")
+_REWIND_HEADER = re.compile(r"^\s*User Prompt\s+Context used\s*$")
+_REWIND_END = re.compile(r"^[\s─]+$|^\s*Response Snippet\s*$")
+_REWIND_PCT = re.compile(r"\s+\d+%\s*$")
+_REWIND_LOADED = re.compile(r"Loaded session ([0-9a-fA-F-]{36})")
+
+# Per-session outcome of the last rewind, surfaced on GET /checkpoints so the
+# UI can report a failure that happened seconds after the button was clicked.
+_rewind_status: dict[str, dict] = {}
+
+
+def _rewind_picker_open(pane: str) -> bool:
+    return any(m in pane for m in _REWIND_OPEN_MARKERS)
+
+
+def _rewind_rows(pane: str) -> list[dict]:
+    """Parse the picker's prompt rows out of raw pane text.
+
+    Returns [{"text": str, "selected": bool}] in screen order (newest first).
+    """
+    lines = pane.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if _REWIND_HEADER.match(line):
+            start = i + 1
+            break
+    if start is None:
+        return []
+    rows: list[dict] = []
+    for line in lines[start:]:
+        if not line.strip():
+            continue
+        if _REWIND_END.match(line):
+            break
+        selected = line.lstrip().startswith("❯")
+        body = line.lstrip()
+        if selected:
+            body = body[1:]
+        text = _REWIND_PCT.sub("", body).strip()
+        if not text:
+            continue
+        rows.append({"text": text, "selected": selected})
+    return rows
+
+
+def _rewind_norm(text: str) -> str:
+    """Normalise for comparison: the picker collapses and truncates prompts."""
+    return " ".join((text or "").split()).rstrip("….").lower()
+
+
+def _rewind_row_matches(row_text: str, target: str) -> bool:
+    row = _rewind_norm(row_text)
+    tgt = _rewind_norm(target)
+    if not row or not tgt:
+        return False
+    # The picker truncates long prompts to the column width, so a prefix match
+    # in either direction is the honest comparison.
+    return row.startswith(tgt) or tgt.startswith(row)
+
+
+def _rewind_filter_chars(target: str) -> list[str]:
+    """A short alphanumeric run from the prompt, safe to type key-by-key.
+
+    tmux send-keys reads many punctuation characters as key names, and the
+    picker's search box drops a whole string sent with `-l`, so only plain
+    alphanumeric characters are typed, one at a time.
+    """
+    runs = ["".join(c for c in word if c.isalnum())
+            for word in _rewind_norm(target).split()]
+    # The longest word is the most distinctive one available, which matters:
+    # a filter on "the" narrows nothing.
+    best = max((r for r in runs if len(r) >= 3), key=len, default="")
+    return list(best[:12])
+
+
+def _rewind_expected_index(session_id: str, seq: int) -> int | None:
+    """How many prompts sit above this one in a newest-first picker."""
+    transcript = read_transcript(session_id, after=-1, limit=MESSAGE_LIMIT_MAX)
+    if transcript.get("error"):
+        return None
+    turns = [m for m in transcript.get("messages", []) if m.get("is_turn")]
+    if not any(m.get("seq") == seq for m in turns):
+        return None
+    return sum(1 for m in turns if m.get("seq", -1) > seq)
+
+
+def _session_ids_on_disk() -> set[str]:
+    try:
+        return {q.stem for q in SESSIONS_DIR.glob("*.json")}
+    except OSError:
+        return set()
+
+
+def _rewind_detect_fork(known: set[str], since: float, cwd: str) -> str:
+    """Id of a session that appeared after `since` and was forked from ours.
+
+    Reading kiro-cli's `Loaded session <id>` line out of the pane is not
+    reliable: committing the fork replays the whole conversation, and on a long
+    session that line is pushed straight out of the captured window — which is
+    exactly how a working rewind came back as "did not report a forked
+    session". The new session file on disk is the fact; the pane is decoration.
+    """
+    best, best_at = "", 0.0
+    try:
+        entries = list(SESSIONS_DIR.glob("*.json"))
+    except OSError:
+        return ""
+    for q in entries:
+        if q.stem in known:
+            continue
+        try:
+            stat = q.stat()
+            if stat.st_mtime < since - 2:
+                continue
+            data = json.loads(q.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        # A fork always records its parent, which keeps an unrelated session
+        # spawned at the same moment from being mistaken for our rewind.
+        if not data.get("parent_session_id"):
+            continue
+        if cwd and data.get("cwd") != cwd:
+            continue
+        if stat.st_mtime > best_at:
+            best, best_at = data.get("session_id", q.stem), stat.st_mtime
+    return best
+
+
+def _rewind_rebind(old_id: str, new_id: str, keep_seq: int) -> dict:
+    """Follow the fork: re-point tmux, ownership and checkpoints at the new id.
+
+    The forked session is a prefix of the original's JSONL (verified: identical
+    lines 0..n), so checkpoints at or before the rewind point still address the
+    same turns and are carried over. Later ones no longer exist and are dropped.
+    """
+    result = tmux.rename(old_id, new_id)
+    if not result.get("ok"):
+        return result
+    try:
+        sidecar = ownership.read_sidecar(old_id)
+        if sidecar:
+            carried = dict(sidecar)
+            carried["rewound_from"] = old_id
+            ownership.write_sidecar(new_id, carried)
+    except Exception as exc:  # ownership is a nicety; a failure must not strand the pane
+        print(f"[deck] rewind: ownership carry-over failed: {exc}", file=sys.stderr)
+    try:
+        kept = [c for c in cp_list(old_id) if c.get("seq", 0) <= keep_seq]
+        if kept:
+            CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+            path = _cp_path(new_id)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(kept))
+            tmp.replace(path)
+    except OSError as exc:
+        print(f"[deck] rewind: checkpoint carry-over failed: {exc}", file=sys.stderr)
+    return {"ok": True, "tmux": result.get("tmux", "")}
+
+
+def _rewind_drive(session_id: str, seq: int, target: str,
+                  timeout: float = 20.0) -> dict:
+    """Open the /rewind picker, select `target`, and fork there.
+
+    Returns {"ok": True, "new_id": ...} once kiro-cli reports the forked
+    session, or {"ok": False, "error": ...} with the picker left closed.
+    """
+    if not tmux.session_exists(tmux.tmux_name(session_id)):
+        return {"ok": False, "error": "Session is not running"}
+
+    sent = tmux.send_text(session_id, "/rewind")
+    if not sent.get("ok"):
+        return {"ok": False, "error": sent.get("error", "could not send /rewind")}
+
+    deadline = time.time() + timeout
+    pane = ""
+    while time.time() < deadline:
+        time.sleep(0.4)
+        pane = tmux.capture_fresh(session_id)
+        if _rewind_picker_open(pane) and _rewind_rows(pane):
+            break
+    else:
+        return {"ok": False, "error": "/rewind picker did not open"}
+
+    def _close(err: str) -> dict:
+        tmux.send_key(session_id, "Escape")
+        return {"ok": False, "error": err}
+
+    rows = _rewind_rows(pane)
+    index = _rewind_expected_index(session_id, seq)
+    if index is None or index >= len(rows) or not _rewind_row_matches(rows[index]["text"], target):
+        # Either the transcript and the picker disagree, or the prompt is below
+        # the visible window. Narrow with the search box and look again.
+        index = next((i for i, r in enumerate(rows)
+                      if _rewind_row_matches(r["text"], target)), None)
+        if index is None:
+            chars = _rewind_filter_chars(target)
+            if not chars:
+                return _close("Could not find that turn in the rewind picker")
+            for ch in chars:
+                tmux.send_key(session_id, ch)
+                time.sleep(0.08)
+            time.sleep(1.0)
+            pane = tmux.capture_fresh(session_id)
+            rows = _rewind_rows(pane)
+            index = next((i for i, r in enumerate(rows)
+                          if _rewind_row_matches(r["text"], target)), None)
+        if index is None:
+            return _close("Could not find that turn in the rewind picker")
+
+    for _ in range(index):
+        tmux.send_key(session_id, "Down")
+        time.sleep(0.12)
+    time.sleep(0.5)
+
+    # Confirm before committing: the highlight must be on the checkpoint's own
+    # prompt. This is the guard that makes keystroke-driving safe.
+    pane = tmux.capture_fresh(session_id)
+    rows = _rewind_rows(pane)
+    chosen = next((r for r in rows if r["selected"]), None)
+    if chosen is None:
+        return _close("Lost track of the rewind picker")
+    if not _rewind_row_matches(chosen["text"], target):
+        return _close(f"Picker landed on {chosen['text'][:40]!r}, not the checkpoint")
+
+    known = _session_ids_on_disk()
+    started = time.time()
+    meta = read_metadata(session_id) or {}
+    tmux.send_key(session_id, "Enter")
+
+    # Wait for the forked session to show up. A long conversation takes a while
+    # to replay, so this waits longer than the picker steps do.
+    deadline = time.time() + max(timeout, 45.0)
+    while time.time() < deadline:
+        time.sleep(0.5)
+        new_id = _rewind_detect_fork(known, started, meta.get("cwd", ""))
+        if not new_id:
+            # Secondary signal: on a short session the line is still on screen.
+            pane = tmux.capture_fresh(session_id)
+            if not _rewind_picker_open(pane):
+                found = _REWIND_LOADED.findall(pane)
+                new_id = next((i for i in reversed(found) if i != session_id), "")
+        if new_id:
+            rebound = _rewind_rebind(session_id, new_id, seq)
+            return {"ok": True, "new_id": new_id,
+                    "rebound": rebound.get("ok", False),
+                    "rebind_error": rebound.get("error", "")}
+    return {"ok": False, "error": "Rewind did not produce a forked session"}
+
+
+def _rewind_run_async(session_id: str, seq: int, target: str) -> None:
+    """Drive the picker off-request; the UI reads the outcome from _rewind_status."""
+    _rewind_status[session_id] = {"state": "running", "at": time.time()}
+
+    def _do():
+        try:
+            result = _rewind_drive(session_id, seq, target)
+        except Exception as exc:
+            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        entry = {"state": "ok" if result.get("ok") else "error",
+                 "at": time.time(),
+                 "error": result.get("error", ""),
+                 "new_id": result.get("new_id", "")}
+        _rewind_status[session_id] = entry
+        if result.get("new_id"):
+            # The card follows the fork, so the outcome must be readable under
+            # the new id too — that is the id the UI will be polling.
+            _rewind_status[result["new_id"]] = entry
+
+    threading.Thread(target=_do, daemon=True).start()
 
 
 def _read_summary(session_id: str) -> dict | None:
@@ -5425,6 +5797,91 @@ def delete_slash_queue_item(session_id: str, item_id: str):
     return {"ok": removed, "queue": sq_list(session_id)}
 
 
+@app.get("/api/sessions/{session_id}/checkpoints")
+def get_checkpoints(session_id: str):
+    """Named rewind checkpoints for this session, ordered by turn.
+
+    `rewind` carries the outcome of the last rewind for this session: driving
+    the picker takes a few seconds, so the button returns before it is done and
+    the UI reads the result from here.
+    """
+    return {"checkpoints": cp_list(session_id),
+            "rewind": _rewind_status.get(session_id)}
+
+
+@app.post("/api/sessions/{session_id}/checkpoints")
+def add_checkpoint(session_id: str, payload: dict):
+    """Mark a turn as a named checkpoint.
+
+    `seq` must be the transcript line index of a user prompt — that is what
+    kiro-cli's /rewind accepts. Anything else (assistant reply, tool result)
+    would make /rewind fail with "Entry at index N is not a user prompt", so we
+    reject it here rather than let the command fail later.
+    """
+    seq = payload.get("seq")
+    if not isinstance(seq, int) or seq < 0:
+        return {"error": "seq must be a non-negative integer"}
+    if read_metadata(session_id) is None:
+        return {"error": "Session not found"}
+
+    transcript = read_transcript(session_id, after=-1, limit=MESSAGE_LIMIT_MAX)
+    if transcript.get("error"):
+        return {"error": transcript["error"]}
+    entry = next((m for m in transcript.get("messages", []) if m.get("seq") == seq), None)
+    if entry is None:
+        return {"error": f"No turn at seq {seq}"}
+    if not entry.get("is_turn"):
+        return {"error": "Checkpoints can only mark a turn you typed"}
+
+    label = payload.get("label") or (entry.get("text") or "")[:60]
+    item = cp_add(session_id, label, seq, entry.get("text") or "")
+    return {"ok": True, "checkpoint": item, "checkpoints": cp_list(session_id)}
+
+
+@app.delete("/api/sessions/{session_id}/checkpoints/{cp_id}")
+def delete_checkpoint(session_id: str, cp_id: str):
+    """Forget a checkpoint. Does not touch the conversation."""
+    removed = cp_remove(session_id, cp_id)
+    return {"ok": removed, "checkpoints": cp_list(session_id)}
+
+
+@app.post("/api/sessions/{session_id}/checkpoints/{cp_id}/rewind")
+def rewind_to_checkpoint(session_id: str, cp_id: str):
+    """Dispatch `/rewind <seq>` for the given checkpoint.
+
+    Behavior A: fire immediately when the session is idle, otherwise queue the
+    command to run when the current turn ends. Same dispatch path (ACP, falling
+    back to tmux) every other slash command in Quarterdeck uses. kiro-cli does
+    the actual rewind — Quarterdeck only sends the command.
+    """
+    cp = next((c for c in cp_list(session_id) if c.get("id") == cp_id), None)
+    if cp is None:
+        return {"error": "Checkpoint not found"}
+    seq = cp.get("seq")
+    if not isinstance(seq, int):
+        return {"error": "Checkpoint has no turn"}
+    target = cp.get("text") or cp.get("label") or ""
+
+    # Aliveness is judged from tmux, not the lock file: kiro-cli drops the lock
+    # for the old id when /rewind forks, so a session that has already been
+    # rewound once has no lock under the id we are holding — but its pane is
+    # very much alive and is exactly what we need to type into.
+    name = tmux.tmux_name(session_id)
+    if not tmux.session_exists(name) or tmux.pane_dead(name):
+        return {"error": "Rewind needs a running session — resume it first"}
+
+    status = detect_status(session_id, read_lock(session_id), tmux.capture(session_id))
+    if status in ("thinking", "awaiting-approval"):
+        # Behaviour A: queue it for the end of the current turn. The queue drain
+        # routes /rewind back through the picker driver — see _sq_send_delayed.
+        item = sq_push(session_id, f"/rewind {seq}")
+        return {"ok": True, "dispatched": "queued", "command": f"/rewind {seq}",
+                "item": item}
+
+    _rewind_run_async(session_id, seq, target)
+    return {"ok": True, "dispatched": "now", "command": "/rewind"}
+
+
 @app.get("/api/options")
 def get_options(cwd: str = "", session_id: str = ""):
     """Model, effort, agent, engine, and quick-command choices the UI offers.
@@ -6003,7 +6460,11 @@ def dispatch_task(payload: dict):
     task = payload.get("task", "")
     # No directory given: use the configured cwd mode (auto/last/fixed).
     cwd = payload.get("cwd") or cwd_suggestion()["path"] or str(Path.home())
-    if not task.strip():
+    # allow_empty starts a blank interactive session — kiro-cli chat with no
+    # initial prompt — so the "+" tab opens a fresh session you type into. The
+    # normal launcher path still requires a task.
+    allow_empty = bool(payload.get("allow_empty"))
+    if not task.strip() and not allow_empty:
         return {"error": "No task provided"}
 
     # Prepend paste attachment references to the task (dispatch sessions read
@@ -8414,6 +8875,253 @@ def apply_cleanup(payload: dict):
     # Sweep expired paste files alongside session cleanup
     paste_store.sweep()
     return {"deleted": deleted, "failed": failed, "count": len(deleted)}
+
+
+# --- Organize: usage-pattern-driven auto-archive ----------------------------
+
+def _is_captain_session(sess: dict) -> bool:
+    """True if a session belongs to Captain/Crew rather than the human.
+
+    Uses the same signals the grid uses to hide these behind the 🧭 Captain
+    toggle: the machine owns them, so they should not be swept up by an
+    archive pass aimed at the user's own chats.
+    """
+    if sess.get("control") == "crew":
+        return True
+    if sess.get("owner") and sess.get("owner") != "human":
+        return True
+    cwd = sess.get("cwd") or ""
+    if any(cwd.startswith(p) for p in HIDDEN_CWD_PREFIXES):
+        return True
+    title = sess.get("title") or sess.get("name") or ""
+    settings = _load_settings()
+    prefixes = settings.get("hidden-title-prefixes", ["You are Bosun"]) or []
+    return any(title.startswith(p) for p in prefixes)
+
+
+def _count_prompts(session_id: str) -> int:
+    """Count user turns (Prompt entries) in a session's JSONL. Cheap tail read."""
+    jsonl_path = SESSIONS_DIR / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        return 0
+    n = 0
+    try:
+        with open(jsonl_path, "rb") as f:
+            for line in f:
+                # Substring test avoids json.loads on every line of a big log.
+                if b'"Prompt"' in line:
+                    try:
+                        if json.loads(line).get("kind") == "Prompt":
+                            n += 1
+                    except Exception:
+                        continue
+    except OSError:
+        pass
+    return n
+
+
+def _organize_score(sess: dict, now, turns: int) -> tuple[float, str]:
+    """Score a session by keep-importance from its usage pattern.
+
+    Higher score = more worth keeping alive. Returns (score, reason) where
+    reason is a short human-readable explanation the UI shows so the user can
+    judge and give feedback on the heuristic.
+
+    Signals:
+    - recency of last activity  (recent = likely to be resumed → keep)
+    - span of use (first→last)  (used over several days = ongoing work → keep)
+    - conversation depth        (more turns = more invested → keep)
+    - idle staleness            (untouched for days → archive)
+    """
+    from datetime import datetime
+
+    def _parse(ts):
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    created = _parse(sess.get("created_at"))
+    updated = _parse(sess.get("updated_at")) or created
+
+    idle_h = None
+    if updated:
+        idle_h = max(0.0, (now - updated).total_seconds() / 3600.0)
+    span_h = None
+    if created and updated:
+        span_h = max(0.0, (updated - created).total_seconds() / 3600.0)
+
+    score = 0.0
+    bits = []
+
+    # 1. Recency of last activity — the strongest keep signal.
+    if idle_h is None:
+        score += 1.0
+    elif idle_h < 6:
+        score += 5.0
+        bits.append("active in the last few hours")
+    elif idle_h < 24:
+        score += 3.5
+        bits.append("used today")
+    elif idle_h < 72:
+        score += 1.5
+        bits.append(f"last touched {round(idle_h/24)}d ago")
+    elif idle_h < 24 * 7:
+        score += 0.3
+        bits.append(f"idle {round(idle_h/24)}d")
+    else:
+        score -= 1.0
+        bits.append(f"idle {round(idle_h/24)}d — likely finished")
+
+    # 2. Span of use: a session touched across several days is repeated,
+    #    ongoing work rather than a one-shot — worth keeping.
+    if span_h is not None and span_h > 24 and (idle_h is None or idle_h < 24 * 3):
+        score += 2.0
+        bits.append(f"ongoing over {round(span_h/24)}d")
+    elif span_h is not None and span_h < 0.5 and turns <= 1:
+        score -= 1.5
+        bits.append("one-shot, never revisited")
+
+    # 3. Conversation depth.
+    if turns >= 15:
+        score += 1.5
+        bits.append(f"{turns} turns of work")
+    elif turns >= 5:
+        score += 0.6
+        bits.append(f"{turns} turns")
+    elif turns <= 1:
+        score -= 0.5
+
+    reason = "; ".join(bits) if bits else "no clear usage signal"
+    return score, reason
+
+
+@app.get("/api/organize/preview")
+def organize_preview(keep: int = 5, include_captain: bool = False):
+    """Score the sessions on the grid by usage pattern and preselect which to
+    archive, keeping the most important ones alive.
+
+    "Archiving" a session here means ending its process (kill) — it stays in
+    the Archive view and can be resumed, so the action is reversible.
+
+    Query param `keep` bounds how many sessions stay alive (clamped 3..7).
+
+    Response:
+      {
+        "keep": N,
+        "keep_sessions":    [ {id,title,cwd_display,status,turns,idle_hours,score,reason,decision} ],
+        "archive_sessions": [ ... same shape, decision="archive" ],
+        "summary": {"eligible": M, "keep_count": K, "archive_count": A}
+      }
+    Sessions that need the user (awaiting-approval, error), that are still
+    thinking/running, that are favourites, or that Quarterdeck cannot end are
+    never proposed for archiving.
+    """
+    from datetime import datetime, timezone
+
+    keep = max(3, min(7, int(keep) if isinstance(keep, (int, float, str)) and str(keep).lstrip("-").isdigit() else 5))
+    now = datetime.now(timezone.utc)
+
+    with _sessions_cache_lock:
+        listing = _sessions_cache.get("data")
+    if not listing:
+        listing = _refresh_sessions_cache()
+    if not listing:
+        return {"keep": keep, "keep_sessions": [], "archive_sessions": [],
+                "summary": {"eligible": 0, "keep_count": 0, "archive_count": 0},
+                "retry": True}
+    all_sessions = listing.get("sessions", [])
+
+    fav_ids = {f.get("id") for f in _load_favourites()}
+
+    # Statuses that mean "do not touch": the user is mid-flight or being asked.
+    BUSY = {"thinking", "running", "awaiting-approval", "error"}
+    # Only sessions Quarterdeck can end belong in the proposal. Foreign/starting
+    # sessions and internal ones are left alone.
+    ARCHIVABLE_CONTROL = {"managed", "acp", "archived", "foreign"}
+
+    scored = []
+    protected = []  # kept alive for a reason other than score (shown, not scored)
+    captain_skipped = 0
+
+    for s in all_sessions:
+        sid = s.get("id")
+        if not sid:
+            continue
+        # Captain/Crew sessions are machine-owned. Leave them out by default so
+        # an archive pass only touches the user's own chats; include_captain=1
+        # opts them back in.
+        if not include_captain and _is_captain_session(s):
+            captain_skipped += 1
+            continue
+        status = s.get("status", "")
+        control = s.get("control", "")
+        turns = _count_prompts(sid)
+
+        base = {
+            "id": sid,
+            "title": (s.get("title") or s.get("name") or "Untitled")[:80],
+            "cwd_display": s.get("cwd_display", ""),
+            "status": status,
+            "turns": turns,
+        }
+
+        # Protected: never auto-archive.
+        if sid in fav_ids:
+            protected.append({**base, "score": 999, "reason": "favourite — pinned to keep", "decision": "keep"})
+            continue
+        if status in BUSY:
+            protected.append({**base, "score": 999, "reason": f"{status} — needs you, left alone", "decision": "keep"})
+            continue
+        if control not in ARCHIVABLE_CONTROL:
+            protected.append({**base, "score": 999, "reason": f"{control} session — not archivable", "decision": "keep"})
+            continue
+
+        score, reason = _organize_score(s, now, turns)
+        updated = s.get("updated_at")
+        idle_h = None
+        if updated:
+            try:
+                dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                idle_h = round(max(0.0, (now - dt).total_seconds() / 3600.0), 1)
+            except Exception:
+                pass
+        scored.append({**base, "score": round(score, 2), "reason": reason,
+                       "idle_hours": idle_h})
+
+    # Rank by keep-importance. Protected sessions (busy / favourite / not
+    # archivable) are kept regardless and do NOT consume the keep budget — the
+    # budget bounds how many *archivable* sessions stay alive, which is what the
+    # user is choosing between.
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    keep_sessions = list(protected)
+    archive_sessions = []
+    for i, item in enumerate(scored):
+        if i < keep:
+            item["decision"] = "keep"
+            keep_sessions.append(item)
+        else:
+            item["decision"] = "archive"
+            archive_sessions.append(item)
+
+    # Keep list reads best most-recent-first regardless of protected ordering.
+    keep_sessions.sort(key=lambda x: x["score"], reverse=True)
+
+    return {
+        "keep": keep,
+        "include_captain": include_captain,
+        "keep_sessions": keep_sessions,
+        "archive_sessions": archive_sessions,
+        "summary": {
+            "eligible": len(scored),
+            "keep_count": len(keep_sessions),
+            "archive_count": len(archive_sessions),
+            "captain_skipped": captain_skipped,
+        },
+    }
 
 
 # ── Disk status & Time Machine snapshots ────────────────────────────────────

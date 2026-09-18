@@ -1263,6 +1263,48 @@ def capture(session_id: str, lines: int = CAPTURE_LINES) -> str:
     return result
 
 
+def capture_fresh(session_id: str, lines: int = CAPTURE_LINES) -> str:
+    """Capture the pane bypassing the short-lived cache.
+
+    Driving a TUI overlay (the /rewind picker) means acting on what is on
+    screen *now*; a 0.4s-stale frame would have us count rows from the screen
+    before our own keystroke landed.
+    """
+    _capture_cache.pop(session_id, None)
+    return capture(session_id, lines)
+
+
+def rename(old_session_id: str, new_session_id: str) -> dict:
+    """Re-point a managed tmux session at a new kiro-cli session id.
+
+    kiro-cli's /rewind forks in place: the same pane keeps running but under a
+    new session id. Without this the managed entry would still name the old id
+    and Quarterdeck would read a transcript that has stopped growing.
+    """
+    old_name = tmux_name(old_session_id)
+    new_name = tmux_name(new_session_id)
+    if not session_exists(old_name):
+        return {"ok": False, "error": f"No tmux session for {old_session_id}"}
+    if session_exists(new_name):
+        return {"ok": False, "error": f"tmux session {new_name} already exists"}
+    try:
+        _tmux("rename-session", "-t", old_name, new_name)
+    except TmuxError as e:
+        return {"ok": False, "error": str(e)}
+    invalidate_session_cache()
+
+    state = load_state()
+    entry = state["managed"].pop(old_session_id, None)
+    if entry is not None:
+        entry = dict(entry)
+        entry["tmux"] = new_name
+        entry["renamed_from"] = old_session_id
+        state["managed"][new_session_id] = entry
+        save_state(state)
+    _capture_cache.pop(old_session_id, None)
+    return {"ok": True, "tmux": new_name}
+
+
 # --- lifecycle ---
 
 def kill(session_id: str, graceful: bool = True, timeout: float = 8.0) -> dict:

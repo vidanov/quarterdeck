@@ -14,6 +14,9 @@
   --red-bg: #fef2f2;
   --gray-bg: #f1f5f9;
   font-size: 16px;
+  /* User-adjustable transcript text size (Settings → Appearance). The chat
+     text rules read this; children scale from it with em units. */
+  --chat-font-size: 13px;
 }
 
 html {
@@ -824,6 +827,60 @@ body {
 
 /* Slash command queue */
 .slash-queue { padding: 4px 12px 8px; }
+.checkpoint-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 2px 6px;
+  /* Pinned to the top of the transcript: the chips have to stay reachable
+     however far you have scrolled, and the composer they used to sit in is
+     replaced entirely in side-chat and shell views. */
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--bg);
+}
+.checkpoint-chip {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.checkpoint-rewind {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  padding: 3px 6px;
+  cursor: pointer;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.checkpoint-rewind:hover { color: var(--accent, #6ab0ff); }
+.checkpoint-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+}
+.checkpoint-remove:hover { color: var(--danger, #ff6b6b); }
+.checkpoint-jump {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 4px;
+  cursor: pointer;
+}
+.checkpoint-jump:hover { color: var(--accent, #6ab0ff); }
+.checkpoint-rewind[disabled] { opacity: 0.5; cursor: progress; }
 /* ── Secrets modal ─────────────────────────────────────────────────────── */
 .secrets-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 9000; display: flex; align-items: center; justify-content: center; padding: 20px; }
 .secrets-modal-box { background: #fff; border-radius: 12px; padding: 22px 26px; width: 560px; max-width: 96vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,0.22); }
@@ -2694,42 +2751,76 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .dsn-arrow:disabled { opacity: 0.3; cursor: default; }
 .dsn-sessions {
   display: flex;
-  gap: 4px;
+  gap: 3px;
   overflow-x: auto;
   scrollbar-width: none;
   flex: 1;
   min-width: 0;
+  align-items: flex-end;
 }
 .dsn-sessions::-webkit-scrollbar { display: none; }
-.dsn-chip {
+
+/* Browser-style tab: flat baseline, rounded top corners, close affordance. */
+.dsn-tab {
   flex-shrink: 0;
-  padding: 3px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px 4px 10px;
   border: 1px solid var(--border);
-  border-radius: 11px;
-  background: var(--surface);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: var(--gray-bg, var(--surface));
   color: var(--text-dim);
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: 170px;
+  position: relative;
+  top: 1px;
+  transition: background 0.12s ease, color 0.12s ease;
 }
-.dsn-chip:hover { background: var(--gray-bg); color: var(--text); }
-.dsn-chip.active {
-  background: var(--accent-bg);
+.dsn-tab:hover { background: var(--surface); color: var(--text); }
+.dsn-tab.active {
+  background: var(--surface);
   border-color: var(--accent);
   color: var(--accent);
   font-weight: 600;
+  top: 0;
 }
-.dsn-chip-dot {
+.dsn-tab-dot {
   font-size: 7px;
-  margin-right: 4px;
   vertical-align: middle;
   line-height: 1;
   flex-shrink: 0;
 }
-.dsn-chip-attention {
+.dsn-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.dsn-tab-close {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.dsn-tab:hover .dsn-tab-close,
+.dsn-tab.active .dsn-tab-close { opacity: 0.7; }
+.dsn-tab-close:hover { opacity: 1; background: var(--border); color: var(--text); }
+.dsn-tab-attention {
   border-color: var(--status-awaiting, #ca8a04);
   animation: chip-pulse 1.6s ease-in-out infinite;
 }
@@ -2737,6 +2828,20 @@ body.resizing .detail-resize::after { background: var(--accent); }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
 }
+.dsn-restore {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1;
+}
+.dsn-restore:hover { background: var(--gray-bg); color: var(--text); }
 .dsn-new {
   flex-shrink: 0;
   width: 24px;
@@ -2882,6 +2987,25 @@ body.resizing .detail-resize::after { background: var(--accent); }
   color: var(--text-dim);
   font-size: 11px;
 }
+.font-size-picker {
+  display: inline-flex;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.font-size-btn {
+  border: none;
+  background: var(--surface);
+  color: var(--text-dim);
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  min-width: 34px;
+}
+.font-size-btn:hover { background: var(--gray-bg); color: var(--text); }
+.font-size-btn.active { background: var(--accent); color: #fff; }
 /* Something that looks fine and is not — an installed-but-stale hook. Loud
    enough to be read, not an error: nothing is broken yet. */
 .settings-warn {
@@ -4250,7 +4374,8 @@ body.resizing .detail-resize::after { background: var(--accent); }
 
   /* ── Session nav strip (detail panel) ───────────────────────────────── */
   .detail-session-nav { gap: 3px; }
-  .dsn-chip { max-width: 100px; font-size: 11px; padding: 3px 7px; }
+  .dsn-tab { max-width: 120px; font-size: 11px; padding: 4px 5px 4px 8px; }
+  .dsn-tab-close { opacity: 0.6; }
   .dsn-arrow, .dsn-new { width: 28px; height: 28px; }
 
   /* ── Agent summary on card ───────────────────────────────────────────── */
@@ -4459,8 +4584,8 @@ body.resizing .detail-resize::after { background: var(--accent); }
   pre, code { white-space: pre-wrap; overflow-x: auto; max-width: 100%; }
 
   /* ── Readable text sizes ─────────────────────────────────────────────── */
-  .chat-transcript { font-size: 14px; }
-  .chat-bubble { font-size: 14px; line-height: 1.55; }
+  .chat-transcript { font-size: var(--chat-font-size); }
+  .chat-bubble { font-size: 1em; line-height: 1.55; }
   .prompt-pane, .live-pane { font-size: 14px; line-height: 1.5; }
   .live-echo { font-size: 13px; }
   .terminal { font-size: 13px; }
@@ -4645,6 +4770,18 @@ body.resizing .detail-resize::after { background: var(--accent); }
 /* ⌘K fast palette */
 .palette-list { max-height: 360px; overflow-y: auto; padding: 6px; }
 .palette-empty { padding: 18px 12px; color: var(--text-dim); font-size: 13px; text-align: center; }
+.palette-empty-action {
+  cursor: pointer;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: 8px;
+  margin: 6px 8px;
+  background: var(--gray-bg);
+}
+.palette-empty-action:hover { background: var(--border); }
 .palette-row {
   display: flex;
   align-items: center;
@@ -6642,6 +6779,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
 
 /* --- Chat-style transcript --- */
 .chat-transcript {
+  font-size: var(--chat-font-size);
   flex: 1 1 0px;  /* 0px basis means transcript takes leftover space after fixed rows */
   overflow-y: auto;
   padding: 12px 14px 6px;
@@ -6723,7 +6861,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
   border-radius: 14px 14px 3px 14px;
   padding: 8px 12px;
   max-width: 72%;
-  font-size: 13px;
+  font-size: 1em;
   line-height: 1.5;
   word-break: break-word;
 }
@@ -6824,22 +6962,36 @@ body.resizing .detail-resize::after { background: var(--accent); }
   padding-left: 10px;
 }
 .chat-assistant-text {
-  font-size: 13px;
+  font-size: 1em;
   line-height: 1.6;
   color: var(--text);
   max-width: 100%;
   word-break: break-word;
 }
-.chat-assistant-text .md { font-size: 13px; }
+.chat-assistant-text .md { font-size: 1em; }
 .chat-assistant-text .md p { margin: 0 0 6px; }
 .chat-assistant-text .md p:last-child { margin-bottom: 0; }
-.chat-assistant-text .md pre { font-size: 11px; }
+.chat-assistant-text .md pre { font-size: 0.85em; }
 .chat-truncated-marker {
   display: block;
   font-size: 11px;
   color: var(--muted);
   margin-top: 2px;
   font-style: italic;
+}
+.chat-expand-btn {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--accent, #6ea8fe);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.chat-expand-btn:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
 }
 .transcript-load-error {
   display: flex;
@@ -6889,6 +7041,37 @@ body.resizing .detail-resize::after { background: var(--accent); }
   transition: opacity 0.15s, color 0.15s;
 }
 .chat-row-user:hover .chat-fork { opacity: 1; }
+/* The checkpoint control is the one hover-only button people have to find
+   before they know it exists, so it stays faintly visible on every turn — and
+   fully visible, in accent, on a turn that is already a checkpoint. */
+/* Checkpoints get their own colour rather than --accent: --accent is the same
+   green as the user bubble, so an accent marker on a user turn is invisible. */
+:root { --checkpoint: #d97706; }
+.chat-checkpoint-btn { opacity: 0.4; }
+.chat-checkpoint-btn.is-set,
+.chat-row-checkpoint .chat-checkpoint-btn {
+  opacity: 1;
+  color: var(--checkpoint);
+  border-color: var(--checkpoint);
+}
+.chat-row-checkpoint .chat-bubble-user {
+  outline: 2px solid var(--checkpoint);
+  outline-offset: 2px;
+}
+.chat-checkpoint-tag {
+  align-self: flex-end;
+  font-size: 10px;
+  color: var(--checkpoint);
+  letter-spacing: 0.02em;
+  margin-bottom: 3px;
+}
+.chat-row-flash .chat-bubble-user {
+  animation: checkpoint-flash 1.5s ease-out;
+}
+@keyframes checkpoint-flash {
+  0%, 40% { box-shadow: 0 0 0 5px rgba(217, 119, 6, 0.45); }
+  100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0); }
+}
 .chat-fork:hover { color: var(--accent, #3b82f6); border-color: var(--accent, #3b82f6); }
 /* Copy button — appears on hover for both user bubbles and assistant text */
 .chat-copy-btn {
@@ -7396,4 +7579,139 @@ body.resizing .detail-resize::after { background: var(--accent); }
   .sat-modal { max-width: 100%; padding: 16px; }
   .template-row { flex-direction: column; }
   .template-actions { flex-direction: row; }
+}
+
+/* --- Organize (⌘K auto-archive) panel --- */
+.organize-panel {
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 120px);
+}
+.organize-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.organize-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+}
+.organize-keep-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.organize-keep-ctrl strong { color: var(--text); min-width: 12px; text-align: center; }
+.organize-captain-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.organize-captain-note { color: var(--text-dim); }
+.organize-step {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--gray-bg);
+  color: var(--text);
+  cursor: pointer;
+  line-height: 1;
+}
+.organize-step:disabled { opacity: 0.4; cursor: default; }
+.organize-summary {
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.organize-summary strong { color: var(--text); }
+.organize-list {
+  overflow-y: auto;
+  padding: 6px 8px;
+  flex: 1;
+}
+.organize-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.organize-row:hover { background: var(--gray-bg); }
+.organize-row.is-archive { opacity: 0.92; }
+.organize-row input[type="checkbox"] { flex: none; }
+.organize-decision {
+  flex: none;
+  width: 62px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  text-align: center;
+  padding: 2px 0;
+  border-radius: 5px;
+}
+.organize-decision-keep { color: #16a34a; background: rgba(22, 163, 74, 0.12); }
+.organize-decision-archive { color: #d97706; background: rgba(217, 119, 6, 0.14); }
+.organize-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.organize-row-title {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.organize-row-reason {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.organize-row-meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.organize-row-cwd { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.organize-row-score {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--gray-bg);
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+.organize-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+.organize-hint {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-dim);
 }

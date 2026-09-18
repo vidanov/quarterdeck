@@ -46,7 +46,7 @@ import DetailPanel from './components/DetailPanel'
 import CollectionsPanel from './components/CollectionsPanel'
 import { CardReply, SessionCard, AttentionBar, ListView } from './components/SessionGrid'
 import StacksView from './components/StacksView'
-import { QuickCreate, CommandBar, PaletteBar, NewSessionLauncher } from './components/Launcher'
+import { QuickCreate, CommandBar, PaletteBar, NewSessionLauncher, OrganizePanel } from './components/Launcher'
 import Markdown from './components/Markdown'
 import { PasteAttachments, PasteTileCompact } from './components/PasteAttachments'
 import { useProfiles } from './hooks/useProfiles'
@@ -362,6 +362,18 @@ export default function App() {
   // Lifted out of DetailPanel so a card's double-click can open straight into
   // the maximised view, and so F works wherever focus happens to be.
   const [expanded, setExpanded] = useState(false)
+  // When a new chat is dispatched from the maximised view, the ghost tab is
+  // selected first; once the real session lands in a poll we swap to it.
+  const pendingSelectRef = useRef(null)
+  useEffect(() => {
+    const wantId = pendingSelectRef.current
+    if (!wantId) return
+    const real = sessions.find(s => s.id === wantId)
+    if (real) {
+      pendingSelectRef.current = null
+      selectSession(real)
+    }
+  }, [sessions])
   const [returnView, setReturnView] = useState(null) // view to return to when closing expanded detail
   // Focus mode: grid collapses to a thin attention strip, panel takes full width.
   // Different from expanded (which overlays): the grid stays visible.
@@ -380,6 +392,7 @@ export default function App() {
   const [wallCollections, setWallCollections] = useState([])
   const [cmdBarOpen, setCmdBarOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [organizeOpen, setOrganizeOpen] = useState(false)
   const [controlFilter, setControlFilter] = useState(() => localStorage.getItem('control-filter') || 'managed')
   const [statusFilter, setStatusFilter] = useState(() => localStorage.getItem('status-filter') || null)
   const [folderFilter, setFolderFilter] = useState(() => localStorage.getItem('folder-filter') || null)
@@ -401,6 +414,22 @@ export default function App() {
     setPaneThemeApp(next)
     localStorage.setItem('pane-theme', next)
     settingsApi.saveSettings({ 'pane-theme': next }).catch(() => {})
+  }
+
+  // Transcript text size (Settings → Appearance). Named steps map to px and
+  // drive the --chat-font-size CSS variable; chat text scales from it in em.
+  const CHAT_FONT_PX = { small: 12, medium: 13, large: 15, xlarge: 17 }
+  const [chatFontSize, setChatFontSizeState] = useState(
+    () => localStorage.getItem('chat-font-size') || 'medium')
+  useEffect(() => {
+    const px = CHAT_FONT_PX[chatFontSize] || CHAT_FONT_PX.medium
+    document.documentElement.style.setProperty('--chat-font-size', `${px}px`)
+  }, [chatFontSize])
+  const changeChatFontSize = (v) => {
+    if (!CHAT_FONT_PX[v]) return
+    setChatFontSizeState(v)
+    localStorage.setItem('chat-font-size', v)
+    settingsApi.saveSettings({ 'chat-font-size': v }).catch(() => {})
   }
 
   // Working sessions are collapsed by default: the point of the view is what
@@ -804,6 +833,10 @@ export default function App() {
           localStorage.setItem('pane-theme', v)
         }
       }
+      if (d['chat-font-size'] && CHAT_FONT_PX[d['chat-font-size']]) {
+        setChatFontSizeState(d['chat-font-size'])
+        localStorage.setItem('chat-font-size', d['chat-font-size'])
+      }
     }).catch(() => {}).finally(() => setSettingsLoaded(true))
   }, [])
 
@@ -931,11 +964,14 @@ export default function App() {
     // that will appear on the next poll.
     const nonce = `opt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     const folderName = request.cwd ? request.cwd.split('/').pop() : ''
+    // A blank "new chat" has no task text — show a label instead of the "…"
+    // placeholder so the tab and card read sensibly until the real one lands.
+    const display = request.task || request.label || '…'
     const ghost = {
       id: nonce,
       nonce,
-      title: request.task || '…',
-      name: request.task ? request.task.slice(0, 40) : '…',
+      title: display,
+      name: display === '…' ? '…' : display.slice(0, 40),
       folder: folderName,
       cwd: request.cwd || '',
       status: 'starting',
@@ -945,10 +981,18 @@ export default function App() {
       _optimistic: true,
     }
     addOptimistic(ghost)
+    // Dispatched from the maximised detail view: select the ghost so the new
+    // chat becomes the active tab in the same view instead of dropping back to
+    // the grid. Once the real session lands on the next poll, its tab replaces
+    // the ghost and the user selects it.
+    if (expanded) selectSession(ghost)
     api.dispatch(request)
       .then(d => {
         resolveOptimistic(nonce)
         if (d.error) { notify(`Dispatch failed: ${d.error}`, 'error'); return }
+        // Swap the ghost tab for the real session once it appears in a poll,
+        // so the maximised view lands on the live tab (see pendingSelectId effect).
+        if (expanded && d.id) pendingSelectRef.current = d.id
         fetchSessions()
         refreshBurst([800, 2000, 4000, 8000])
       })
@@ -956,6 +1000,16 @@ export default function App() {
         rejectOptimistic(nonce)
         notify('Dispatch failed: backend unreachable', 'error')
       })
+  }
+
+  // The "+" tab in the maximised view: start a fresh, empty session (no task
+  // prompt) in the same working directory and drop it in as a new tab. The
+  // backend spawns `kiro-cli chat` with no initial message; the user types the
+  // first turn in the new tab. Reuses handleDispatch so the ghost/select/swap
+  // behaviour is identical to a normal dispatch.
+  const handleNewChat = (cwd) => {
+    const dir = cwd || cwdSuggestion?.path || ''
+    handleDispatch({ task: '', label: 'New chat', cwd: dir, allow_empty: true })
   }
 
   const handleKillSession = async (sessionId, e) => {
@@ -2198,7 +2252,7 @@ export default function App() {
             </div>
           )}
           {view === 'settings' && (
-            <SettingsPanel options={options} paneTheme={paneTheme} onTogglePaneTheme={togglePaneTheme} showHidden={showHidden} onChangeShowHidden={changeShowHidden} showCrew={showCrew} onChangeShowCrew={changeShowCrew} sessionViewMode={sessionViewMode} onChangeViewDefault={handleChangeViewDefault} />
+            <SettingsPanel options={options} paneTheme={paneTheme} onTogglePaneTheme={togglePaneTheme} chatFontSize={chatFontSize} onChangeChatFontSize={changeChatFontSize} showHidden={showHidden} onChangeShowHidden={changeShowHidden} showCrew={showCrew} onChangeShowCrew={changeShowCrew} sessionViewMode={sessionViewMode} onChangeViewDefault={handleChangeViewDefault} />
           )}
           {view === 'stacks' && (
             <div className="stacks-panel">
@@ -2226,10 +2280,17 @@ export default function App() {
               changeCollectionSource('archive')
             } else if (cmd.type === 'new') {
               setLauncherOpen(true)
+            } else if (cmd.type === 'organize') {
+              setOrganizeOpen(true)
             } else if (cmd.type === 'ask') {
               setCmdBarOpen(true)
             }
           }}
+        />
+        <OrganizePanel
+          open={organizeOpen}
+          onClose={() => setOrganizeOpen(false)}
+          onArchived={() => refreshBurst([800, 2500, 5000])}
         />
         <CommandBar open={cmdBarOpen} onClose={() => setCmdBarOpen(false)} onAction={handleCmdBarAction} onOpenSession={(id) => {
           // Find the session and open it in the detail panel
@@ -2247,7 +2308,7 @@ export default function App() {
         {selected && typeof selected === 'object' && <DetailPanel session={sessions.find(s => s.id === selected.id) || selected} onClose={() => { 
           if (returnView) { changeSessionViewMode(returnView); setReturnView(null) }
           selectSession(null); setFocusMode(false)
-        }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActiveWithFav} onNewSession={(cwd) => { if (expanded) setExpanded(false); setLauncherOpen(true); if (cwd) setLauncherCwd(cwd) }} onRestartHere={handleRestartHere} fromWall={returnView === 'wall'} favourites={favourites} onToggleFavourite={handleToggleFavourite} />}
+        }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActiveWithFav} onNewSession={(cwd) => { if (expanded) setExpanded(false); setLauncherOpen(true); if (cwd) setLauncherCwd(cwd) }} onNewChat={handleNewChat} onRestartHere={handleRestartHere} fromWall={returnView === 'wall'} favourites={favourites} onToggleFavourite={handleToggleFavourite} />}
         {/* Wall / ambient view overlay — big tiles, interactive, full screen */}
         {sessionViewMode === 'wall' && (() => {
           const wallSendInput = () => {

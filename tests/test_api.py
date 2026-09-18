@@ -172,6 +172,33 @@ class TestTranscript:
         assert any(t.get("name") == "fs_read" for t in msg["tools"]), (
             "tool names must be returned alongside the text")
 
+    def test_re_reading_the_last_line_returns_its_completed_text(self, tmp_path):
+        """A poll must be able to re-fetch the newest line it already holds.
+
+        The detail panel polls with after = newest_seq - 1 precisely so a line
+        it read while still short comes back complete. `after` is strictly
+        exclusive, so asking from newest_seq could never return it — that is why
+        a last assistant message finished after the read stayed missing until
+        the session window was closed and reopened.
+        """
+        path = tmp_path / f"{self.SID}.jsonl"
+        self._write(tmp_path, [
+            self._entry("Prompt", "question"),
+            self._entry("AssistantMessage", "partial"),
+        ])
+        with patch.object(api, "SESSIONS_DIR", tmp_path):
+            first = api.read_transcript(self.SID, after=-1, limit=200)
+            newest = first["messages"][-1]["seq"]
+            # kiro rewrites the file with the completed last line.
+            self._write(tmp_path, [
+                self._entry("Prompt", "question"),
+                self._entry("AssistantMessage", "partial and then the rest"),
+            ])
+            again = api.read_transcript(self.SID, after=newest - 1, limit=200)
+        assert [m["seq"] for m in again["messages"]] == [newest]
+        assert again["messages"][0]["text"] == "partial and then the rest"
+        assert path.exists()
+
     def test_entry_text_is_capped_at_MESSAGE_TEXT_MAX(self, tmp_path):
         """Text longer than MESSAGE_TEXT_MAX is truncated and flagged."""
         long_text = "x" * (api.MESSAGE_TEXT_MAX + 1)

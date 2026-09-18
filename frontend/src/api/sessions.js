@@ -25,6 +25,12 @@ export const resizeSession = (id, cols, rows) =>
 export const renameSession = (id, title) => postJSON(`/api/sessions/${id}/rename`, { title })
 export const killSession = (id) => post(`/api/sessions/${id}/kill`)
 export const resumeSession = (id) => post(`/api/sessions/${id}/resume`)
+
+// Usage-pattern-driven auto-archive: scores the grid and preselects which
+// sessions to archive (kill), keeping the `keep` most important alive.
+// includeCaptain=1 opts machine-owned Captain/Crew sessions back into the pass.
+export const organizePreview = (keep = 5, includeCaptain = false) =>
+  getJSON(`/api/organize/preview?keep=${keep}${includeCaptain ? '&include_captain=1' : ''}`)
 export const takeoverSession = (id) => post(`/api/sessions/${id}/takeover`)
 // Recover a session whose agent link dropped: same id, same history, and the
 // prompt that died with the link is re-sent once the resumed session is ready.
@@ -73,6 +79,16 @@ export const cancelPending = (nonce) => post(`/api/pending/${nonce}/cancel`)
 export const getSlashQueue = (id) => getJSON(`/api/sessions/${id}/slash-queue`)
 export const pushSlashQueue = (id, text) => postJSON(`/api/sessions/${id}/slash-queue`, { text })
 export const deleteSlashQueueItem = (id, itemId) => del(`/api/sessions/${id}/slash-queue/${itemId}`)
+
+// Rewind checkpoints — named turn markers. Rewinding drives kiro-cli's own
+// /rewind picker, which takes a few seconds; getCheckpoints carries the
+// outcome back as `rewind`.
+export const getCheckpoints = (id) => getJSON(`/api/sessions/${id}/checkpoints`)
+export const addCheckpoint = (id, seq, label) =>
+  postJSON(`/api/sessions/${id}/checkpoints`, { seq, label })
+export const deleteCheckpoint = (id, cpId) => del(`/api/sessions/${id}/checkpoints/${cpId}`)
+export const rewindToCheckpoint = (id, cpId) =>
+  postJSON(`/api/sessions/${id}/checkpoints/${cpId}/rewind`, {})
 
 export const summarize = (id) => postJSON(`/api/sessions/${id}/summarize`, {})
 export const dismissSession = (id) => post(`/api/sessions/${id}/dismiss`)

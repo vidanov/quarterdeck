@@ -26,6 +26,11 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
   const [qcHistIdx, setQcHistIdx] = useState(-1)
   const [selectedCwd, setSelectedCwd] = useState('')
   const [folderOpen, setFolderOpen] = useState(false)
+  // The suggestion prop is captured once at app mount, so its Finder path goes
+  // stale the moment the user switches Finder windows. Re-fetch when the picker
+  // opens so "auto" always reflects the *current* frontmost Finder folder.
+  const [liveSuggestion, setLiveSuggestion] = useState(null)
+  const activeSuggestion = liveSuggestion || suggestion
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyIdx, setHistoryIdx] = useState(-1)
   const inputRef = useRef(null)
@@ -66,11 +71,26 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
   }
   const unpinFolder = (cwd) => savePinned(pinned.filter(p => p.cwd !== cwd))
 
+  // Toggle the folder picker; on open, refresh the auto/Finder suggestion so it
+  // reflects the current frontmost Finder window rather than the app-start one.
+  const toggleFolder = () => {
+    setFolderOpen(open => {
+      const next = !open
+      if (next) {
+        settingsApi.getCwdSuggestion()
+          .then(setLiveSuggestion)
+          .catch(() => {})
+      }
+      return next
+    })
+    setHistoryOpen(false)
+  }
+
   // The folder shown in the prompt prefix
   const activeFolderName = selectedCwd
     ? selectedCwd.split('/').pop()
-    : suggestion
-      ? (suggestion.path.split('/').pop() || '/')
+    : activeSuggestion
+      ? (activeSuggestion.path.split('/').pop() || '/')
       : null
 
   // Derive top folders from recent sessions, merged with pinned
@@ -121,7 +141,7 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
     setFolderOpen(false)
     onDispatch({
       task: t,
-      cwd: cwd !== undefined ? cwd : (selectedCwd || (suggestion ? suggestion.path : '') || ''),
+      cwd: cwd !== undefined ? cwd : (selectedCwd || (activeSuggestion ? activeSuggestion.path : '') || ''),
       model: '',
       effort: '',
       agent: localStorage.getItem('launch-agent') || '',
@@ -183,8 +203,8 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
         <button
           type="button"
           className="qc-prefix"
-          onClick={() => { setFolderOpen(v => !v); setHistoryOpen(false) }}
-          title={selectedCwd || (suggestion ? suggestion.path : 'Choose folder')}
+          onClick={toggleFolder}
+          title={selectedCwd || (activeSuggestion ? activeSuggestion.path : 'Choose folder')}
         >
           <span className="qc-prefix-folder">{activeFolderName || '~'}</span>
           <span className="qc-prefix-arrow">›</span>
@@ -233,16 +253,16 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
       {folderOpen && (
         <div className="qc-folder-dropdown">
           <div className="qc-folder-list">
-            {/* "Inferred" option */}
-            {suggestion && (
+            {/* "Inferred" option — current Finder folder (refreshed on open) */}
+            {activeSuggestion && (
               <button
                 type="button"
                 className={`qc-folder-item${!selectedCwd ? ' active' : ''}`}
                 onClick={() => { setSelectedCwd(''); setFolderOpen(false) }}
               >
                 <span className="qc-folder-icon">⟳</span>
-                <span className="qc-folder-name">{suggestion.path.split('/').pop() || '/'}</span>
-                <span className="qc-folder-hint">auto</span>
+                <span className="qc-folder-name">{activeSuggestion.path.split('/').pop() || '/'}</span>
+                <span className="qc-folder-hint">{activeSuggestion.source === 'finder' ? 'Finder' : 'auto'}</span>
               </button>
             )}
             {popularFolders.map(f => (
@@ -274,10 +294,32 @@ function QuickCreate({ onDispatch, suggestion, sessions }) {
 // Subsequence fuzzy match: every char of `q` appears in `text` in order.
 // Returns a score (lower = better) or -1 for no match. Contiguous runs and
 // early matches score better, so "auth" ranks "auth bug" above "a big truth".
+// Lower score = better match (callers sort ascending). Substring matches live
+// in a low score band and always outrank scattered subsequence matches, which
+// live in a high band. Without this, a query like "FDP" fuzzy-matched f…d…p
+// scattered across an unrelated path (e.g. "git diff … FlowPane") and buried
+// the session whose path actually contains "FDP" — the exact substring scored
+// worse because of the long-prefix gap penalty.
+const SUBSEQ_BASE = 10000  // subsequence matches never beat a substring match
+
 function fuzzyScore(text, q) {
   if (!q) return 0
   text = text.toLowerCase()
   q = q.toLowerCase()
+
+  // Contiguous substring: the strong, expected match. Score by position so an
+  // earlier hit wins; a word-boundary hit (start of a path segment or after a
+  // space) is rewarded further. This mirrors the substring behaviour of the
+  // Collections search that the user finds correct.
+  const idx = text.indexOf(q)
+  if (idx !== -1) {
+    const atBoundary = idx === 0 || /[\s/\-_.]/.test(text[idx - 1])
+    return idx + (atBoundary ? 0 : 50)
+  }
+
+  // Fallback: scattered subsequence. Kept for typo/loose matching, but pushed
+  // into a band above every substring match so it only surfaces when nothing
+  // matched contiguously.
   let ti = 0, score = 0, lastHit = -1
   for (let qi = 0; qi < q.length; qi++) {
     const c = q[qi]
@@ -288,7 +330,7 @@ function fuzzyScore(text, q) {
     lastHit = found
     ti = found + 1
   }
-  return score
+  return SUBSEQ_BASE + score
 }
 
 // ⌘K — fast local command palette. No network, no LLM. Fuzzy-matches open
@@ -310,15 +352,18 @@ function PaletteBar({ open, onClose, onOpenSession, onCommand, favourites = [] }
   }, [open])
 
   // Static navigation commands. `run` is dispatched to the parent by key.
+  // `keywords` widen matching so natural queries ("clean up", "which to
+  // archive", "tidy sessions") reach the right command without the exact label.
   const commands = useMemo(() => [
-    { id: 'cmd:active', label: 'Go to Active grid', hint: 'view', run: () => onCommand({ type: 'view', view: 'active' }) },
-    { id: 'cmd:collections', label: 'Go to Collections', hint: 'view', run: () => onCommand({ type: 'view', view: 'collections' }) },
-    { id: 'cmd:archive', label: 'Go to Archive', hint: 'view', run: () => onCommand({ type: 'archive' }) },
-    { id: 'cmd:stats', label: 'Go to Stats', hint: 'view', run: () => onCommand({ type: 'view', view: 'stats' }) },
-    { id: 'cmd:stacks', label: 'Go to Stacks', hint: 'view', run: () => onCommand({ type: 'view', view: 'stacks' }) },
-    { id: 'cmd:settings', label: 'Open Settings', hint: 'view', run: () => onCommand({ type: 'view', view: 'settings' }) },
-    { id: 'cmd:new', label: 'New session…', hint: 'action', run: () => onCommand({ type: 'new' }) },
-    { id: 'cmd:ask', label: 'Ask the assistant… (⌘J)', hint: 'AI', run: () => onCommand({ type: 'ask' }) },
+    { id: 'cmd:active', label: 'Go to Active grid', hint: 'view', keywords: 'grid running live', run: () => onCommand({ type: 'view', view: 'active' }) },
+    { id: 'cmd:collections', label: 'Go to Collections', hint: 'view', keywords: 'groups snapshots recipes', run: () => onCommand({ type: 'view', view: 'collections' }) },
+    { id: 'cmd:archive', label: 'Go to Archive', hint: 'view', keywords: 'archived history old past', run: () => onCommand({ type: 'archive' }) },
+    { id: 'cmd:organize', label: 'Organize sessions — archive stale, keep important', hint: 'action', keywords: 'organize archive keep clean cleanup tidy stale prune declutter which close reduce', run: () => onCommand({ type: 'organize' }) },
+    { id: 'cmd:stats', label: 'Go to Stats', hint: 'view', keywords: 'statistics usage report activity', run: () => onCommand({ type: 'view', view: 'stats' }) },
+    { id: 'cmd:stacks', label: 'Go to Stacks', hint: 'view', keywords: 'queue tasks pending', run: () => onCommand({ type: 'view', view: 'stacks' }) },
+    { id: 'cmd:settings', label: 'Open Settings', hint: 'view', keywords: 'preferences config hooks remote', run: () => onCommand({ type: 'view', view: 'settings' }) },
+    { id: 'cmd:new', label: 'New session…', hint: 'action', keywords: 'launch start dispatch create', run: () => onCommand({ type: 'new' }) },
+    { id: 'cmd:ask', label: 'Ask the assistant… (⌘J)', hint: 'AI', keywords: 'concierge question search find', run: () => onCommand({ type: 'ask' }) },
   ], [onCommand])
 
   // Build the ranked candidate list. Sessions + favourites + commands, all
@@ -337,17 +382,40 @@ function PaletteBar({ open, onClose, onOpenSession, onCommand, favourites = [] }
     const favRows = favourites
       .filter(f => !sessions.some(s => s.id === f.id))
       .map(f => ({ kind: 'session', id: f.id, label: f.title || f.id, hint: '★', sub: showPath(f), raw: f }))
-    const cmdRows = commands.map(c => ({ kind: 'command', id: c.id, label: c.label, hint: c.hint, run: c.run }))
+    const cmdRows = commands.map(c => ({ kind: 'command', id: c.id, label: c.label, hint: c.hint, keywords: c.keywords || '', run: c.run }))
 
     if (!q) {
       // No query: commands first, then most-recent sessions.
       return [...cmdRows, ...sessionRows.slice(0, 8)]
     }
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean)
     const scored = []
     for (const r of [...cmdRows, ...sessionRows, ...favRows]) {
-      const hay = r.kind === 'session' ? `${r.label} ${r.sub}` : r.label
+      const hay = r.kind === 'session' ? `${r.label} ${r.sub}` : `${r.label} ${r.keywords || ''}`
+      const lowHay = hay.toLowerCase()
+      // Primary: contiguous substring wins, scattered subsequence as fallback.
       const sc = fuzzyScore(hay, q)
-      if (sc >= 0) scored.push({ ...r, _score: sc + (r.kind === 'command' ? 0 : 2) })
+      if (sc >= 0) {
+        scored.push({ ...r, _score: sc + (r.kind === 'command' ? 0 : 2) })
+        continue
+      }
+      // Multi-word fallback: a query like "porsche workshop" rarely forms a
+      // clean subsequence, but each word appears as a substring. Require every
+      // word to be present, then rank by how early the first word lands. This
+      // matches the Collections search, which the user finds correct.
+      if (words.length > 1 && words.every(w => lowHay.includes(w))) {
+        const pos = lowHay.indexOf(words[0])
+        scored.push({ ...r, _score: 5000 + pos + (r.kind === 'command' ? 0 : 2) })
+        continue
+      }
+      // Command-only fallback: surface a navigation command even on a partial
+      // word match ("which keep archive" → Organize).
+      if (r.kind === 'command' && words.length) {
+        const hits = words.filter(w => lowHay.includes(w)).length
+        if (hits > 0) {
+          scored.push({ ...r, _score: (words.length - hits) * 5 })
+        }
+      }
     }
     scored.sort((a, b) => a._score - b._score)
     return scored.slice(0, 12)
@@ -364,7 +432,19 @@ function PaletteBar({ open, onClose, onOpenSession, onCommand, favourites = [] }
   const onKeyDown = (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, rows.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => Math.max(a - 1, 0)) }
-    else if (e.key === 'Enter') { e.preventDefault(); runRow(rows[active]) }
+    else if (e.key === 'Enter') {
+      e.preventDefault()
+      if (rows.length === 0) {
+        // Dead-end recovery: an archive/cleanup-flavoured query with no row
+        // match runs Organize rather than doing nothing.
+        const q = query.trim().toLowerCase()
+        if (/(archive|keep|clean|tidy|stale|prune|organi|declutter|which)/.test(q)) {
+          onCommand({ type: 'organize' }); onClose()
+        }
+        return
+      }
+      runRow(rows[active])
+    }
     else if (e.key === 'Escape') { e.preventDefault(); onClose() }
   }
 
@@ -387,7 +467,20 @@ function PaletteBar({ open, onClose, onOpenSession, onCommand, favourites = [] }
         </div>
         <div className="palette-list" ref={listRef}>
           {rows.length === 0 && (
-            <div className="palette-empty">No matches. Press ⌘J to ask the assistant.</div>
+            (() => {
+              const q = query.trim().toLowerCase()
+              const wantsOrganize = /(archive|keep|clean|tidy|stale|prune|organi|declutter|which)/.test(q)
+              if (wantsOrganize) {
+                return (
+                  <div className="palette-empty palette-empty-action"
+                       onClick={() => { onCommand({ type: 'organize' }); onClose() }}>
+                    Organize sessions — archive stale, keep important
+                    <span className="palette-hint">↵ run</span>
+                  </div>
+                )
+              }
+              return <div className="palette-empty">No matches. Press ⌘J to ask the assistant.</div>
+            })()
           )}
           {rows.map((r, i) => (
             <div key={r.id} data-idx={i}
@@ -919,4 +1012,165 @@ function NewSessionLauncher({ options, onDispatch, onCancel, initialCwd }) {
 // list the panel was opened from.
 
 
-export { QuickCreate, CommandBar, PaletteBar, NewSessionLauncher }
+// ⌘K → "Organize sessions" review panel. Fetches the backend's usage-pattern
+// scoring, preselects the archive candidates, and shows *why* each session is
+// kept or archived so the user can adjust the selection and give feedback on
+// the heuristic. "Archive" = kill the session; it stays resumable in Archive.
+function OrganizePanel({ open, onClose, onArchived }) {
+  const notify = useToast()
+  const [keep, setKeep] = useState(5)
+  const [includeCaptain, setIncludeCaptain] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [data, setData] = useState(null)
+  const [selected, setSelected] = useState(() => new Set())  // ids to archive
+  const [working, setWorking] = useState(false)
+
+  const load = useCallback((k, inclCaptain) => {
+    setLoading(true)
+    setData(null)
+    api.organizePreview(k, inclCaptain)
+      .then(d => {
+        setData(d)
+        // Preselect exactly what the backend proposed to archive.
+        setSelected(new Set((d.archive_sessions || []).map(s => s.id)))
+      })
+      .catch(() => notify('Could not load organize preview', 'error'))
+      .finally(() => setLoading(false))
+  }, [notify])
+
+  useEffect(() => {
+    if (open) { setKeep(5); setIncludeCaptain(false); load(5, false) }
+  }, [open, load])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  const toggle = (id) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  const changeKeep = (k) => {
+    const clamped = Math.max(3, Math.min(7, k))
+    setKeep(clamped)
+    load(clamped, includeCaptain)
+  }
+
+  const toggleCaptain = () => {
+    const next = !includeCaptain
+    setIncludeCaptain(next)
+    load(keep, next)
+  }
+
+  const doArchive = () => {
+    const ids = [...selected]
+    if (ids.length === 0) return
+    setWorking(true)
+    // Sequential kills with a small gap — each ends a tmux process and races
+    // for correlation if fired all at once.
+    ids.reduce((chain, id, i) => chain.then(() => new Promise(resolve => {
+      setTimeout(() => { api.killSession(id).then(resolve).catch(resolve) }, i * 150)
+    })), Promise.resolve()).then(() => {
+      setWorking(false)
+      notify(`Archived ${ids.length} session${ids.length === 1 ? '' : 's'} — resumable from Archive`)
+      if (onArchived) onArchived()
+      onClose()
+    })
+  }
+
+  if (!open) return null
+
+  const rows = data
+    ? [...(data.keep_sessions || []), ...(data.archive_sessions || [])]
+    : []
+
+  return (
+    <div className="cmdbar-backdrop" onClick={onClose}>
+      <div className="cmdbar organize-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="organize-head">
+          <span className="cmdbar-icon">⌘K</span>
+          <span className="organize-title">Organize sessions</span>
+          <label className="organize-captain-toggle" title="Include machine-owned Captain / Crew sessions in the archive pass">
+            <input type="checkbox" checked={includeCaptain} disabled={loading}
+                   onChange={toggleCaptain} />
+            include Captain
+          </label>
+          <span className="organize-keep-ctrl">
+            keep
+            <button className="organize-step" disabled={keep <= 3 || loading}
+                    onClick={() => changeKeep(keep - 1)}>−</button>
+            <strong>{keep}</strong>
+            <button className="organize-step" disabled={keep >= 7 || loading}
+                    onClick={() => changeKeep(keep + 1)}>+</button>
+            alive
+          </span>
+        </div>
+
+        {loading && <div className="palette-empty">Scoring sessions by usage pattern…</div>}
+
+        {!loading && data && (
+          <>
+            <div className="organize-summary">
+              Keeping <strong>{(data.keep_sessions || []).length}</strong>,
+              archiving <strong>{selected.size}</strong> of {(data.archive_sessions || []).length} proposed.
+              Archiving ends the session but keeps it resumable in Archive.
+              {!includeCaptain && data.summary?.captain_skipped > 0 && (
+                <span className="organize-captain-note">
+                  {' '}{data.summary.captain_skipped} Captain session{data.summary.captain_skipped === 1 ? '' : 's'} left out.
+                </span>
+              )}
+            </div>
+            <div className="organize-list">
+              {rows.map(s => {
+                const isArchiveCandidate = s.decision === 'archive'
+                const isProtected = s.score === 999
+                const checked = selected.has(s.id)
+                return (
+                  <label key={s.id}
+                         className={`organize-row ${isArchiveCandidate ? 'is-archive' : 'is-keep'}`}
+                         title={isProtected ? 'Protected — cannot be archived here' : ''}>
+                    <input type="checkbox"
+                           checked={checked}
+                           disabled={isProtected}
+                           onChange={() => toggle(s.id)} />
+                    <span className={`organize-decision organize-decision-${checked ? 'archive' : 'keep'}`}>
+                      {isProtected ? 'protected' : (checked ? 'archive' : 'keep')}
+                    </span>
+                    <span className="organize-row-main">
+                      <span className="organize-row-title">{s.title}</span>
+                      <span className="organize-row-reason">{s.reason}</span>
+                    </span>
+                    <span className="organize-row-meta">
+                      {s.cwd_display && <span className="organize-row-cwd">{s.cwd_display}</span>}
+                      {typeof s.turns === 'number' && <span>{s.turns} turns</span>}
+                      {!isProtected && typeof s.score === 'number' && (
+                        <span className="organize-row-score" title="keep-importance score">{s.score.toFixed(1)}</span>
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+            <div className="organize-actions">
+              <span className="organize-hint">Uncheck any you want to keep. Feedback on why? The reason column drives it.</span>
+              <button className="launcher-cancel" onClick={onClose}>Cancel</button>
+              <button className="dispatch-btn" disabled={working || selected.size === 0}
+                      onClick={doArchive}>
+                {working ? 'Archiving…' : `Archive ${selected.size} selected`}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export { QuickCreate, CommandBar, PaletteBar, NewSessionLauncher, OrganizePanel }

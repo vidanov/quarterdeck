@@ -674,6 +674,39 @@ function CopyButton({ text }) {
   )
 }
 
+// Renders a markdown message in full. Very long messages are collapsed to a
+// head by default (rendering a 100k-char string on every transcript update is
+// expensive), with a toggle to reveal the rest. The old behavior sliced at 16k
+// and showed a dead "…truncated" marker, so the tail of long agent turns was
+// simply lost.
+const MARKDOWN_COLLAPSE_AT = 16000
+
+function ExpandableMarkdown({ text }) {
+  const [expanded, setExpanded] = useState(false)
+  if (!text) return null
+  const long = text.length > MARKDOWN_COLLAPSE_AT
+  if (!long || expanded) {
+    return (
+      <>
+        <Markdown text={text} />
+        {long && (
+          <button className="chat-expand-btn" onClick={() => setExpanded(false)}>
+            Show less
+          </button>
+        )}
+      </>
+    )
+  }
+  return (
+    <>
+      <Markdown text={text.slice(0, MARKDOWN_COLLAPSE_AT)} />
+      <button className="chat-expand-btn" onClick={() => setExpanded(true)}>
+        Show full message ({(text.length / 1000).toFixed(0)}k characters)
+      </button>
+    </>
+  )
+}
+
 function ContextPct({ pct, onCompact }) {
   if (!pct) return null
   const n = parseFloat(pct)
@@ -690,7 +723,7 @@ function ContextPct({ pct, onCompact }) {
   )
 }
 
-function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSelect, options, expanded, onToggleExpand, focusMode, onToggleFocus, paneTheme, sessions, onNewSession, onRestartHere, fromWall, favourites, onToggleFavourite }) {
+function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSelect, options, expanded, onToggleExpand, focusMode, onToggleFocus, paneTheme, sessions, onNewSession, onNewChat, onRestartHere, fromWall, favourites, onToggleFavourite }) {
   const notify = useToast()
   const askConfirm = useConfirm()
   // xterm.js requires canvas — doesn't work in mobile browsers
@@ -793,6 +826,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [stack, setStack] = useState([])
   const [slashQueue, setSlashQueue] = useState([])
   const [slashDraft, setSlashDraft] = useState('')
+  const [checkpoints, setCheckpoints] = useState([])  // rewind markers
+  // True while the backend is driving kiro-cli's /rewind picker. Blocks a
+  // second click: two overlapping rewinds would fight over the same keystrokes.
+  const [rewinding, setRewinding] = useState(false)
   const [delivery, setDelivery] = useState(null)  // steering delivery record
   const [durationRecord, setDurationRecord] = useState(null)  // task 7: duration data
   const [pendingScreenshots, setPendingScreenshots] = useState([])
@@ -927,6 +964,72 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const shellPaneRef = useRef(null)
   const shellMetricRef = useRef(null)
   const shellSentSizeRef = useRef({ cols: 0, rows: 0 })
+
+  // --- Minimized session tabs ---
+  // Closing a tab does NOT stop the session — it just hides its tab from the
+  // strip (a browser-tab minimize). Selecting the session again (from the grid
+  // or the restore control) brings the tab back. Persisted so it survives
+  // navigation and reloads.
+  const [minimizedTabs, setMinimizedTabs] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('minimized-tabs') || '[]')) }
+    catch { return new Set() }
+  })
+  const persistMinimized = (nextSet) => {
+    setMinimizedTabs(nextSet)
+    localStorage.setItem('minimized-tabs', JSON.stringify([...nextSet]))
+  }
+  const minimizeTab = (id) => {
+    const next = new Set(minimizedTabs); next.add(id); persistMinimized(next)
+  }
+  const restoreTab = (id) => {
+    const next = new Set(minimizedTabs); next.delete(id); persistMinimized(next)
+  }
+  // The active session is always visible — you're looking at it. Un-minimize it
+  // as a side effect so re-selecting a minimized session restores its tab.
+  useEffect(() => {
+    if (session?.id && minimizedTabs.has(session.id)) restoreTab(session.id)
+  }, [session?.id])
+  const dsnSessionsRef = useRef(null)  // scroll container for the tab strip arrows
+  // Enable the tab arrows only when the strip actually overflows, and reflect
+  // whether there's room to scroll further in each direction.
+  const [dsnScroll, setDsnScroll] = useState({ left: false, right: false })
+  const measureDsn = () => {
+    const el = dsnSessionsRef.current
+    if (!el) return
+    const maxScroll = el.scrollWidth - el.clientWidth
+    setDsnScroll({
+      left: el.scrollLeft > 1,
+      right: maxScroll > 1 && el.scrollLeft < maxScroll - 1,
+    })
+  }
+  useEffect(() => {
+    measureDsn()
+    const el = dsnSessionsRef.current
+    if (!el) return
+    el.addEventListener('scroll', measureDsn, { passive: true })
+    const ro = new ResizeObserver(measureDsn)
+    ro.observe(el)
+    window.addEventListener('resize', measureDsn)
+    return () => {
+      el.removeEventListener('scroll', measureDsn)
+      ro.disconnect()
+      window.removeEventListener('resize', measureDsn)
+    }
+  }, [session?.id, minimizedTabs])
+  // Keep the active tab in view. Scroll only the strip horizontally — never let
+  // scrollIntoView move the surrounding panel. Runs after paint so layout is settled.
+  useEffect(() => {
+    const el = dsnSessionsRef.current
+    if (!el) return
+    const active = el.querySelector('.dsn-tab[data-active]')
+    if (!active) return
+    const elRect = el.getBoundingClientRect()
+    const aRect = active.getBoundingClientRect()
+    let delta = 0
+    if (aRect.left < elRect.left) delta = aRect.left - elRect.left - 8
+    else if (aRect.right > elRect.right) delta = aRect.right - elRect.right + 8
+    if (delta !== 0) el.scrollBy({ left: delta, behavior: 'smooth' })
+  }, [session?.id, minimizedTabs])
 
   // Refresh shell list when session changes — useLayoutEffect for instant clear before paint
   useLayoutEffect(() => {
@@ -1104,6 +1207,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     setMessagesError(null)
     transcriptMaxSeq.current = -1
     transcriptLoadedFor.current = null
+    finalFetchTimersRef.current.forEach(clearTimeout)
+    finalFetchTimersRef.current = []
+    prevJsonlMtimeRef.current = null
+    lastSyncedMtimeRef.current = 0
     setViewOverride(null)  // clear any manual pin when switching sessions
     setCorrections([])     // clear stale corrections before the fetch for the new session
     // Reset streaming state
@@ -1126,21 +1233,84 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const messagesRef = useRef(null)
   useEffect(() => { messagesRef.current = messages }, [messages])
 
-  // Incremental transcript polling: while the session is active and the
-  // transcript view is open, fetch only new lines and append.
+  // The session id the panel is currently showing. Read inside fetch callbacks
+  // so a response that lands after the user switched sessions is dropped.
+  const sessionIdRef = useRef(session.id)
+  sessionIdRef.current = session.id
+  // jsonl mtime at the last completed sync, so an idle tick can skip the fetch
+  // when the file has not moved. Walking a large JSONL is not free, and idle
+  // polling exists only as a safety net behind the mtime signal.
+  const lastSyncedMtimeRef = useRef(0)
+
+  // Merge a fetched page into the transcript: append entries we do not have and
+  // replace ones the backend returned a fuller version of. kiro can write a
+  // message line and complete its text a moment later, so "same seq, more text"
+  // is a real case, not a defensive one.
+  const applyTranscriptPage = useCallback((sid, incoming) => {
+    if (!incoming || !incoming.length) return
+    setMessages(prev => {
+      if (!prev || !prev.length) {
+        transcriptMaxSeq.current = Math.max(transcriptMaxSeq.current, incoming[incoming.length - 1].seq)
+        transcriptCache.current[sid] = incoming
+        return incoming
+      }
+      const bySeq = new Map(prev.map(m => [m.seq, m]))
+      let changed = false
+      for (const m of incoming) {
+        const old = bySeq.get(m.seq)
+        if (!old) { bySeq.set(m.seq, m); changed = true }
+        else if (old.text !== m.text
+                 || (old.tools?.length || 0) !== (m.tools?.length || 0)
+                 || (old.results || 0) !== (m.results || 0)) {
+          bySeq.set(m.seq, m); changed = true
+        }
+      }
+      if (!changed) return prev
+      const next = [...bySeq.values()].sort((a, b) => a.seq - b.seq)
+      transcriptMaxSeq.current = Math.max(transcriptMaxSeq.current, next[next.length - 1].seq)
+      transcriptCache.current[sid] = next
+      return next
+    })
+  }, [])
+
+  // One incremental transcript fetch. It asks from one seq *before* the newest
+  // entry we hold: the endpoint returns strictly seq > after, so asking from the
+  // newest seq could never return an updated version of that same line. That is
+  // how a last message written short (or written just as we read it) stayed
+  // short until the panel was closed and reopened.
+  const syncTranscript = useCallback((sid, limit = 200) => {
+    const after = Math.max(transcriptMaxSeq.current - 1, -1)
+    return api.getMessages(sid, after, limit).then(d => {
+      if (sessionIdRef.current !== sid) return
+      applyTranscriptPage(sid, d.messages || [])
+    }).catch(() => {})
+  }, [applyTranscriptPage])
+
+  // Incremental transcript polling while the transcript view is open: fetch
+  // new lines and append. Fast while the session is working, slow once it is
+  // idle — idle ticks skip entirely while the jsonl mtime has not moved.
   const messagesLoaded = messages !== null
   useEffect(() => {
     if (effectiveView !== 'transcript') return
     if (!messagesLoaded) return  // wait for initial load
     const activeStatus = detail?.status || session.status
     const isActive = activeStatus === 'thinking' || activeStatus === 'running' || activeStatus === 'awaiting-approval'
-    if (!isActive) return
+    // Poll while idle too, just slowly. The last line of a turn is often
+    // flushed to the JSONL *after* the status has flipped to idle; with polling
+    // stopped at that instant nothing ever fetched it, and the message only
+    // appeared when the panel was reopened and did a full load.
+    const sid = session.id
 
     const interval = setInterval(() => {
-      const after = transcriptMaxSeq.current
-      api.getMessages(session.id, after, 200).then(d => {
+      const mtime = sessionRef.current?.jsonl_mtime || 0
+      if (!isActive && mtime && mtime === lastSyncedMtimeRef.current) return
+      const after = Math.max(transcriptMaxSeq.current - 1, -1)
+      api.getMessages(sid, after, 200).then(d => {
+        if (sessionIdRef.current !== sid) return
+        lastSyncedMtimeRef.current = mtime
         const newMsgs = d.messages || []
         if (!newMsgs.length) return
+        const maxSeen = transcriptMaxSeq.current
         // ACP accumulates streamingText from chunks, so a committed assistant
         // message makes it stale — clear it and let the real message show.
         // V1 (managed) drives streamingText from the live pane poll, which is
@@ -1149,26 +1319,17 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         // would blank the live bubble every time a tool ran. The "turn ended"
         // effect clears V1 when the session actually goes idle.
         const ctrl = detail?.control || session.control
-        if (ctrl === 'acp' && newMsgs.some(m => m.role === 'assistant')) {
+        if (ctrl === 'acp' && newMsgs.some(m => m.role === 'assistant' && m.seq > maxSeen)) {
           setStreamingText('')
           streamingCursorRef.current = -1
           if (streamingEsRef.current) { streamingEsRef.current.close(); streamingEsRef.current = null }
         }
-        setMessages(prev => {
-          if (!prev) return newMsgs
-          const maxSeen = prev.length ? prev[prev.length - 1].seq : -1
-          const fresh = newMsgs.filter(m => m.seq > maxSeen)
-          if (!fresh.length) return prev
-          transcriptMaxSeq.current = fresh[fresh.length - 1].seq
-          const updated = [...prev, ...fresh]
-          transcriptCache.current[session.id] = updated
-          return updated
-        })
+        applyTranscriptPage(sid, newMsgs)
       }).catch(() => {})
-    }, 500)
+    }, isActive ? 500 : 3000)
 
     return () => clearInterval(interval)
-  }, [effectiveView, messagesLoaded, session.id, session.status, detail?.status])
+  }, [effectiveView, messagesLoaded, session.id, session.status, detail?.status, applyTranscriptPage])
 
   // ACP word-by-word streaming: open an EventSource to /stream when the
   // session is active and the ACP observer is attached. Accumulate text
@@ -1247,6 +1408,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   // When a session finishes a turn (goes idle/done), do one final fetch to
   // catch anything the 2s polling interval might have missed.
   const prevActiveRef = useRef(false)
+  const finalFetchTimersRef = useRef([])
   useEffect(() => {
     const activeNow = isWorking
     const wasActive = prevActiveRef.current
@@ -1258,48 +1420,37 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       // the next turn's first frame before the pane poll overwrites it.
       setStreamingText('')
       streamingCursorRef.current = -1
-      // Final fetch: always run when the session goes idle, regardless of
+      // Final fetches: always run when the session goes idle, regardless of
       // whether the transcript view is active or messages were pre-loaded.
-      // This closes the race where the last answer lands in the JSONL after
-      // the incremental poller last ran but before status changed to idle.
-      // If the transcript was never loaded (live-pane view), fetch everything;
-      // otherwise fetch only what's new since transcriptMaxSeq.
-      const after = messagesRef.current !== null ? transcriptMaxSeq.current : -1
-      api.getMessages(session.id, after, 2000).then(d => {
-        const newMsgs = d.messages || []
-        if (!newMsgs.length) return
-        setMessages(prev => {
-          if (!prev) return newMsgs
-          const maxSeen = prev.length ? prev[prev.length - 1].seq : -1
-          const fresh = newMsgs.filter(m => m.seq > maxSeen)
-          // Also replace the last existing message if the backend returned an
-          // updated version of it (same seq, but text grew — this happens when
-          // the initial load raced the final JSONL write and captured a short
-          // or empty last message that was later completed by kiro).
-          let base = prev
-          if (newMsgs.length > 0 && prev.length > 0) {
-            const lastPrev = prev[prev.length - 1]
-            const updated = newMsgs.find(m => m.seq === lastPrev.seq)
-            if (updated && updated.text !== lastPrev.text) {
-              base = [...prev.slice(0, -1), updated]
-            }
-          }
-          if (!fresh.length && base === prev) return prev
-          const updated = fresh.length
-            ? [...base, ...fresh]
-            : base
-          if (fresh.length) transcriptMaxSeq.current = fresh[fresh.length - 1].seq
-          transcriptCache.current[session.id] = updated
-          return updated
-        })
-      }).catch(() => {})
+      // One fetch here is a coin toss — the answer's last line can be flushed
+      // to the JSONL a second or more after the status flips — so retry with
+      // backoff. Each retry is a no-op once the text has arrived.
+      const sid = session.id
+      const timers = [0, 600, 1500, 3000, 6000].map(ms =>
+        setTimeout(() => syncTranscript(sid, 2000), ms))
+      finalFetchTimersRef.current.forEach(clearTimeout)
+      finalFetchTimersRef.current = timers
     }
     // When session goes idle, refresh the slash queue — the backend may have
     // just drained an item and the local state is stale.
     if (wasActive && !activeNow) {
       api.getSlashQueue(session.id).then(d => setSlashQueue(d.items || [])).catch(() => {})
     }
-  }, [isWorking])
+  }, [isWorking, syncTranscript])
+
+  // The session list poll (every 2s) carries the transcript file's mtime. When
+  // it moves, the conversation gained or completed a line — sync immediately
+  // rather than waiting out the idle tick. Costs nothing when nothing changed.
+  const prevJsonlMtimeRef = useRef(null)
+  useEffect(() => {
+    const mtime = session.jsonl_mtime ?? null
+    const prev = prevJsonlMtimeRef.current
+    prevJsonlMtimeRef.current = mtime
+    if (mtime === null || prev === null || mtime === prev) return
+    if (effectiveView !== 'transcript') return
+    if (messagesRef.current === null) return   // initial load will cover it
+    syncTranscript(session.id, 200)
+  }, [session.jsonl_mtime, effectiveView, session.id, syncTranscript])
 
   // Keep slash queue display in sync with the session-list poll.
   // session.sq_depth is updated every 2s by App; when it diverges from what
@@ -1488,7 +1639,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     if (!session?.id) return
     api.getStack(session.id).then(d => setStack(d.items || [])).catch(() => {})
     api.getSlashQueue(session.id).then(d => setSlashQueue(d.items || [])).catch(() => {})
-    api.getDelivery(session.id).then(d => setDelivery(d)).catch(() => {})
+    api.getCheckpoints(session.id).then(d => setCheckpoints(d.checkpoints || [])).catch(() => {})
     api.getAutoAdvance(session.id).then(d => setAutoAdvance(!!d.enabled)).catch(() => {})
     api.getSessionDuration(session.id).then(d => setDurationRecord(d?.record || null)).catch(() => {})
   }, [session?.id])
@@ -1560,29 +1711,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         // nothing new.
         setTimeout(() => {
           if (transcriptLoadedFor.current !== sid) return  // session switched
-          const after = transcriptMaxSeq.current
-          api.getMessages(sid, after, 200).then(dd => {
-            const newMsgs = dd.messages || []
-            if (!newMsgs.length) return
-            setMessages(prev => {
-              if (!prev) return newMsgs
-              const maxSeen = prev.length ? prev[prev.length - 1].seq : -1
-              const fresh = newMsgs.filter(m => m.seq > maxSeen)
-              // Also replace the last message if the backend returned a more
-              // complete version (same seq, more text — race with JSONL flush).
-              let base = prev
-              if (newMsgs.length > 0 && prev.length > 0) {
-                const lastPrev = prev[prev.length - 1]
-                const upd = newMsgs.find(m => m.seq === lastPrev.seq)
-                if (upd && upd.text !== lastPrev.text) base = [...prev.slice(0, -1), upd]
-              }
-              if (!fresh.length && base === prev) return prev
-              const next = fresh.length ? [...base, ...fresh] : base
-              if (fresh.length) transcriptMaxSeq.current = fresh[fresh.length - 1].seq
-              transcriptCache.current[sid] = next
-              return next
-            })
-          }).catch(() => {})
+          syncTranscript(sid, 200)
         }, 1500)
       })
       .catch(err => {
@@ -1591,7 +1720,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         transcriptLoadedFor.current = null
       })
       .finally(() => setLoadingMessages(false))
-  }, [effectiveView, session.id])
+  }, [effectiveView, session.id, syncTranscript])
 
 
   // The jsonl only gains entries once a turn completes, so it lags badly while
@@ -2056,6 +2185,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   if (!session) return null
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.done
   const title = detail?.title || session.title
+  // The tab strip renders when there is at least one managed sibling to show as
+  // a tab. When the current session is itself one of those tabs, its per-tab ×
+  // (which closes the panel on the last tab) makes the top-right × redundant,
+  // so we hide the latter to avoid two close controls. A non-managed session
+  // (foreign/archived) has no tab of its own, so it keeps the top-right ×.
+  const sessionIsTab = session.control === 'managed' || session.control === 'starting'
+  const hasTabStrip = !!(sessions && sessions.length > 0 && onSelect && sessionIsTab &&
+    sessions.some(s => s.control === 'managed' || s.control === 'starting'))
 
   return (<>
     <div className={`detail-panel ${expanded ? 'detail-expanded' : ''} ${fromWall ? 'detail-from-wall' : ''}`}
@@ -2231,7 +2368,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             )}
           </div>
           </>)}
-          <button className="detail-close" onClick={onClose}>✕</button>
+          {!hasTabStrip && (
+            <button className="detail-close" onClick={onClose}>✕</button>
+          )}
         </div>
       </div>
       {showCorrections && (
@@ -2347,36 +2486,75 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
         </div>
       )}
       {/* Session navigation strip — only for managed sessions, shows siblings
-          so you can hop between sessions without closing the panel. */}
+          so you can hop between sessions without closing the panel. Tabs behave
+          like browser tabs: the × minimizes (hides) a tab without stopping the
+          session; re-selecting it restores the tab. */}
       {sessions && sessions.length > 0 && onSelect && (() => {
         const managed = sessions.filter(s => s.control === 'managed' || s.control === 'starting')
         if (!managed.length) return null
-        const idx = managed.findIndex(s => s.id === session.id)
-        const prev = idx > 0 ? managed[idx - 1] : null
-        const next = idx >= 0 && idx < managed.length - 1 ? managed[idx + 1] : null
+        // Visible tabs = managed minus minimized, but the active session always shows.
+        const visible = managed.filter(s => s.id === session.id || !minimizedTabs.has(s.id))
+        const hidden = managed.filter(s => s.id !== session.id && minimizedTabs.has(s.id))
+        const idx = visible.findIndex(s => s.id === session.id)
+        const prev = idx > 0 ? visible[idx - 1] : null
+        const next = idx >= 0 && idx < visible.length - 1 ? visible[idx + 1] : null
+        // Closing a tab minimizes it (session keeps running). Closing the last
+        // visible tab has nowhere to hop, so it closes the whole panel — same
+        // as the old top-right ×, which this replaces.
+        const onMinimize = (s) => {
+          if (s.id === session.id) {
+            const fallback = next || prev
+            if (fallback) { onSelect(fallback); minimizeTab(s.id); return }
+            onClose()   // last visible tab — close the panel
+            return
+          }
+          minimizeTab(s.id)
+        }
         return (
           <div className="detail-compact-bar">
-            <button className="dsn-arrow" disabled={!prev}
-                    title={prev ? prev.name : undefined}
-                    onClick={() => prev && onSelect(prev)}>‹</button>
-            <div className="dsn-sessions">
-              {managed.map(s => {
+            <button className="dsn-arrow"
+                    title="Scroll tabs left"
+                    disabled={!dsnScroll.left}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => { const el = dsnSessionsRef.current; if (el) el.scrollBy({ left: -160, behavior: 'smooth' }) }}>‹</button>
+            <div className="dsn-sessions" ref={dsnSessionsRef}>
+              {visible.map(s => {
                 const chipCfg = STATUS_CONFIG[s.status] || STATUS_CONFIG.done
                 const needsYouChip = s.status === 'awaiting-approval' || s.status === 'error'
+                const isActive = s.id === session.id
+                const isLast = visible.length === 1 && hidden.length === 0
                 return (
-                  <button key={s.id}
-                          className={`dsn-chip ${s.id === session.id ? 'active' : ''} ${needsYouChip ? 'dsn-chip-attention' : ''}`}
-                          title={`${s.title || s.name} — ${chipCfg.label}`}
-                          onClick={() => onSelect(s)}>
-                    <span className="dsn-chip-dot" style={{ color: chipCfg.color }}>●</span>
-                    {s.name || s.folder || '…'}
-                  </button>
+                  <span key={s.id}
+                        data-active={isActive ? '1' : undefined}
+                        className={`dsn-tab ${isActive ? 'active' : ''} ${needsYouChip ? 'dsn-tab-attention' : ''}`}
+                        title={`${s.title || s.name} — ${chipCfg.label}`}
+                        onClick={() => onSelect(s)}>
+                    <span className="dsn-tab-dot" style={{ color: chipCfg.color }}>●</span>
+                    <span className="dsn-tab-label">{s.name || s.folder || '…'}</span>
+                    <button className="dsn-tab-close"
+                            title={isLast ? 'Close panel' : 'Minimize tab (session keeps running)'}
+                            onClick={(e) => { e.stopPropagation(); onMinimize(s) }}>×</button>
+                  </span>
                 )
               })}
             </div>
-            <button className="dsn-arrow" disabled={!next}
-                    title={next ? next.name : undefined}
-                    onClick={() => next && onSelect(next)}>›</button>
+            {onNewChat && (
+              <button className="dsn-new"
+                      title="New chat in this view"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => onNewChat(session?.cwd)}>+</button>
+            )}
+            <button className="dsn-arrow"
+                    title="Scroll tabs right"
+                    disabled={!dsnScroll.right}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => { const el = dsnSessionsRef.current; if (el) el.scrollBy({ left: 160, behavior: 'smooth' }) }}>›</button>
+            {hidden.length > 0 && (
+              <button className="dsn-restore" title={`Restore ${hidden.length} minimized tab${hidden.length > 1 ? 's' : ''}`}
+                      onClick={() => hidden.forEach(s => restoreTab(s.id))}>
+                +{hidden.length}
+              </button>
+            )}
             <span className="detail-bar-sep" />
             <span className="detail-view-label">
               {effectiveView === 'raw' ? 'Raw' : 'Transcript'}
@@ -2447,6 +2625,94 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       )}
       {effectiveView === 'transcript' && (
         <div className={`chat-transcript pane-${paneTheme}`} ref={termRef} onScroll={onTranscriptScroll}>
+              {/* Rewind checkpoints — click a marker to rewind the session there.
+                  kiro-cli's /rewind is a TUI picker, so the backend drives it and
+                  the result lands a few seconds later; we poll for it. */}
+              {checkpoints.length > 0 && (
+                <div className="checkpoint-strip">
+                  {checkpoints.map((cp) => (
+                    <span key={cp.id} className="checkpoint-chip" title={`Rewind to turn ${cp.seq}`}>
+                      <button
+                        className="checkpoint-rewind"
+                        disabled={rewinding}
+                        onClick={() => {
+                          setRewinding(true)
+                          api.rewindToCheckpoint(session.id, cp.id)
+                            .then(d => {
+                              if (!d.ok) {
+                                setRewinding(false)
+                                notify(d.error || 'Rewind failed', 'error')
+                                return
+                              }
+                              if (d.dispatched === 'queued') {
+                                notify(`Rewind to "${cp.label}" queued for turn end`, 'info')
+                                api.getSlashQueue(session.id).then(q => setSlashQueue(q.items || [])).catch(() => {})
+                              } else {
+                                notify(`Rewinding to "${cp.label}"…`, 'info')
+                              }
+                              // The backend navigates kiro-cli's picker, which
+                              // takes a few seconds; poll until it reports.
+                              let tries = 0
+                              // Polls overlap when a request outlives the
+                              // interval; two late replies would both report.
+                              let settled = false
+                              const poll = setInterval(() => {
+                                tries += 1
+                                api.getCheckpoints(session.id).then(r => {
+                                  const st = r.rewind
+                                  if (settled) return
+                                  if (!st || st.state === 'running') {
+                                    if (tries > 40) { clearInterval(poll); setRewinding(false) }
+                                    return
+                                  }
+                                  settled = true
+                                  clearInterval(poll)
+                                  setRewinding(false)
+                                  if (st.state === 'error') {
+                                    notify(st.error || 'Rewind failed', 'error')
+                                    return
+                                  }
+                                  notify(`Rewound to "${cp.label}"`, 'info')
+                                  onRefresh()
+                                  if (onSelect && st.new_id) {
+                                    setTimeout(() => onSelect({
+                                      id: st.new_id,
+                                      title: session.title || '',
+                                      cwd: session.cwd, status: 'idle', control: 'managed'
+                                    }), 800)
+                                  }
+                                }).catch(() => {})
+                              }, 1000)
+                            })
+                            .catch(() => { setRewinding(false); notify('Could not rewind', 'error') })
+                        }}
+                      >⚑ {cp.label}</button>
+                      <button
+                        className="checkpoint-jump"
+                        title="Jump to this turn in the transcript"
+                        onClick={() => {
+                          const el = document.getElementById(`turn-${cp.seq}`)
+                          if (!el) { notify('That turn is not loaded in this view', 'info'); return }
+                          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                          // Flash it, so the eye lands on the right message in a
+                          // transcript where every user bubble looks the same.
+                          el.classList.add('chat-row-flash')
+                          setTimeout(() => el.classList.remove('chat-row-flash'), 1600)
+                        }}
+                      >◎</button>
+                      <button
+                        className="checkpoint-remove"
+                        title="Forget checkpoint"
+                        onClick={() => {
+                          api.deleteCheckpoint(session.id, cp.id)
+                            .then(d => setCheckpoints(d.checkpoints || []))
+                            .catch(() => {})
+                        }}
+                      >×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
           <TranscriptErrorBoundary onRetry={() => { setMessages(null); setLoadingMessages(false); setMessagesError(null); transcriptLoadedFor.current = null }}>
           {messagesError && !loadingMessages && (
             <div className="transcript-load-error">
@@ -2563,8 +2829,13 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     })
                     .catch(() => notify('Could not fork', 'error'))
                 } : null
+                // A turn that carries a checkpoint is marked permanently: the
+                // hover-only controls were invisible until you happened to
+                // sweep the mouse over the right message.
+                const cpHere = checkpoints.find(c => c.seq === msg.seq)
                 return (
-                  <div key={block.key} className="chat-row chat-row-user">
+                  <div key={block.key} id={`turn-${msg.seq}`}
+                       className={`chat-row chat-row-user${cpHere ? ' chat-row-checkpoint' : ''}`}>
                     {msg.text?.startsWith('[LIVE STEERING') ? (
                       <details className="chat-steering">
                         <summary className="chat-steering-summary">📡 Live steering</summary>
@@ -2572,11 +2843,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                       </details>
                     ) : (
                       <>
+                        {cpHere && (
+                          <div className="chat-checkpoint-tag">⚑ {cpHere.label}</div>
+                        )}
                         <div className="chat-bubble-user">
                           {parseUserMessage(msg.text).map((seg, si) =>
                             seg.type === 'doc'
                               ? <DocCard key={si} segment={seg} />
-                              : <div key={si} className="chat-bubble-text">{seg.content?.slice(0, 2000)}</div>
+                              : <div key={si} className="chat-bubble-text">{seg.content}</div>
                           )}
                         </div>
                         <div className="chat-meta-user">
@@ -2589,6 +2863,34 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                               title="Save as template from this point"
                               onClick={() => setSatModal({ afterSeq: msg.seq > 0 ? msg.seq - 1 : 0 })}
                             >📋</button>
+                          )}
+                          {msg.is_turn && (
+                            <button
+                              className={`chat-fork chat-checkpoint-btn${cpHere ? ' is-set' : ''}`}
+                              title={cpHere
+                                ? `Checkpoint "${cpHere.label}" — click to forget it`
+                                : 'Set a rewind checkpoint at this turn'}
+                              onClick={() => {
+                                if (cpHere) {
+                                  api.deleteCheckpoint(session.id, cpHere.id)
+                                    .then(d => {
+                                      setCheckpoints(d.checkpoints || [])
+                                      notify(`Checkpoint forgotten: ${cpHere.label}`, 'info')
+                                    })
+                                    .catch(() => notify('Could not forget checkpoint', 'error'))
+                                  return
+                                }
+                                const label = (msg.text || '').trim().slice(0, 40) || `turn ${msg.seq}`
+                                api.addCheckpoint(session.id, msg.seq, label)
+                                  .then(d => {
+                                    if (d.ok) {
+                                      setCheckpoints(d.checkpoints || [])
+                                      notify(`Checkpoint set: ${label}`, 'info')
+                                    } else notify(d.error || 'Could not set checkpoint', 'error')
+                                  })
+                                  .catch(() => notify('Could not set checkpoint', 'error'))
+                              }}
+                            >⚑</button>
                           )}
                         </div>
                       </>
@@ -2614,10 +2916,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   <div key={block.key} className="chat-row chat-row-assistant">
                     {leadingProse.map((prose, idx) => (
                       <div key={idx} className="chat-assistant-text">
-                        <Markdown text={prose.slice(0, 16000)} />
-                        {toolCalls[idx]?.assistantMsg?.truncated && (
-                          <span className="chat-truncated-marker">…truncated</span>
-                        )}
+                        <ExpandableMarkdown text={prose} />
                       </div>
                     ))}
                     <details className="chat-tools">
@@ -2632,10 +2931,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     </details>
                     {finalMsg?.text && (
                       <div className="chat-assistant-text">
-                        <Markdown text={finalMsg.text.slice(0, 16000)} />
-                        {finalMsg.truncated && (
-                          <span className="chat-truncated-marker">…truncated</span>
-                        )}
+                        <ExpandableMarkdown text={finalMsg.text} />
                         <CopyButton text={finalMsg.text} />
                       </div>
                     )}
@@ -2649,10 +2945,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   <div key={block.key} className="chat-row chat-row-assistant">
                     {msg.text && (
                       <div className="chat-assistant-text">
-                        <Markdown text={msg.text.slice(0, 16000)} />
-                        {msg.truncated && (
-                          <span className="chat-truncated-marker">…truncated</span>
-                        )}
+                        <ExpandableMarkdown text={msg.text} />
                         <CopyButton text={msg.text} />
                       </div>
                     )}
