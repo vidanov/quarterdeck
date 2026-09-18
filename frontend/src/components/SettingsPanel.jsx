@@ -577,7 +577,7 @@ function ConciergeSettings({ options }) {
   )
 }
 
-function AppearanceSettings({ paneTheme, onTogglePaneTheme }) {
+function AppearanceSettings({ paneTheme, onTogglePaneTheme, chatFontSize, onChangeChatFontSize }) {
   const [goalMax, setGoalMaxState] = useState(() => localStorage.getItem('goal-max-iterations') || '')
 
   const saveGoalMax = (v) => {
@@ -595,6 +595,22 @@ function AppearanceSettings({ paneTheme, onTogglePaneTheme }) {
           {paneTheme === 'dark' ? '☀ Switch to light' : '☾ Switch to dark'}
         </button>
       </div>
+      {onChangeChatFontSize && (
+        <div className="settings-row">
+          <span className="settings-label">Chat text size</span>
+          <div className="font-size-picker">
+            {[
+              ['small', 'S'], ['medium', 'M'], ['large', 'L'], ['xlarge', 'XL'],
+            ].map(([val, label]) => (
+              <button
+                key={val}
+                className={`font-size-btn ${chatFontSize === val ? 'active' : ''}`}
+                onClick={() => onChangeChatFontSize(val)}
+              >{label}</button>
+            ))}
+          </div>
+        </div>
+      )}
       <h3 className="settings-title">/goal defaults</h3>
       <p className="cleanup-hint">
         Max iterations for <code>/goal</code>. When set, clicking the goal chip
@@ -2372,7 +2388,7 @@ function TemplatesSettings() {
   )
 }
 
-function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onChangeShowHidden, showCrew, onChangeShowCrew, sessionViewMode, onChangeViewDefault }) {
+function SettingsPanel({ options, paneTheme, onTogglePaneTheme, chatFontSize, onChangeChatFontSize, showHidden, onChangeShowHidden, showCrew, onChangeShowCrew, sessionViewMode, onChangeViewDefault }) {
   const notify = useToast()
   const askConfirm = useConfirm()
   const [tab, setTab] = useState('remote')
@@ -2540,7 +2556,7 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, showHidden, onCh
             button, no picker: handing off is a decision you make once, not per session.
           </p>
           <ProfileSettings />
-          <AppearanceSettings paneTheme={paneTheme} onTogglePaneTheme={onTogglePaneTheme} />
+          <AppearanceSettings paneTheme={paneTheme} onTogglePaneTheme={onTogglePaneTheme} chatFontSize={chatFontSize} onChangeChatFontSize={onChangeChatFontSize} />
           <StartingFolderSettings />
           <ScreenshotsSettings />
           <UpdateSettings />

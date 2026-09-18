@@ -91,6 +91,11 @@ CORRECTIONS_DIR = STATE_DIR / "corrections"
 # Per-session task queues. Each file is a JSON array of {id, text, added_at}.
 STACKS_DIR = STATE_DIR / "stacks"
 SLASH_QUEUES_DIR = STATE_DIR / "slash-queues"
+# Per-session rewind checkpoints. Each file is a JSON array of
+# {id, label, text, seq, created_at} marking a user prompt to come back to.
+# Rewinding runs kiro-cli's own /rewind against that prompt; Quarterdeck stores
+# only the marker and never truncates a conversation itself.
+CHECKPOINTS_DIR = STATE_DIR / "checkpoints"
 SUMMARIES_DIR = STATE_DIR / "summaries"
 PASTES_DIR = STATE_DIR / "pastes"
 PASTE_MIN_CHARS = 1200   # threshold to trigger attachment-tile collapse
