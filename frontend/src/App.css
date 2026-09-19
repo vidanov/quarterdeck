@@ -7842,7 +7842,8 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .chat-row-user:hover .chat-fork,
 .chat-row-assistant:hover .chat-copy-btn,
 .cmdbar-item:hover .cmdbar-item-open-btn,
-.dsn-tab-close:hover,
+.dsn-tab:hover .dsn-tab-close,
+.dsn-tab.active .dsn-tab-close,
 .branch-btn:hover { visibility: visible; }
 
 /* focus-visible reveal — keyboard users can reach these when focused */

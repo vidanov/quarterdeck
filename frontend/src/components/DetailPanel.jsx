@@ -2337,7 +2337,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             <button className="detail-icon detail-overflow-btn"
                     aria-label="More actions"
                     title="More actions"
-                    onClick={() => setOverflowOpen(v => !v)}>⋯ More</button>
+                    onClick={() => setOverflowOpen(v => !v)}>⋯</button>
             {overflowOpen && (
               <div className="detail-overflow-menu" role="menu" onClick={() => setOverflowOpen(false)}>
                 {/* Single-glyph actions moved here from the toolbar */}
@@ -2571,10 +2571,12 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </button>
             )}
             <span className="detail-bar-sep" />
+            {/* When the transcript/raw toggle is rendered it already names the view —
+                showing the name here too duplicates it. Keep only the count / live dot. */}
             <span className="detail-view-label">
-              {effectiveView === 'raw' ? 'Raw' : 'Transcript'}
-              {effectiveView === 'raw' && isWorking ? ' ●' : ''}
-              {effectiveView === 'transcript' && messages ? ` · ${messages.length}` : ''}
+              {!canLive && (effectiveView === 'raw' ? 'Raw' : 'Transcript')}
+              {effectiveView === 'raw' && isWorking ? (canLive ? '●' : ' ●') : ''}
+              {effectiveView === 'transcript' && messages ? (canLive ? `${messages.length} msg` : ` · ${messages.length}`) : ''}
             </span>
             {canLive && (
               <div className="detail-view-pin">
@@ -2600,9 +2602,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       {!(sessions && sessions.length > 0 && onSelect) && (
         <div className="detail-compact-bar detail-compact-bar-solo">
           <span className="detail-view-label">
-            {effectiveView === 'raw' ? 'Raw' : 'Transcript'}
-            {effectiveView === 'raw' && isWorking ? ' ●' : ''}
-            {effectiveView === 'transcript' && messages ? ` · ${messages.length}` : ''}
+            {!canLive && (effectiveView === 'raw' ? 'Raw' : 'Transcript')}
+            {effectiveView === 'raw' && isWorking ? (canLive ? '●' : ' ●') : ''}
+            {effectiveView === 'transcript' && messages ? (canLive ? `${messages.length} msg` : ` · ${messages.length}`) : ''}
           </span>
           {session.context_pct != null && session.context_pct !== '' && (
             <ContextPct pct={session.context_pct} onCompact={() => queueOrSend('/compact')} />
