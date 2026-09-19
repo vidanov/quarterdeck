@@ -717,6 +717,10 @@ function ContextPct({ pct, onCompact }) {
     <span className={cls}
           data-tooltip={onCompact ? 'Compact?' : `Context: ${pct}`}
           onClick={onCompact || undefined}
+          role={onCompact ? 'button' : undefined}
+          aria-label={onCompact ? 'Run /compact to reduce context' : undefined}
+          tabIndex={onCompact ? 0 : undefined}
+          onKeyDown={onCompact ? (e) => { if (e.key === 'Enter' || e.key === ' ') onCompact() } : undefined}
           style={onCompact ? { cursor: 'pointer' } : {}}>
       ◔ {pct}{n >= 50 ? ' · compact?' : ''}
     </span>
@@ -918,14 +922,19 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   const [chipsModalOpen, setChipsModalOpen] = useState(false)
   // Merged starter chips shown above composer: project chips (+ global if includeGlobal), or global only
   const [starterChips, setStarterChips] = useState([])
-  // Close overflow menu when clicking outside it
+  // Close overflow menu when clicking outside it or pressing Escape
   useEffect(() => {
     if (!overflowOpen) return
     const handler = (e) => {
+      if (e.key === 'Escape') { setOverflowOpen(false); return }
       if (!e.target.closest('.detail-overflow-wrap')) setOverflowOpen(false)
     }
+    document.addEventListener('keydown', handler)
     document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
+    return () => {
+      document.removeEventListener('keydown', handler)
+      document.removeEventListener('mousedown', handler)
+    }
   }, [overflowOpen])
 
   // Derived from detail (once loaded) or the session prop while loading.
@@ -2258,14 +2267,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           </button>
           {/* Items below hidden for foreign/archived sessions — no input possible */}
           {control !== 'foreign' && control !== 'archived' && (<>
-          {/* Correction — icon only */}
-          <button className="detail-correct detail-icon" title="Log a correction — agent did something wrong"
-                  onClick={logCorrection}>⚑</button>
-          {/* Restart here — archive this session, start fresh with same name + queue */}
-          {control === 'managed' && onRestartHere && (
-            <button className="detail-icon" title="Restart here — archive this session and start a fresh one with the same name and queue"
-                    onClick={() => onRestartHere(session.id)}>↺</button>
-          )}
           {/* Side chat — keep label, it's a mode */}
           <SideChat
             ref={sideChatRef}
@@ -2331,36 +2332,50 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </div>
             </div>
           )}
-          {/* Overflow: Hand off, new session, wall toggle */}
+          {/* Overflow: More actions — single-glyph toolbar items + hand-off + new session */}
           <div className="detail-overflow-wrap">
             <button className="detail-icon detail-overflow-btn"
+                    aria-label="More actions"
                     title="More actions"
-                    onClick={() => setOverflowOpen(v => !v)}>···</button>
+                    onClick={() => setOverflowOpen(v => !v)}>⋯ More</button>
             {overflowOpen && (
-              <div className="detail-overflow-menu" onClick={() => setOverflowOpen(false)}>
+              <div className="detail-overflow-menu" role="menu" onClick={() => setOverflowOpen(false)}>
+                {/* Single-glyph actions moved here from the toolbar */}
+                <button className="detail-overflow-item" role="menuitem"
+                        title="Log a correction — agent did something wrong"
+                        onClick={(e) => { e.stopPropagation(); setOverflowOpen(false); logCorrection() }}>
+                  ⚑ Log correction
+                </button>
+                {control === 'managed' && onRestartHere && (
+                  <button className="detail-overflow-item" role="menuitem"
+                          title="Restart here — archive this session and start a fresh one with the same name and queue"
+                          onClick={(e) => { e.stopPropagation(); setOverflowOpen(false); onRestartHere(session.id) }}>
+                    ↺ Restart here
+                  </button>
+                )}
                 {canSend && (
-                  <button className="detail-overflow-item" onClick={() => handoff(handoffTerminal)}
+                  <button className="detail-overflow-item" role="menuitem" onClick={() => handoff(handoffTerminal)}
                           title={`Reopen in ${(options.terminals || []).find(x => x.id === handoffTerminal)?.label || handoffTerminal}`}>
                     ⇱ Hand off
                   </button>
                 )}
                 {onNewSession && (
-                  <button className="detail-overflow-item" onClick={() => onNewSession(session.cwd)}>
+                  <button className="detail-overflow-item" role="menuitem" onClick={() => onNewSession(session.cwd)}>
                     ＋ New session
                   </button>
                 )}
                 {onToggleFocus && !expanded && (
-                  <button className="detail-overflow-item" onClick={onToggleFocus}>
+                  <button className="detail-overflow-item" role="menuitem" onClick={onToggleFocus}>
                     {focusMode ? '◧ Exit focus' : '▣ Focus mode'}
                   </button>
                 )}
                 {session.cwd && (
-                  <button className="detail-overflow-item" onClick={() => setSecretsModalOpen(true)}>
+                  <button className="detail-overflow-item" role="menuitem" onClick={() => setSecretsModalOpen(true)}>
                     🔑 Secrets
                   </button>
                 )}
                 {session.cwd && (
-                  <button className="detail-overflow-item" onClick={() => setChipsModalOpen(true)}>
+                  <button className="detail-overflow-item" role="menuitem" onClick={() => setChipsModalOpen(true)}>
                     🧩 Chips
                   </button>
                 )}
@@ -2467,9 +2482,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           <div className="detail-prompt-label">Permission required</div>
           <pre className="prompt-pane">{pane.trimEnd().split('\n').slice(-14).join('\n')}</pre>
           <div className="detail-prompt-actions">
-            <button className="prompt-allow" onClick={() => respond('allow')}>Allow once</button>
-            <button onClick={() => respond('trust')}>Trust for session</button>
-            <button onClick={() => respond('deny')}>Deny</button>
+            <button className="prompt-allow" onClick={() => respond('allow')} aria-label="Allow once">Allow once</button>
+            <button onClick={() => respond('trust')} aria-label="Trust for session">Trust for session</button>
+            <button onClick={() => respond('deny')} aria-label="Deny">Deny</button>
             <button
               className={`prompt-auto-approve ${autoApprove ? 'active' : ''}`}
               onClick={toggleAutoApprove}
@@ -3246,7 +3261,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                 }}
                 placeholder="Reply to this session…  (Enter to send, Shift+Enter for a new line)"
               />
-              <button className="dispatch-btn" type="submit" disabled={(!draft.trim() && attachments.filter(a => !a.uploading).length === 0) || sending}>
+              <button className="dispatch-btn" type="submit" aria-label="Send" disabled={(!draft.trim() && attachments.filter(a => !a.uploading).length === 0) || sending}>
                 {sending ? '…' : cliSendMode && cliStatus?.bound ? '↗ CLI' : '↗ Send'}
               </button>
               {/* CLI send mode toggle — only for foreign sessions with a bound CLI */}
@@ -3411,7 +3426,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           </span>
         )}
         {(status === 'done' || control === 'archived' || status === 'idle' || status === 'error') && (
-          <button className="detail-delete-btn" onClick={async () => {
+          <button className="detail-delete-btn" aria-label="Delete session" onClick={async () => {
             const title = detail?.title || session.title || 'this session'
             const isRunning = status === 'idle' && control !== 'archived'
             const ok = await askConfirm(

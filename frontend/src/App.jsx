@@ -393,7 +393,7 @@ export default function App() {
   const [cmdBarOpen, setCmdBarOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [organizeOpen, setOrganizeOpen] = useState(false)
-  const [controlFilter, setControlFilter] = useState(() => localStorage.getItem('control-filter') || 'managed')
+  const [controlFilter, setControlFilter] = useState(() => localStorage.getItem('control-filter') || 'all')
   const [statusFilter, setStatusFilter] = useState(() => localStorage.getItem('status-filter') || null)
   const [folderFilter, setFolderFilter] = useState(() => localStorage.getItem('folder-filter') || null)
   const [sessionViewMode, setSessionViewMode] = useState(() => {
@@ -1493,21 +1493,27 @@ export default function App() {
     return { groupedActive: result, groupMap: groups }
   })()
 
-  const shownActive = groupedActive.filter(s =>
-    !killing.has(s.id) &&
-    (!statusFilter || (statusFilter === 'thinking'
-      ? (s.status === 'thinking' || s.status === 'running')
-      : s.status === statusFilter)) &&
-    (controlFilter === 'all' || s.control === controlFilter ||
-      // A session still starting will become managed, so keep it in that view.
-      (controlFilter === 'managed' && s.control === 'starting') ||
+  const shownActive = groupedActive.filter(s => {
+    // A session still starting will become managed — treat it as managed for filter purposes.
+    const effectiveControl = s.control === 'starting' ? 'managed' : s.control
+    return (
+      !killing.has(s.id) &&
+      (!statusFilter || (statusFilter === 'thinking'
+        ? (s.status === 'thinking' || s.status === 'running')
+        : s.status === statusFilter)) &&
       // Group cards have no single control value — show in all views.
-      s._isGroupCard) &&
-    (!folderFilter || s.cwd === folderFilter || s._isGroupCard))
+      (controlFilter === 'all' || effectiveControl === controlFilter || s._isGroupCard) &&
+      (!folderFilter || s.cwd === folderFilter || s._isGroupCard)
+    )
+  })
 
   // Annotate with is_favourite so cards can show the star and sort to top.
   const favSet = new Set(favourites.map(f => f.id))
   const shownActiveWithFav = shownActive.map(s => ({ ...s, is_favourite: favSet.has(s.id) }))
+
+  // Sessions filtered out by any active filter — shown as "(N hidden)" next to
+  // the active tab label so the count is always visible without expanding.
+  const hiddenCount = active.length - shownActive.length
 
   // Debounce the awaiting-approval → "Needs you" signal to suppress false
   // positives from auto-approved tool calls. A session only counts as needing
@@ -1563,14 +1569,15 @@ export default function App() {
     return () => clearTimeout(timer)
   }, [awaitingKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // A working agent needs nothing from you, so it does not deserve the same
-  // real estate as one that is stopped waiting. Cards for what needs you; one
-  // line each for what does not.
+  // Three bands: Needs you (needs:true), Working (running/thinking/etc.),
+  // Review (reviewed:true — idle sessions that have finished and are ready to read).
   const { needsYou: needsYouRaw, working: workingRaw } = partitionByAttention(shownActiveWithFav, heldBySession, stableAwaitingIds)
   // Starred sessions float to the top within each partition.
   const sortFav = arr => [...arr.filter(({s}) => s.is_favourite), ...arr.filter(({s}) => !s.is_favourite)]
   const needsYou = sortFav(needsYouRaw)
-  const working = sortFav(workingRaw)
+  // Split the non-needs partition into active workers vs idle-reviewed sessions.
+  const working = sortFav(workingRaw.filter(({ a }) => !a.reviewed))
+  const review = sortFav(workingRaw.filter(({ a }) => a.reviewed))
   const visibleSessionIds = shownActiveWithFav.filter(s => s.id && !s.nonce).map(s => s.id)
 
   const badgeCount = dockBadgeCount(needsYou)
@@ -1796,12 +1803,16 @@ export default function App() {
                     ['crew', 'Crew'],
                   ].filter(([key]) => key !== 'crew' || showCrew).map(([key, label]) => {
                     const n = key === 'all' ? active.length : active.filter(s => s.control === key).length
+                    const isActive = controlFilter === key
                     return (
                       <button key={key}
-                              className={`control-filter-btn ${controlFilter === key ? 'active' : ''}`}
+                              className={`control-filter-btn ${isActive ? 'active' : ''}`}
                               data-filter={key}
                               onClick={() => changeControlFilter(key)}>
                         {label} <span className="control-filter-count">{n}</span>
+                        {isActive && hiddenCount > 0 && (
+                          <span className="control-filter-hidden">({hiddenCount} hidden)</span>
+                        )}
                       </button>
                     )
                   })}
@@ -1906,6 +1917,7 @@ export default function App() {
                 <ListView
                   needsYou={needsYou}
                   working={working}
+                  review={review}
                   selected={selected}
                   onSelect={selectSession}
                   onOpenFull={openFull}
@@ -1918,7 +1930,7 @@ export default function App() {
                 />
               )}
 
-              {/* Cards view (default) — needs-you / working split */}
+              {/* Cards view (default) — needs-you / working / review bands */}
               {(sessionViewMode === 'cards' || sessionViewMode === null) && (
                 <>
                   {needsYou.length > 0 && (
@@ -1984,6 +1996,38 @@ export default function App() {
                       )}
                     </>
                   )}
+                  {review.length > 0 && (
+                    <>
+                      <div className="section-head">
+                        <span className="section-title">Review</span>
+                        <span className="section-count">{review.length}</span>
+                      </div>
+                      <ul className="working-list">
+                        {review.map(({ s, a }) => (
+                          <li key={s.id} className={`working-row working-row-review ${selected?.id === s.id ? 'working-selected' : ''}`}
+                              onClick={() => s.control !== 'starting' && selectSession(s)}
+                              onDoubleClick={() => s.control !== 'starting' && openFull(s)}>
+                            <span className="working-spinner" aria-hidden="true">✓</span>
+                            <span className="working-name" title={s.title || ''}>{s.name}</span>
+                            {s.gated && <span className="card-gated" title="Tool calls held for approval">🔒</span>}
+                            <span className="working-folder">{s.folder || showPath(s)}</span>
+                            <span className="working-state">{a.action}</span>
+                            <span className="working-time">{timeAgo(s.updated_at)}</span>
+                            {s.nonce ? (
+                              <button className="card-kill" title="Give up on this spawn"
+                                      onClick={(e) => { e.stopPropagation(); handleCancelPending(s.nonce) }}>×</button>
+                            ) : (
+                              <button className="card-kill" disabled={killing.has(s.id)}
+                                      title="End session"
+                                      onClick={(e) => handleKillSession(s.id, e)}>
+                                {killing.has(s.id) ? '⟳' : '×'}
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
                 </>
               )}
 
@@ -1996,7 +2040,7 @@ export default function App() {
                       : <>No {controlFilter} sessions. <button className="link-btn" onClick={() => changeControlFilter('all')}>Show all {active.length}</button></>}
                 </div>
               )}
-              {shownActiveWithFav.length > 0 && sessionViewMode === 'cards' && needsYou.length === 0 && (
+              {shownActiveWithFav.length > 0 && sessionViewMode === 'cards' && needsYou.length === 0 && working.length > 0 && review.length === 0 && (
                 <div className="empty empty-calm">
                   Nothing needs you. {working.length} agent{working.length === 1 ? '' : 's'} working.
                 </div>

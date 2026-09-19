@@ -1,15 +1,15 @@
 // Shared utilities and constants for Quarterdeck components.
 
 export const STATUS_CONFIG = {
-  thinking: { color: '#16a34a', label: '⟳ Thinking', bg: '#f0fdf4' },
-  running: { color: '#16a34a', label: '● Running', bg: '#f0fdf4' },
-  'awaiting-approval': { color: '#ca8a04', label: '◉ Awaiting', bg: '#fefce8' },
-  idle: { color: '#64748b', label: '○ Idle', bg: '#f8fafc' },
+  thinking: { color: '#16a34a', label: '⟳ Working', canonical: 'Working', bg: '#f0fdf4' },
+  running: { color: '#16a34a', label: '● Working', canonical: 'Working', bg: '#f0fdf4' },
+  'awaiting-approval': { color: '#ca8a04', label: '◉ Blocked', canonical: 'Blocked', bg: '#fefce8' },
+  idle: { color: '#64748b', label: '○ Done', canonical: 'Done', bg: '#f8fafc' },
   // Link dropped: the TUI is up but nothing you type reaches the agent. Amber
   // rather than red — the conversation is intact and one click recovers it.
-  stalled: { color: '#d97706', label: '⚠ Link lost', bg: '#fffbeb' },
-  done: { color: '#94a3b8', label: '○ Done', bg: '#ffffff' },
-  error: { color: '#dc2626', label: '✕ Error', bg: '#fef2f2' },
+  stalled: { color: '#d97706', label: '⚠ Link lost', canonical: 'Working', bg: '#fffbeb' },
+  done: { color: '#94a3b8', label: '○ Done', canonical: 'Done', bg: '#ffffff' },
+  error: { color: '#dc2626', label: '✕ Blocked', canonical: 'Blocked', bg: '#fef2f2' },
 }
 
 // Paths arrive twice: `cwd` is the real path and the only thing safe to send

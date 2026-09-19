@@ -18,7 +18,7 @@
 export function attentionOf(session, held = false, stableAwaitingIds = null) {
   const { status, control } = session
   if (control === 'starting') {
-    return { needs: false, action: 'Starting…', rank: 90 }
+    return { needs: false, action: 'Working', rank: 90 }
   }
   if (status === 'awaiting-approval') {
     // If a debounce set is provided, only raise attention once the session
@@ -26,16 +26,16 @@ export function attentionOf(session, held = false, stableAwaitingIds = null) {
     const stable = stableAwaitingIds === null || stableAwaitingIds.has(session.id)
     if (!stable) return { needs: false, action: 'Working', rank: 91 }
     return held
-      ? { needs: true, rank: 0, action: 'Tool call held' }
-      : { needs: true, rank: 1, action: 'Needs permission' }
+      ? { needs: true, rank: 0, action: 'Blocked' }
+      : { needs: true, rank: 1, action: 'Blocked' }
   }
   if (status === 'error') {
-    return { needs: true, rank: 2, action: 'Error' }
+    return { needs: true, rank: 2, action: 'Blocked' }
   }
   if (status === 'idle') {
     return control === 'managed'
-      ? { needs: true, rank: 3, action: 'Your turn' }
-      : { needs: true, rank: 4, action: 'Finished elsewhere' }
+      ? { needs: false, reviewed: true, rank: 10, action: 'Done' }
+      : { needs: false, reviewed: true, rank: 11, action: 'Done' }
   }
   return { needs: false, action: 'Working', rank: 91 }
 }

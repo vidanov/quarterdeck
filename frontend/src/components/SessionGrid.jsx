@@ -250,13 +250,13 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
     <div className={classes.join(' ')} style={{ borderColor: cfg.color, backgroundColor: cfg.bg }}
          onClick={handleCardClick}>
       <div className="card-header">
-        {/* The action, not the state — "Finished — your turn" answers the
-            question the grid is being read to answer. The raw status stays as
-            the tooltip, because it is still what you check when the action
-            reads wrong. */}
+        {/* The action, not the state — canonical term (Blocked/Working/Done)
+            answers the question the grid is being read to answer. The raw
+            status label stays as the tooltip. STATUS_CONFIG is the source of
+            truth for both canonical and decorated labels. */}
         <span className="card-status" style={{ color: cfg.color }}
               title={cfg.label.replace(/^\W+\s*/, '')}>
-          {attention ? attention.action : cfg.label}
+          {attention ? attention.action : (cfg.canonical || cfg.label)}
         </span>
         <div className="card-header-right">
           {isFavourite && <span className="card-fav-star" title="Favourite">★</span>}
@@ -324,8 +324,18 @@ function SessionCard({ session, onClick, onOpenFull, isSelected, onKill, onResta
             autoFocus
           />
         ) : (
-          <span className="card-warp-name" title="Click to rename"
-                onClick={e => { e.stopPropagation(); startRename(e) }}>{session.name}</span>
+          <>
+            <span className="card-warp-name" title="Click to rename"
+                  onClick={e => { e.stopPropagation(); startRename(e) }}>
+              {session.title || session.name}
+            </span>
+            {session.title && session.prompt && (
+              <span className="card-prompt-secondary"
+                    title={session.prompt}>
+                {session.prompt.slice(0, 60)}{session.prompt.length > 60 ? '…' : ''}
+              </span>
+            )}
+          </>
         )}
         {session.gated && (
           <span className="card-gated" title="Every tool call in this session is held for your approval">🔒</span>
@@ -762,7 +772,7 @@ function ListRow({ s, a, selected, onSelect, onOpenFull, onKill, onCancelPending
       )}
       {s.stalled && <span className="list-stalled" title="No output for an extended period">⚠</span>}
       {s.gated && <span className="list-gated" title="Gated">🔒</span>}
-      <span className="list-state">{a?.action || cfg.label.replace(/^\W+\s*/, '')}</span>
+      <span className="list-state">{a?.action || (cfg.canonical || cfg.label.replace(/^\W+\s*/, ''))}</span>
       {held && onRespondApproval && (
         <span className="list-approval" onClick={e => e.stopPropagation()}>
           <button className="list-approval-allow"
@@ -791,8 +801,8 @@ function ListRow({ s, a, selected, onSelect, onOpenFull, onKill, onCancelPending
 }
 const STATUS_ORDER = { 'awaiting-approval': 0, 'stalled': 1, 'thinking': 2, 'running': 3, 'idle': 4, 'done': 5, 'error': 6 }
 
-function ListView({ needsYou, working, selected, onSelect, onOpenFull, onKill, onCancelPending, onTakeover, killing, heldBySession, onRespondApproval }) {
-  const all = [...needsYou.map(({ s, a }) => ({ s, a })), ...working.map(({ s, a }) => ({ s, a }))]
+function ListView({ needsYou, working, review = [], selected, onSelect, onOpenFull, onKill, onCancelPending, onTakeover, killing, heldBySession, onRespondApproval }) {
+  const all = [...needsYou.map(({ s, a }) => ({ s, a })), ...working.map(({ s, a }) => ({ s, a })), ...review.map(({ s, a }) => ({ s, a }))]
   const listRef = useRef(null)
   const [sort, setSort] = useState({ key: null, dir: 1 }) // null = default (attention-first)
 

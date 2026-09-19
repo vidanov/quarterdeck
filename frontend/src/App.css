@@ -1,6 +1,48 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ── Theme tokens ───────────────────────────────────────────────────────────
+   Dark theme is the default (control-surface aesthetic).
+   Light theme activates via OS preference OR manual data-theme="light" on <html>.
+   data-theme="dark" forces dark even when OS prefers light.               */
+
 :root {
+  /* Dark default */
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --border: #334155;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --accent: #16a34a;
+  --accent-bg: #052e16;
+  --yellow: #f59e0b;
+  --yellow-bg: #451a03;
+  --red: #ef4444;
+  --red-bg: #450a0a;
+  --gray-bg: #1e293b;
+  font-size: 16px;
+  --chat-font-size: 13px;
+}
+
+/* Light theme — OS preference */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f8f9fa;
+    --surface: #ffffff;
+    --border: #e2e8f0;
+    --text: #1e293b;
+    --text-dim: #64748b;
+    --accent: #16a34a;
+    --accent-bg: #f0fdf4;
+    --yellow: #ca8a04;
+    --yellow-bg: #fefce8;
+    --red: #dc2626;
+    --red-bg: #fef2f2;
+    --gray-bg: #f1f5f9;
+  }
+}
+
+/* Manual override: light */
+html[data-theme="light"] {
   --bg: #f8f9fa;
   --surface: #ffffff;
   --border: #e2e8f0;
@@ -13,10 +55,22 @@
   --red: #dc2626;
   --red-bg: #fef2f2;
   --gray-bg: #f1f5f9;
-  font-size: 16px;
-  /* User-adjustable transcript text size (Settings → Appearance). The chat
-     text rules read this; children scale from it with em units. */
-  --chat-font-size: 13px;
+}
+
+/* Manual override: dark */
+html[data-theme="dark"] {
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --border: #334155;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --accent: #16a34a;
+  --accent-bg: #052e16;
+  --yellow: #f59e0b;
+  --yellow-bg: #451a03;
+  --red: #ef4444;
+  --red-bg: #450a0a;
+  --gray-bg: #1e293b;
 }
 
 html {
@@ -349,6 +403,17 @@ body {
 /* Tab picker */
 .card-warp-name { cursor: pointer; }
 .card-warp-name:hover { text-decoration: underline; text-decoration-style: dotted; }
+/* Secondary prompt line shown below session.title when title is set */
+.card-prompt-secondary {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+  opacity: 0.75;
+}
 .card-rename-input {
   font-size: 14px;
   font-weight: 600;
@@ -1206,12 +1271,26 @@ body {
   text-transform: uppercase;
 }
 .section-count {
-  font-size: 11px;
-  color: var(--muted);
+  font-size: 12px;
+  color: #475569;
   background: var(--gray-bg);
   border-radius: 10px;
   padding: 0 7px;
   line-height: 17px;
+}
+/* Condensed total-count badge shown instead of per-band section-count chips
+   on narrow screens (≤700px). Hides by default; shown via media query.      */
+.status-count {
+  display: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  background: var(--gray-bg);
+  border-radius: 10px;
+  padding: 0 8px;
+  line-height: 18px;
+  min-width: 20px;
+  text-align: center;
 }
 .section-chevron { font-size: 10px; color: var(--muted); }
 
@@ -3674,7 +3753,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
   cursor: pointer;
 }
 .control-filter-btn.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
-.control-filter-count { opacity: 0.6; font-variant-numeric: tabular-nums; }
+.control-filter-count { font-size: 12px; color: #475569; font-variant-numeric: tabular-nums; }
 .link-btn {
   background: none;
   border: none;
@@ -4515,8 +4594,9 @@ body.resizing .detail-resize::after { background: var(--accent); }
   /* "Thinking" and "Idle" header stat badges — keep only "waiting" (approval needed) */
   .stat-running { display: none; }
   .stat-idle { display: none; }
-  /* Section counts (Working 1 ▾, Needs you 2 ▾) — label only on mobile */
+  /* Section counts — hide per-band chips on mobile, show condensed total badge */
   .section-count { display: none; }
+  .status-count { display: inline-block; }
   /* "⚑ Correction" → icon only */
   .detail-correct { min-width: 44px; min-height: 44px; font-size: 16px; padding: 6px 8px; }
   /* "◎ Side" → keep text, it's short and important */
@@ -7714,4 +7794,78 @@ body.resizing .detail-resize::after { background: var(--accent); }
   flex: 1;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* ── Touch-target floor (44×44 px) for approval and action buttons ────── */
+/* Padding absorbs the extra size so label appearance does not change.      */
+@media (max-width: 700px) {
+  /* min-height and min-width ensure 44px tap targets on all action buttons */
+  .card-reply-allow,
+  .card-reply-deny,
+  .card-reply-trust,
+  .settings-btn,
+  .card-action {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 10px 14px;
+    box-sizing: border-box;
+  }
+}
+
+/* ── Accessibility: visibility:hidden on opacity-0 hover buttons ─────────
+   opacity alone keeps elements in tab order when hidden, making keyboard
+   users reach invisible buttons. visibility:hidden removes them from tab
+   order. Each selector must set visibility:visible in its reveal rule.    */
+
+/* Buttons hidden by default (opacity:0) also get visibility:hidden */
+.card-kill,
+.card-focus,
+.card-branch,
+.dsn-tab-close,
+.project-delete-btn,
+.cmdbar-item-open-btn,
+.branch-btn,
+.card-correct,
+.card-restart,
+.chat-fork,
+.chat-copy-btn {
+  visibility: hidden;
+}
+
+/* Reveal on parent/self hover and on focus */
+.card:hover .card-kill,
+.card:hover .card-focus,
+.card:hover .card-branch,
+.card:hover .card-correct,
+.card:hover .card-restart,
+.hot-project-card:hover .project-delete-btn,
+.chat-row-user:hover .chat-fork,
+.chat-row-assistant:hover .chat-copy-btn,
+.cmdbar-item:hover .cmdbar-item-open-btn,
+.dsn-tab-close:hover,
+.branch-btn:hover { visibility: visible; }
+
+/* focus-visible reveal — keyboard users can reach these when focused */
+.card-kill:focus-visible,
+.card-focus:focus-visible,
+.card-branch:focus-visible,
+.dsn-tab-close:focus-visible,
+.project-delete-btn:focus-visible,
+.cmdbar-item-open-btn:focus-visible,
+.branch-btn:focus-visible,
+.card-correct:focus-visible,
+.card-restart:focus-visible,
+.chat-fork:focus-visible,
+.chat-copy-btn:focus-visible { visibility: visible; }
+
+/* ── Global :focus-visible outline ──────────────────────────────────────
+   Provides a consistent 2px keyboard-focus indicator across all
+   interactive elements. Replaces the browser default where it's absent.  */
+*:focus-visible {
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: 2px;
+}
+/* Suppress default :focus ring where :focus-visible is supported */
+*:focus:not(:focus-visible) {
+  outline: none;
 }

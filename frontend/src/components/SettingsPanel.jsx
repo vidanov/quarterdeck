@@ -1529,7 +1529,7 @@ function ProfileSettings() {
         <div className="settings-row">
           <span className="settings-label">Current</span>
           <span className="settings-value">
-            {current.email || '?'}
+            {current.email || 'No email on file'}
             {current.active_profile && (
               <span className="settings-detail"> — profile "{current.active_profile}"</span>
             )}
@@ -2388,7 +2388,7 @@ function TemplatesSettings() {
   )
 }
 
-function SettingsPanel({ options, paneTheme, onTogglePaneTheme, chatFontSize, onChangeChatFontSize, showHidden, onChangeShowHidden, showCrew, onChangeShowCrew, sessionViewMode, onChangeViewDefault }) {
+function SettingsPanel({ options, paneTheme, onTogglePaneTheme, chatFontSize, onChangeChatFontSize, showHidden, onChangeShowHidden, showCrew, onChangeShowCrew, sessionViewMode, onChangeViewDefault, onClose }) {
   const notify = useToast()
   const askConfirm = useConfirm()
   const [tab, setTab] = useState('remote')
@@ -2486,6 +2486,17 @@ function SettingsPanel({ options, paneTheme, onTogglePaneTheme, chatFontSize, on
 
   return (
     <div className="settings-panel">
+      <div className="settings-header-bar">
+        <h2 className="settings-heading">Settings</h2>
+        {onClose && (
+          <button
+            className="settings-close-btn"
+            onClick={onClose}
+            aria-label="Close settings"
+            style={{ minWidth: 32, minHeight: 32 }}
+          >✕</button>
+        )}
+      </div>
       <div className="settings-tabs">
         {TABS.map(t => (
           <button key={t.id}
