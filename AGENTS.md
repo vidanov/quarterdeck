@@ -38,9 +38,15 @@ Backend auto-reloads on save (uvicorn `--reload`). Frontend auto-reloads via Vit
 
 ## Key files
 
-- `backend/api.py` — all FastAPI routes (~138 routes)
+- `backend/api.py` — all FastAPI routes (~209 routes)
 - `backend/config.py` — paths, constants, port definitions
 - `backend/tmux_manager.py` — session spawn, correlation, gate logic
+- `backend/deny.py` — deny-pattern engine: DEFAULT_PATTERNS, AWS Safety Pack, Crew Safety Pack
+- `backend/secrets.py` — per-project encrypted env var CRUD; inject-at-spawn
+- `backend/acp_observer.py` — ACP event stream for V3 sessions; pending_interaction detection
+- `backend/side_chat.py` — side-chat session snapshots and routes
+- `backend/pastes.py` — large-paste attachment storage and retrieval
+- `backend/auth.py` — token management, per-device named tokens, HttpOnly cookie auth
 - `frontend/src/App.jsx` — session grid, layout, state
 - `frontend/src/components/DetailPanel.jsx` — transcript, composer, approval UI
 - `frontend/src/App.css` — all styles (dark control-surface theme)
