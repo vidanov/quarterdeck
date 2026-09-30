@@ -1259,6 +1259,7 @@ export default function App() {
   }
 
   const handleResumeSession = (session) => {
+    unmarkKilling(session.id)  // ended a moment ago? show it again at once
     api.resumeSession(session.id)
       .then(d => {
         if (d.error) notify(`Resume failed: ${d.error}`, 'error')
@@ -1275,6 +1276,7 @@ export default function App() {
 
   const handleCmdBarAction = (action) => {
     if (action.action === 'resume' && action.session_id) {
+      unmarkKilling(action.session_id)
       api.resumeSession(action.session_id)
         .then(d => {
           if (d.error) notify(`Resume failed: ${d.error}`, 'error')
