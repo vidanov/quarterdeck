@@ -1912,16 +1912,26 @@ def _last_switch_ts() -> float:
 
 
 def _cached_active_profile() -> str:
-    global _active_profile_cache
-    now = time.time()
     ts, val = _active_profile_cache
-    if now - ts < _ACTIVE_PROFILE_TTL:
+    if time.time() - ts < _ACTIVE_PROFILE_TTL:
         return val
+    return _fresh_active_profile()
+
+
+def _fresh_active_profile() -> str:
+    """Look up the active profile now, refreshing the cache.
+
+    kiro-cli holds data.sqlite3 busy for long stretches and the lookup uses a
+    0.5s timeout. A lock timeout says nothing about which profile is active,
+    so keep the last known name instead of reporting "no profile" — that made
+    the pill drop to the bare email every time the DB was contended.
+    """
+    global _active_profile_cache
     try:
         val = _active_profile_name()
     except Exception:
-        val = ""
-    _active_profile_cache = (now, val)
+        return _active_profile_cache[1]
+    _active_profile_cache = (time.time(), val)
     return val
 
 
@@ -6525,7 +6535,7 @@ def dispatch_task(payload: dict):
     # Tag the new session with the currently active profile name so the card
     # can show which account it runs under. Written asynchronously: correlation
     # may not have resolved the session_id yet, so we wait for it in a thread.
-    active_profile = _active_profile_name()
+    active_profile = _fresh_active_profile()
     if active_profile:
         # Snapshot existing managed keys before this spawn completes correlation,
         # so the thread can identify the new session_id by set difference.
@@ -6601,73 +6611,107 @@ def dispatch_task(payload: dict):
 def _active_profile_name() -> str:
     """Return the name of the saved profile that matches the current auth, or ''.
 
-    Matches by the CodeWhisperer profile ARN in the state table first — this
-    is the authoritative signal when both profiles share the same SSO identity
-    (same OAuth tokens, different subscription tier). Token fingerprint is the
-    fallback for profiles saved before ARN tracking existed.
+    Raises on SQLite errors (lock timeout) so callers can keep the last known
+    name rather than treating "DB busy" as "no profile".
+
+    Matching, most specific first:
+      1. State-table ARN matches and the live tokens are the saved ones.
+      2. Live tokens match some saved snapshot (a stale ARN must not outvote
+         the tokens that are actually in use).
+      3. State-table ARN matches and the live tokens belong to the same login
+         (same SSO start_url) but were rotated by kiro-cli. The OIDC refresh
+         token changes on refresh, so the fingerprint stops matching within
+         the hour; without this step the active profile was "lost" every time
+         kiro-cli refreshed. The snapshot is re-saved so a later switch back
+         restores the current tokens, not the rotated-out ones.
     """
     if not _KIRO_AUTH_DB.exists():
         return ""
+    import sqlite3 as _sqlite3
+    # timeout=0.5: the DB is held by 5+ kiro processes; fail fast and let the
+    # caller fall back to the cached value rather than blocking for seconds.
+    con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=0.5)
     try:
-        import sqlite3 as _sqlite3
-        # Primary: match by the active CodeWhisperer profile ARN in state table
-        # timeout=0.5: the DB is held by 5+ kiro processes; fail fast and return
-        # cached value rather than blocking list_sessions for up to 5 seconds.
-        con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=0.5)
-        try:
-            row = con.execute(
-                "SELECT value FROM state WHERE key = 'api.codewhisperer.profile'"
-            ).fetchone()
-        finally:
-            con.close()
-        current_fp = ""
-        try:
-            current_fp = _token_fingerprint(_dump_auth_rows())
-        except Exception:
-            pass
-        if row and row[0]:
-            try:
-                state_arn = json.loads(row[0]).get("arn", "")
-            except Exception:
-                state_arn = ""
-            if state_arn:
-                for meta_path in sorted(_PROFILES_DIR.glob("*.meta.json")):
-                    name = meta_path.stem.replace(".meta", "")
-                    if name == "_previous":
-                        continue
-                    try:
-                        meta = json.loads(meta_path.read_text())
-                    except Exception:
-                        continue
-                    if meta.get("profile_arn", "") != state_arn:
-                        continue
-                    # The state-table ARN and the live OAuth tokens can disagree:
-                    # switching to a profile whose meta has no state_profile/ARN
-                    # leaves the *previous* profile's ARN in the table. Trusting
-                    # the ARN then keeps reporting the old profile as active and
-                    # the switch looks like it never happened. Only believe the
-                    # ARN when that profile's tokens are the live ones.
-                    saved_fp = meta.get("token_fingerprint", "")
-                    if not current_fp or not saved_fp or saved_fp == current_fp:
-                        return name
-                    break
-
-        # Fallback: token fingerprint match (profiles without ARN metadata)
-        if not current_fp:
-            return ""
-        for data_path in sorted(_PROFILES_DIR.glob("*.jsonl")):
-            name = data_path.stem
-            if name == "_previous":
-                continue
-            try:
-                saved_rows = [json.loads(line) for line in data_path.read_text().splitlines() if line.strip()]
-                if _token_fingerprint(saved_rows) == current_fp:
-                    return name
-            except Exception:
-                continue
+        row = con.execute(
+            "SELECT value FROM state WHERE key = 'api.codewhisperer.profile'"
+        ).fetchone()
+    finally:
+        con.close()
+    live_rows: list[dict] = []
+    try:
+        live_rows = _dump_auth_rows()
     except Exception:
         pass
+    current_fp = _token_fingerprint(live_rows) if live_rows else ""
+    state_arn = ""
+    if row and row[0]:
+        try:
+            state_arn = json.loads(row[0]).get("arn", "")
+        except Exception:
+            pass
+
+    saved: list[tuple[str, dict, list[dict]]] = []
+    for data_path in sorted(_PROFILES_DIR.glob("*.jsonl")):
+        name = data_path.stem
+        if name == "_previous":
+            continue
+        try:
+            rows = [json.loads(line) for line in data_path.read_text().splitlines() if line.strip()]
+        except Exception:
+            continue
+        try:
+            meta = json.loads(_profile_meta_path(name).read_text())
+        except Exception:
+            meta = {}
+        saved.append((name, meta, rows))
+
+    arn_matches = [s for s in saved if state_arn and s[1].get("profile_arn", "") == state_arn]
+    for name, meta, rows in arn_matches:
+        saved_fp = meta.get("token_fingerprint", "") or _token_fingerprint(rows)
+        if not current_fp or not saved_fp or saved_fp == current_fp:
+            return name
+    if not current_fp:
+        return ""
+    for name, meta, rows in saved:
+        if _token_fingerprint(rows) == current_fp:
+            return name
+    live_url = _token_start_url(live_rows)
+    if live_url:
+        same_login = [s for s in arn_matches if _token_start_url(s[2]) == live_url]
+        if len(same_login) == 1:
+            name = same_login[0][0]
+            _resave_rotated_tokens(name, same_login[0][1], live_rows)
+            return name
     return ""
+
+
+def _token_login(rows: list[dict]) -> dict:
+    """SSO start_url and region of the kiro-cli login — no secrets."""
+    for r in rows:
+        if r.get("key") == "kirocli:odic:token":
+            try:
+                tok = json.loads(r.get("value", ""))
+            except Exception:
+                return {}
+            return {"start_url": tok.get("start_url", "") or "", "region": tok.get("region", "") or ""}
+    return {}
+
+
+def _token_start_url(rows: list[dict]) -> str:
+    """SSO start_url of the kiro-cli login — stable across token refreshes."""
+    return _token_login(rows).get("start_url", "")
+
+
+def _resave_rotated_tokens(name: str, meta: dict, rows: list[dict]) -> None:
+    """Replace a profile's token snapshot after kiro-cli rotated its tokens."""
+    try:
+        data_path = _profile_data_path(name)
+        data_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        data_path.chmod(0o600)  # contains live OAuth tokens — owner-only
+        meta = dict(meta, token_fingerprint=_token_fingerprint(rows))
+        _profile_meta_path(name).write_text(json.dumps(meta))
+    except OSError:
+        pass
 
 
 @app.post("/api/sessions/restart-visible")
@@ -7520,8 +7564,17 @@ def list_profiles():
             meta = json.loads(meta_path.read_text())
         except Exception:
             meta = {}
+        try:
+            login = _token_login([json.loads(line) for line in data_path.read_text().splitlines() if line.strip()])
+        except Exception:
+            login = {}
+        start_url = login.get("start_url", "")
+        if start_url.startswith("https://view.awsapps.com"):
+            start_url = ""  # AWS Builder ID — login form's blank-URL path
         profiles.append({
             "name": name,
+            "start_url": start_url,
+            "region": login.get("region", ""),
             "email": meta.get("email", "?"),
             "provider": meta.get("provider", "?"),
             "profile_arn": meta.get("profile_arn", ""),
@@ -7533,7 +7586,7 @@ def list_profiles():
 @app.get("/api/profiles/current")
 def current_profile():
     """Return the currently active identity."""
-    active_name = _active_profile_name()
+    active_name = _fresh_active_profile()
     info = {}
     if active_name:
         try:

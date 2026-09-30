@@ -100,6 +100,16 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
     setOpen(false)
   }
 
+  // Re-login usually means the active profile's session expired, so preset
+  // its SSO start URL and region rather than making the user retype them.
+  const openLogin = () => {
+    if (!loginOpen) {
+      const p = profiles.find(x => x.name === current?.active_profile)
+      if (p) { setLoginUrl(p.start_url || ''); setLoginRegion(p.region || '') }
+    }
+    setLoginOpen(v => !v)
+  }
+
   const handleLogin = async () => {
     setBusy('login')
     const opts = loginUrl ? { license: 'pro', identity_provider: loginUrl, region: loginRegion || 'eu-central-1' } : { license: 'free' }
@@ -161,7 +171,7 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
           <div className="profile-dropdown-section">
             <div className="profile-dropdown-label">Actions</div>
             <button className="profile-dropdown-item" disabled={!!busy || !!switching}
-                    onClick={() => { setLoginOpen(v => !v) }}>
+                    onClick={openLogin}>
               🔑 Login…
             </button>
             <button className="profile-dropdown-item" disabled={!!busy || !!switching}
