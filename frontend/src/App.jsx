@@ -390,14 +390,18 @@ export default function App() {
     const rank = (s) => s.id === newChat.ghostId ? 0 : s.id.startsWith('pending:') ? 1 : 2
     return matches.sort((a, b) => rank(b) - rank(a))[0] || null
   }, [newChat, sessions])
+  // Checked by id, not by looking the session up: the ghost and the pending
+  // placeholder leave the list as the chat advances, and the user may still be
+  // sitting on one of them when the real session arrives.
   const inNewChat = (id) => !!newChat && !!id && (id === newChat.ghostId ||
+    (newChat.nonce && id === `pending:${newChat.nonce}`) ||
     (newChat.id && id === newChat.id) ||
     (newChat.nonce && sessions.some(s => s.id === id && s.spawn_nonce === newChat.nonce)))
 
   // Follow the chat to its next id — but only while the user is still on it.
   useEffect(() => {
     if (!newChatSession || !selected || selected.id === newChatSession.id) return
-    if (inNewChat(selected.id) || selected.id === newChat?.ghostId) selectSession(newChatSession)
+    if (inNewChat(selected.id)) selectSession(newChatSession)
   }, [newChatSession])
 
   // Deliver early messages one at a time, each only once the session is idle
@@ -1016,7 +1020,7 @@ export default function App() {
       })
       .catch(() => { notify('Could not answer: backend unreachable', 'error'); return false })
 
-  const handleDispatch = (request) => {
+  const handleDispatch = (request, { follow: followNew = false } = {}) => {
     setLauncherOpen(false)
     // Optimistic: insert a ghost card immediately so the user sees feedback in
     // under 50ms. The ghost has a unique nonce as its id. Once the server
@@ -1046,7 +1050,9 @@ export default function App() {
     // chat becomes the active tab in the same view instead of dropping back to
     // the grid. Once the real session lands on the next poll, its tab replaces
     // the ghost and the user selects it.
-    const follow = expanded
+    // Follow the new chat when it came from a panel's "+" (side or maximised)
+    // or from anywhere while maximised; a grid dispatch leaves the view alone.
+    const follow = followNew || expanded
     if (follow) {
       selectSession(ghost)
       setNewChat({ ghostId: nonce, nonce: '', id: '', outbox: [], sending: false, sentAt: 0 })
@@ -1079,7 +1085,7 @@ export default function App() {
   // behaviour is identical to a normal dispatch.
   const handleNewChat = (cwd) => {
     const dir = cwd || cwdSuggestion?.path || ''
-    handleDispatch({ task: '', label: 'New chat', cwd: dir, allow_empty: true })
+    handleDispatch({ task: '', label: 'New chat', cwd: dir, allow_empty: true }, { follow: true })
   }
 
   const handleKillSession = async (sessionId, e) => {

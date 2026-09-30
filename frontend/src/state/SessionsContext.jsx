@@ -63,8 +63,9 @@ export function SessionsProvider({ children }) {
         const merged = newSessions.map(s => {
           if (s.title && s.title !== 'Untitled' && s.name && s.name !== 'Untitled') return s
           // Find a ghost for the same cwd dispatched in the last 90 seconds
+          // A blank "+" chat has only a label, not task text worth keeping.
           const ghost = ghosts.find(g =>
-            g.cwd && g.cwd === s.cwd &&
+            !g._blank && g.cwd && g.cwd === s.cwd &&
             Date.now() - new Date(g.updated_at).getTime() < 90000
           )
           if (ghost) return {
