@@ -93,3 +93,70 @@ class TestIncompleteSwitch:
 
         assert not result.get("ok")
         assert "missing its subscription" in result["error"]
+
+
+def _token_rows(refresh_token, start_url):
+    return [{"key": "kirocli:odic:token",
+             "value": json.dumps({"refresh_token": refresh_token, "start_url": start_url})}]
+
+
+class TestRotatedTokens:
+    """kiro-cli rotates the OIDC refresh token on refresh. The fingerprint of
+    the live tokens then no longer matches the saved snapshot, and the active
+    profile used to vanish until the user switched again."""
+
+    @pytest.fixture
+    def rotated(self, store, monkeypatch):
+        man_arn = "arn:aws:codewhisperer:eu-central-1:1:profile/MAN"
+        saved = _token_rows("OLD", "https://man.awsapps.com/start")
+        (store / "MAN.jsonl").write_text("\n".join(json.dumps(r) for r in saved) + "\n")
+        (store / "MAN.meta.json").write_text(json.dumps({
+            "profile_arn": man_arn, "token_fingerprint": api_mod._token_fingerprint(saved)}))
+        # Only the MAN profile is relevant; drop the fake-row fixtures.
+        for n in ("StormDE_Paid", "StormDE_Free"):
+            (store / f"{n}.jsonl").unlink()
+            (store / f"{n}.meta.json").unlink()
+        live = _token_rows("NEW", "https://man.awsapps.com/start")
+        monkeypatch.setattr(api_mod, "_dump_auth_rows", lambda: live)
+
+        import sqlite3
+
+        class _Con:
+            def execute(self, *_a, **_k): return self
+            def fetchone(self): return (json.dumps({"arn": man_arn}),)
+            def close(self): pass
+
+        monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: _Con())
+        return store, live
+
+    def test_rotated_tokens_keep_the_profile(self, rotated):
+        assert api_mod._active_profile_name() == "MAN"
+
+    def test_snapshot_is_resaved_with_the_live_tokens(self, rotated):
+        store, live = rotated
+        api_mod._active_profile_name()
+        saved = [json.loads(l) for l in (store / "MAN.jsonl").read_text().splitlines() if l]
+        assert saved == live
+        meta = json.loads((store / "MAN.meta.json").read_text())
+        assert meta["token_fingerprint"] == api_mod._token_fingerprint(live)
+
+    def test_other_login_under_same_arn_is_not_adopted(self, rotated, monkeypatch):
+        store, _ = rotated
+        other = _token_rows("NEW", "https://other.awsapps.com/start")
+        monkeypatch.setattr(api_mod, "_dump_auth_rows", lambda: other)
+        assert api_mod._active_profile_name() == ""
+        saved = (store / "MAN.jsonl").read_text()
+        assert "OLD" in saved
+
+
+class TestLockedDatabase:
+    def test_lock_timeout_keeps_last_known_profile(self, monkeypatch):
+        import sqlite3
+
+        def _locked():
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(api_mod, "_active_profile_cache", (0.0, "MAN"))
+        monkeypatch.setattr(api_mod, "_active_profile_name", _locked)
+        assert api_mod._fresh_active_profile() == "MAN"
+        assert api_mod._cached_active_profile() == "MAN"
