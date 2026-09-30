@@ -4,6 +4,16 @@ Completed work, extracted from the roadmap on 2026-07-28. Organized by area.
 
 ---
 
+## 2026-09-30
+
+### Active profile no longer lost after token refresh
+
+**Root cause fixed**: `_active_profile_name` identified the live login by a hash of the OIDC `refresh_token`. kiro-cli rotates that token on refresh (roughly hourly), so the live fingerprint stopped matching the saved snapshot and the pill fell back to the bare email. Confirmed on real data: `_previous.jsonl` held MAN tokens whose fingerprint matched no saved profile. A second path to the same symptom: a 0.5s SQLite lock timeout returned `""`, which was cached for 60s and returned directly by `/api/profiles/current`.
+
+**backend/api.py**: matching is now (1) ARN + exact tokens, (2) exact tokens under any profile, (3) ARN + same SSO `start_url` — rotated tokens of the same login. Case 3 re-saves the snapshot (`_resave_rotated_tokens`) so switching back later restores current tokens, not the rotated-out ones. `_fresh_active_profile()` keeps the last known name on DB errors; used by `/api/profiles/current` and dispatch tagging. Tests in `tests/test_profile_active_detection.py`.
+
+---
+
 ## 2026-08-15
 
 ### Paste-as-document across all inputs
