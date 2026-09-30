@@ -19,6 +19,8 @@ const ACTIVE_STATUSES = new Set(['thinking', 'running', 'awaiting-approval', 'st
 
 // How long a card stays flagged after its status changes to one that wants you.
 const NOTIFY_MS = 5000
+// How long an ended session stays hidden while it is still listed.
+const KILL_HIDE_MS = 60000
 
 export function SessionsProvider({ children }) {
   const [sessions, setSessions] = useState([])
@@ -29,6 +31,7 @@ export function SessionsProvider({ children }) {
   // Sessions asked to end. Held here so the card can go at once rather than
   // sitting there through a clean quit, which read as closing being broken.
   const [killing, setKilling] = useState(new Set())
+  const killingSince = useRef(new Map())  // id -> when it was asked to end
   // Show hidden sessions (captain/bosun) — off by default
   const [showHidden, setShowHidden] = useState(false)
   const showHiddenRef = useRef(false)
@@ -131,12 +134,22 @@ export function SessionsProvider({ children }) {
       })
       prevStatuses.current = statusMap
 
-      // Clear stale killing entries — if a session was killed but later resumed
-      // (same ID), it re-appears in newSessions and must become visible again.
-      const activeIds = new Set(newSessions.map(s => s.id))
+      // Clear finished killing entries. A clean quit takes seconds, so the
+      // session is still listed for a few polls after ×; clearing the flag as
+      // soon as it was seen in the list made the card vanish, come back, and
+      // vanish again. Keep it hidden until it is gone from the list, and give
+      // up after a minute (the quit failed, or it was resumed on the same id).
+      // An ended session stays listed as archived/done, which the Active view
+      // already hides — so that counts as gone.
+      const activeIds = new Set(newSessions
+        .filter(s => s.control !== 'archived' && s.status !== 'done')
+        .map(s => s.id))
+      const now = Date.now()
       setKilling(prev => {
         if (prev.size === 0) return prev
-        const next = new Set([...prev].filter(id => !activeIds.has(id)))
+        const next = new Set([...prev].filter(id =>
+          activeIds.has(id) && now - (killingSince.current.get(id) || 0) < KILL_HIDE_MS))
+        for (const id of prev) if (!next.has(id)) killingSince.current.delete(id)
         return next.size === prev.size ? prev : next
       })
 
@@ -184,8 +197,12 @@ export function SessionsProvider({ children }) {
     return () => { if (timer) clearTimeout(timer) }
   }, [refresh])
 
-  const markKilling = useCallback((id) => setKilling(prev => new Set([...prev, id])), [])
+  const markKilling = useCallback((id) => {
+    killingSince.current.set(id, Date.now())
+    setKilling(prev => new Set([...prev, id]))
+  }, [])
   const unmarkKilling = useCallback((id) => setKilling(prev => {
+    killingSince.current.delete(id)
     const next = new Set(prev)
     next.delete(id)
     return next
