@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 
 // Top-level error boundary — catches any render crash in the whole app and
@@ -351,6 +351,8 @@ export default function App() {
   // Wrap setSelected to also persist the session id to backend settings
   const selectSession = (session) => {
     setSelected(session)
+    // Ghost and pending placeholders are not worth restoring on reload.
+    if (session?.id && /^(opt-|pending:)/.test(session.id)) return
     if (session?.id) {
       localStorage.setItem('last-session-id', session.id)
       settingsApi.saveSettings({ 'last-session-id': session.id }).catch(() => {})
@@ -362,18 +364,66 @@ export default function App() {
   // Lifted out of DetailPanel so a card's double-click can open straight into
   // the maximised view, and so F works wherever focus happens to be.
   const [expanded, setExpanded] = useState(false)
-  // When a new chat is dispatched from the maximised view, the ghost tab is
-  // selected first; once the real session lands in a poll we swap to it.
-  const pendingSelectRef = useRef(null)
+  // A chat started from the maximised view is followed through three ids: the
+  // ghost (before the server answers), `pending:<nonce>` (tmux is up, kiro-cli
+  // has no id yet) and finally the real session. The view moves with it, and
+  // anything typed on the way waits in `outbox` until the session is idle.
+  // { ghostId, nonce, id, outbox: string[], sending: bool, sentAt: number }
+  const [newChat, setNewChat] = useState(null)
+  const newChatSession = useMemo(() => {
+    if (!newChat) return null
+    const matches = sessions.filter(s =>
+      s.id === newChat.ghostId ||
+      (newChat.id && s.id === newChat.id) ||
+      (newChat.nonce && s.spawn_nonce === newChat.nonce))
+    // Most advanced stage wins: real id, then pending placeholder, then ghost.
+    const rank = (s) => s.id === newChat.ghostId ? 0 : s.id.startsWith('pending:') ? 1 : 2
+    return matches.sort((a, b) => rank(b) - rank(a))[0] || null
+  }, [newChat, sessions])
+  const inNewChat = (id) => !!newChat && !!id && (id === newChat.ghostId ||
+    (newChat.id && id === newChat.id) ||
+    (newChat.nonce && sessions.some(s => s.id === id && s.spawn_nonce === newChat.nonce)))
+
+  // Follow the chat to its next id — but only while the user is still on it.
   useEffect(() => {
-    const wantId = pendingSelectRef.current
-    if (!wantId) return
-    const real = sessions.find(s => s.id === wantId)
-    if (real) {
-      pendingSelectRef.current = null
-      selectSession(real)
+    if (!newChatSession || !selected || selected.id === newChatSession.id) return
+    if (inNewChat(selected.id) || selected.id === newChat?.ghostId) selectSession(newChatSession)
+  }, [newChatSession])
+
+  // Deliver early messages one at a time, each only once the session is idle
+  // again, so kiro-cli sees them as separate turns in the order typed.
+  useEffect(() => {
+    const s = newChatSession
+    if (!newChat || !s || s.id === newChat.ghostId || s.id.startsWith('pending:')) return
+    if (s.control !== 'managed') return
+    if (newChat.sending) return
+    if (newChat.sentAt && s.status === 'idle' && Date.now() - newChat.sentAt < 4000) return
+    if (s.status !== 'idle') {
+      if (newChat.sentAt) setNewChat(c => c && { ...c, sentAt: 0 })
+      return
     }
-  }, [sessions])
+    if (!newChat.outbox.length) { setNewChat(null); return }
+    const [text, ...rest] = newChat.outbox
+    setNewChat(c => c && { ...c, sending: true })
+    api.sendInput(s.id, text, [])
+      .then(d => {
+        if (d.error) throw new Error(d.error)
+        setNewChat(c => c && { ...c, outbox: rest, sending: false, sentAt: Date.now() })
+        refreshBurst([400, 1200])
+      })
+      .catch(err => {
+        setNewChat(null)
+        notify(`Send failed: ${err.message || 'backend unreachable'} — ${newChat.outbox.length} message(s) not delivered`, 'error')
+      })
+  }, [newChatSession, newChat])
+  // Fallback clock: a poll can miss the busy phase of a very short turn.
+  useEffect(() => {
+    if (!newChat?.sentAt) return
+    const t = setTimeout(() => refreshBurst([0]), 4200)
+    return () => clearTimeout(t)
+  }, [newChat?.sentAt])
+  const queueEarly = useCallback((text) =>
+    setNewChat(c => c && { ...c, outbox: [...c.outbox, text] }), [])
   const [returnView, setReturnView] = useState(null) // view to return to when closing expanded detail
   // Focus mode: grid collapses to a thin attention strip, panel takes full width.
   // Different from expanded (which overlays): the grid stays visible.
@@ -979,25 +1029,35 @@ export default function App() {
       updated_at: new Date().toISOString(),
       kiro_profile: activeProfileName || undefined,
       _optimistic: true,
+      _blank: !request.task,
     }
     addOptimistic(ghost)
     // Dispatched from the maximised detail view: select the ghost so the new
     // chat becomes the active tab in the same view instead of dropping back to
     // the grid. Once the real session lands on the next poll, its tab replaces
     // the ghost and the user selects it.
-    if (expanded) selectSession(ghost)
+    const follow = expanded
+    if (follow) {
+      selectSession(ghost)
+      setNewChat({ ghostId: nonce, nonce: '', id: '', outbox: [], sending: false, sentAt: 0 })
+    }
     api.dispatch(request)
       .then(d => {
         resolveOptimistic(nonce)
-        if (d.error) { notify(`Dispatch failed: ${d.error}`, 'error'); return }
-        // Swap the ghost tab for the real session once it appears in a poll,
-        // so the maximised view lands on the live tab (see pendingSelectId effect).
-        if (expanded && d.id) pendingSelectRef.current = d.id
+        if (d.error) {
+          if (follow) setNewChat(c => c?.ghostId === nonce ? null : c)
+          notify(`Dispatch failed: ${d.error}`, 'error')
+          return
+        }
+        // The spawn returns before kiro-cli has an id: keep the nonce so the
+        // view can follow `pending:<nonce>` and then the real session.
+        if (follow) setNewChat(c => c?.ghostId === nonce ? { ...c, nonce: d.nonce || '', id: d.id || '' } : c)
         fetchSessions()
         refreshBurst([800, 2000, 4000, 8000])
       })
       .catch(() => {
         rejectOptimistic(nonce)
+        if (follow) setNewChat(c => c?.ghostId === nonce ? null : c)
         notify('Dispatch failed: backend unreachable', 'error')
       })
   }
@@ -2352,7 +2412,7 @@ export default function App() {
         {selected && typeof selected === 'object' && <DetailPanel session={sessions.find(s => s.id === selected.id) || selected} onClose={() => { 
           if (returnView) { changeSessionViewMode(returnView); setReturnView(null) }
           selectSession(null); setFocusMode(false)
-        }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActiveWithFav} onNewSession={(cwd) => { if (expanded) setExpanded(false); setLauncherOpen(true); if (cwd) setLauncherCwd(cwd) }} onNewChat={handleNewChat} onRestartHere={handleRestartHere} fromWall={returnView === 'wall'} favourites={favourites} onToggleFavourite={handleToggleFavourite} />}
+        }} onTakeover={handleTakeover} onResume={handleResumeSession} onRefresh={fetchSessions} onSelect={selectSession} options={options} expanded={expanded} onToggleExpand={() => setExpanded(v => !v)} focusMode={focusMode} onToggleFocus={toggleFocus} paneTheme={paneTheme} sessions={shownActiveWithFav} onNewSession={(cwd) => { if (expanded) setExpanded(false); setLauncherOpen(true); if (cwd) setLauncherCwd(cwd) }} onNewChat={handleNewChat} earlyOutbox={inNewChat(selected.id) ? newChat.outbox : undefined} onEarlySend={inNewChat(selected.id) ? queueEarly : undefined} onRestartHere={handleRestartHere} fromWall={returnView === 'wall'} favourites={favourites} onToggleFavourite={handleToggleFavourite} />}
         {/* Wall / ambient view overlay — big tiles, interactive, full screen */}
         {sessionViewMode === 'wall' && (() => {
           const wallSendInput = () => {

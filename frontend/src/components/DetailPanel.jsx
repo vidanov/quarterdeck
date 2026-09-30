@@ -727,7 +727,30 @@ function ContextPct({ pct, onCompact }) {
   )
 }
 
-function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSelect, options, expanded, onToggleExpand, focusMode, onToggleFocus, paneTheme, sessions, onNewSession, onNewChat, onRestartHere, fromWall, favourites, onToggleFavourite }) {
+// Composer for a chat that is still starting: kiro-cli has no prompt yet, so
+// only plain text is offered (no keys, chips, or queue that need a live pane).
+function EarlyComposer({ onSend }) {
+  const [text, setText] = useState('')
+  const ref = useRef(null)
+  useEffect(() => { ref.current?.focus() }, [])
+  const submit = (e) => {
+    e?.preventDefault()
+    if (!text.trim()) return
+    onSend(text)
+    setText('')
+  }
+  return (
+    <form className="composer-row" onSubmit={submit}>
+      <textarea ref={ref} className="composer-input" rows={2} value={text}
+                placeholder="Starting… type now, it sends as soon as the session is ready"
+                onChange={e => setText(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) submit(e) }} />
+      <button type="submit" className="dispatch-btn" disabled={!text.trim()}>Send</button>
+    </form>
+  )
+}
+
+function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSelect, options, expanded, onToggleExpand, focusMode, onToggleFocus, paneTheme, sessions, onNewSession, onNewChat, onRestartHere, fromWall, favourites, onToggleFavourite , earlyOutbox, onEarlySend}) {
   const notify = useToast()
   const askConfirm = useConfirm()
   // xterm.js requires canvas — doesn't work in mobile browsers
@@ -1599,6 +1622,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
     const prevOutputLen = { current: 0 }
     const lastDetailJson = { current: '' }
     const fetchDetail = () => {
+      // Ghost and pending placeholders have no session on disk to fetch.
+      if (/^(opt-|pending:)/.test(session.id)) return
       api.getSession(session.id)
         .then(d => {
           // Skip setState when payload hasn't actually changed — avoids a
@@ -1947,6 +1972,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   const sendText = (text) => {
     if (!text.trim() && attachments.length === 0) return
+    // A chat opened from the "+" tab: until it is up and everything typed
+    // early has been delivered, App owns the queue so the order holds.
+    if (onEarlySend) { if (text.trim()) onEarlySend(text); return }
     if (!canSend) return
     setSending(true)
     // Echo immediately: the pane needs a moment to redraw, and silence right
@@ -2240,7 +2268,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           )}
         </div>
         <div className="detail-actions">
-          {control === 'foreign' && (
+          {/* A chat still starting from "+" can read as foreign for a poll
+              before correlation lands; taking it over would kill that spawn. */}
+          {control === 'foreign' && !onEarlySend && (
             <button className="detail-switch" onClick={() => onTakeover(session)}>⇩ Take over</button>
           )}
           {control === 'archived' && (
@@ -2744,7 +2774,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             const lastUser = detail?.output
               ? [...detail.output].reverse().find(e => e.type === 'user')
               : null
-            const lastUserText = lastUser?.text || session.title || null
+            // A blank "+" chat has a label, not a prompt, until kiro-cli is up.
+            const placeholder = /^(opt-|pending:)/.test(session.id)
+            const blank = placeholder && (session._blank || session.title === 'Starting…')
+            const lastUserText = lastUser?.text || (blank ? null : session.title) || null
             return (
               <>
                 {lastUserText && (
@@ -2761,7 +2794,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     </div>
                   </div>
                 )}
-                <div className="chat-empty chat-loading-hint">Loading full transcript…</div>
+                <div className="chat-empty chat-loading-hint">{placeholder ? 'Starting session…' : 'Loading full transcript…'}</div>
               </>
             )
           })()}
@@ -3002,6 +3035,14 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </div>
             )
           })()}
+          {(earlyOutbox || []).map((text, i) => (
+            <div key={i} className="chat-row chat-row-user chat-row-pending">
+              <div className="chat-bubble-user">
+                <div className="chat-bubble-text">{text}</div>
+                <div className="chat-bubble-queued">sends when the session is ready</div>
+              </div>
+            </div>
+          ))}
           {!atTranscriptBottom && (
             <button className="live-scroll-btn transcript-scroll-btn" onClick={scrollTranscriptToBottom} title="Scroll to latest">↓</button>
           )}
@@ -3320,6 +3361,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               )}
             </div>
           </>
+        ) : onEarlySend ? (
+          <EarlyComposer onSend={onEarlySend} />
         ) : (
           <div className="composer-locked">
             {status === 'stalled' ? (

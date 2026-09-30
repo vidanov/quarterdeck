@@ -2506,6 +2506,18 @@ def _do_sessions_scan() -> dict:
             "unresolved": bool(entry.get("unresolved")),
         })
 
+    # Tag every session with the nonce it was spawned under. A dispatch returns
+    # before kiro-cli has an id, so the UI only knows the nonce; this lets it
+    # follow its new chat from `pending:<nonce>` to the real session id.
+    nonce_by_id = {sid: n for n, sid in pending_owners.items()}
+    for sid, rec in managed.items():
+        if rec.get("nonce"):
+            nonce_by_id.setdefault(sid, rec["nonce"])
+    for s in sessions:
+        n = s.get("nonce") or nonce_by_id.get(s["id"])
+        if n:
+            s["spawn_nonce"] = n
+
     # Sort: active first (thinking, awaiting-approval), then most recently active first within each status group
     status_order = {"thinking": 0, "running": 0, "awaiting-approval": 1, "idle": 2, "error": 3, "done": 4}
     # First sort by status, then by updated_at descending
