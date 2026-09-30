@@ -2536,6 +2536,9 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           session; re-selecting it restores the tab. */}
       {sessions && sessions.length > 0 && onSelect && (() => {
         const managed = sessions.filter(s => s.control === 'managed' || s.control === 'starting')
+        // A chat that is still starting can drop out of the list between its
+        // ghost and its pending entry; keep its tab so the strip does not blink.
+        if (session.control === 'starting' && !managed.some(s => s.id === session.id)) managed.unshift(session)
         if (!managed.length) return null
         // Visible tabs = managed minus minimized, but the active session always shows.
         const visible = managed.filter(s => s.id === session.id || !minimizedTabs.has(s.id))
