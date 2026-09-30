@@ -1115,6 +1115,9 @@ def resolve_pending(nonce: str, timeout: float = SPAWN_TIMEOUT) -> str | None:
         "spawned_at": entry.get("spawned_at", time.time()),
         "task": entry.get("task", ""),
         "agent": entry.get("agent", ""),
+        # Kept so the UI can follow a dispatch it made optimistically: it only
+        # knows the nonce, and the id arrives later through a poll.
+        "nonce": nonce,
         # Which route found the id. Worth recording: it is the only way to tell
         # whether the hooks are actually working in the field.
         "correlated_via": via,

@@ -1723,6 +1723,11 @@ body {
 .composer-reanimate:hover { background: #fef3c7; }
 .composer-reanimate:disabled { cursor: progress; opacity: 0.6; }
 
+.chat-bubble-queued {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
 .composer-locked {
   font-size: 12px;
   color: var(--text-dim);
