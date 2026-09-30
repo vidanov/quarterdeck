@@ -160,3 +160,28 @@ class TestLockedDatabase:
         monkeypatch.setattr(api_mod, "_active_profile_name", _locked)
         assert api_mod._fresh_active_profile() == "MAN"
         assert api_mod._cached_active_profile() == "MAN"
+
+
+class TestListProfilesLogin:
+    """The login form presets the active profile's SSO start URL and region."""
+
+    def _save(self, store, name, start_url):
+        rows = [{"key": "kirocli:odic:token", "value": json.dumps(
+            {"refresh_token": "SECRET", "access_token": "SECRET",
+             "start_url": start_url, "region": "eu-central-1"})}]
+        (store / f"{name}.jsonl").write_text(json.dumps(rows[0]) + "\n")
+        (store / f"{name}.meta.json").write_text(json.dumps({"email": "x@y.z"}))
+
+    def test_exposes_start_url_and_region_without_tokens(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(api_mod, "_PROFILES_DIR", tmp_path)
+        self._save(tmp_path, "MAN", "https://man.awsapps.com/start")
+        [p] = api_mod.list_profiles()["profiles"]
+        assert p["start_url"] == "https://man.awsapps.com/start"
+        assert p["region"] == "eu-central-1"
+        assert "SECRET" not in json.dumps(p)
+
+    def test_builder_id_has_no_start_url(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(api_mod, "_PROFILES_DIR", tmp_path)
+        self._save(tmp_path, "Free", "https://view.awsapps.com/start")
+        [p] = api_mod.list_profiles()["profiles"]
+        assert p["start_url"] == ""

@@ -6212,15 +6212,21 @@ def _active_profile_name() -> str:
     return ""
 
 
-def _token_start_url(rows: list[dict]) -> str:
-    """SSO start_url of the kiro-cli login — stable across token refreshes."""
+def _token_login(rows: list[dict]) -> dict:
+    """SSO start_url and region of the kiro-cli login — no secrets."""
     for r in rows:
         if r.get("key") == "kirocli:odic:token":
             try:
-                return json.loads(r.get("value", "")).get("start_url", "") or ""
+                tok = json.loads(r.get("value", ""))
             except Exception:
-                return ""
-    return ""
+                return {}
+            return {"start_url": tok.get("start_url", "") or "", "region": tok.get("region", "") or ""}
+    return {}
+
+
+def _token_start_url(rows: list[dict]) -> str:
+    """SSO start_url of the kiro-cli login — stable across token refreshes."""
+    return _token_login(rows).get("start_url", "")
 
 
 def _resave_rotated_tokens(name: str, meta: dict, rows: list[dict]) -> None:
@@ -7085,8 +7091,17 @@ def list_profiles():
             meta = json.loads(meta_path.read_text())
         except Exception:
             meta = {}
+        try:
+            login = _token_login([json.loads(line) for line in data_path.read_text().splitlines() if line.strip()])
+        except Exception:
+            login = {}
+        start_url = login.get("start_url", "")
+        if start_url.startswith("https://view.awsapps.com"):
+            start_url = ""  # AWS Builder ID — login form's blank-URL path
         profiles.append({
             "name": name,
+            "start_url": start_url,
+            "region": login.get("region", ""),
             "email": meta.get("email", "?"),
             "provider": meta.get("provider", "?"),
             "profile_arn": meta.get("profile_arn", ""),
