@@ -2217,7 +2217,12 @@ def _sorted_json_files() -> list:
 def _do_sessions_scan() -> dict:
     """Execute the full sessions scan and return {"sessions": [...]}."""
     sessions = []
-    seen_ids = set()
+    # Side chats and the quick chat are kiro-cli sessions of our own making;
+    # marking them seen keeps every pass below from listing them.
+    try:
+        seen_ids = set(side_chat.known_session_ids())
+    except Exception:
+        seen_ids = set()
     now = time.time()
 
     managed = tmux.managed_sessions()
@@ -2247,6 +2252,9 @@ def _do_sessions_scan() -> dict:
         
         # Skip the concierge session — it's internal to Quarterdeck
         if session_id == concierge_session_id:
+            continue
+        # …and side chats / the quick chat, seeded into seen_ids above.
+        if session_id in seen_ids:
             continue
         
         seen_ids.add(session_id)
@@ -6850,6 +6858,42 @@ def assist(payload: dict):
 def assist_status():
     """Health check for the concierge session."""
     return concierge.status()
+
+
+# --- Quick chat (⌘J) ---
+# A global, always-on assistant on the side-chat engine. It survives the dock
+# being hidden; only "new chat" or a backend restart ends it.
+
+@app.post("/api/quick-chat/open")
+def quick_chat_open():
+    return side_chat.quick_open()
+
+
+@app.post("/api/quick-chat/send")
+def quick_chat_send(payload: dict):
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        return {"error": "empty message"}
+    if not side_chat.is_open(side_chat.QUICK_ID):
+        opened = side_chat.quick_open()
+        if opened.get("error"):
+            return opened
+    return side_chat.send(side_chat.QUICK_ID, text)
+
+
+@app.post("/api/quick-chat/key")
+def quick_chat_key(payload: dict):
+    return side_chat.send_key(side_chat.QUICK_ID, str(payload.get("key", "")))
+
+
+@app.get("/api/quick-chat/poll")
+def quick_chat_poll():
+    return side_chat.poll(side_chat.QUICK_ID)
+
+
+@app.post("/api/quick-chat/close")
+def quick_chat_close():
+    return side_chat.close(side_chat.QUICK_ID)
 
 
 # --- Side chat ---
