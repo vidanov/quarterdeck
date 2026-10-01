@@ -3493,8 +3493,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               ['esc', draft ? 'clear' : (isWorking ? 'cancel turn' : 'clear')],
               ['⌃X', 'to kiro'],
             ] : [
-              ['F', expanded ? 'restore' : 'maximise'],
-              ['⌘K', 'palette'], ['⌘J', 'ask'], ['⌘↩', 'new session'],
+              ['F', expanded ? 'minimise' : 'maximise'], ['esc', 'close'],
+              ['⌘J', 'quick chat'], ['⌘K', 'palette'], ['⌘↩', 'new session'],
             ]).map(([k, label]) => (
               <span key={k} className="shortcut-hint"><kbd>{k}</kbd> {label}</span>
             ))}
