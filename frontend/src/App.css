@@ -7877,3 +7877,4 @@ body.resizing .detail-resize::after { background: var(--accent); }
 }
 
 .profile-pill-drift { margin-left: 4px; color: #d97706; font-size: 11px; }
+.profile-dropdown-expired { margin-left: 6px; color: #d97706; font-size: 10.5px; font-weight: 500; }
