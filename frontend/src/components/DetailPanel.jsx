@@ -2407,7 +2407,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     aria-label={expanded ? 'Restore to side panel' : 'Maximise'}>
               {expanded ? (
                 <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-                  <path d="M5.5 3.5h7v7M3.5 5.5h7v7h-7z" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                  <path d="M3.5 12h9" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                 </svg>
               ) : (
                 <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">

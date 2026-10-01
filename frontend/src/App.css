@@ -7899,7 +7899,6 @@ body.resizing .detail-resize::after { background: var(--accent); }
   cursor: pointer;
 }
 .wc:hover { background: rgba(100, 116, 139, 0.14); color: var(--text); }
-.wc-close:hover { background: #e81123; color: #fff; }
 .wc:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ── Composer tools bar: keys, commands, helper chips under the input ───── */
