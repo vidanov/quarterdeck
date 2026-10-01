@@ -2231,18 +2231,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
              title="Drag to resize · double-click to reset" />
       )}
       <div className="detail-header">
-        {/* macOS-style window controls: close, back to side panel, maximise. */}
-        <div className="window-controls">
-          <button className="wc wc-close" onClick={onClose}
-                  title="Close panel" aria-label="Close panel"><span>×</span></button>
-          <button className="wc wc-min" onClick={() => expanded && onToggleExpand()}
-                  disabled={!expanded}
-                  title={expanded ? 'Back to side panel (F)' : 'Already in the side panel'}
-                  aria-label="Back to side panel"><span>−</span></button>
-          <button className="wc wc-max" onClick={onToggleExpand}
-                  title={expanded ? 'Restore (F)' : 'Maximise (F)'}
-                  aria-label={expanded ? 'Restore' : 'Maximise'}><span>{expanded ? '⤡' : '⤢'}</span></button>
-        </div>
         <span className="detail-status" style={{ color: cfg.color }}>{cfg.label}</span>
         <div className="detail-header-title">
           {renaming ? (
@@ -2411,6 +2399,28 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             )}
           </div>
           </>)}
+          {/* Window controls, VS Code style: flat icons at the far right,
+              close last. Maximise toggles back to the side panel. */}
+          <div className="window-controls">
+            <button className="wc" onClick={onToggleExpand}
+                    title={expanded ? 'Restore to side panel (F)' : 'Maximise (F)'}
+                    aria-label={expanded ? 'Restore to side panel' : 'Maximise'}>
+              {expanded ? (
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                  <path d="M5.5 3.5h7v7M3.5 5.5h7v7h-7z" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                  <rect x="3.5" y="3.5" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                </svg>
+              )}
+            </button>
+            <button className="wc wc-close" onClick={onClose} title="Close panel" aria-label="Close panel">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
       {showCorrections && (
