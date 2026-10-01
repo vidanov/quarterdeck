@@ -7875,3 +7875,5 @@ body.resizing .detail-resize::after { background: var(--accent); }
 *:focus:not(:focus-visible) {
   outline: none;
 }
+
+.profile-pill-drift { margin-left: 4px; color: #d97706; font-size: 11px; }
