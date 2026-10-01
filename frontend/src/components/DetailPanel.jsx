@@ -941,6 +941,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   const sideChatRef = useRef(null)
   const [overflowOpen, setOverflowOpen] = useState(false)
+  // Drives the shortcut hint line: reply-box keys while typing, app keys otherwise.
+  const [composerFocused, setComposerFocused] = useState(false)
   const [secretsModalOpen, setSecretsModalOpen] = useState(false)
   const [chipsModalOpen, setChipsModalOpen] = useState(false)
   // Merged starter chips shown above composer: project chips (+ global if includeGlobal), or global only
@@ -3222,6 +3224,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   if (empty !== wasEmpty) setDraft(e.target.value)
                 }}
                 onPaste={onPasteAttachment}
+                onFocus={() => setComposerFocused(true)}
+                onBlur={() => setComposerFocused(false)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) submitDraft(e)
                   if (e.key === 'ArrowUp') recallHistory(e, 1)
@@ -3466,7 +3470,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           ⌥ {detail?.agent || session.agent}
         </div>
       )}
-      {/* Profile · duration · delete — one compact line on both desktop and mobile */}
+      {/* Profile · duration · shortcut hints · delete — one compact line */}
       <div className="detail-meta-strip">
         {(detail?.kiro_profile || session.kiro_profile) && (
           <span className="detail-meta-strip-profile" title="Kiro profile used for this session">
@@ -3481,6 +3485,20 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <> · {durationRecord.outcome.tool_calls_total} calls</>
             )}
           </span>
+        )}
+        {!isMobileBrowser && (
+          <div className="shortcut-hints" aria-label="Keyboard shortcuts">
+            {(composerFocused && canSend ? [
+              ['↵', 'send'], ['⇧↵', 'new line'], ['↑ ↓', 'history'],
+              ['esc', draft ? 'clear' : (isWorking ? 'cancel turn' : 'clear')],
+              ['⌃X', 'to kiro'],
+            ] : [
+              ['F', expanded ? 'restore' : 'maximise'],
+              ['⌘K', 'palette'], ['⌘J', 'ask'], ['⌘↩', 'new session'],
+            ]).map(([k, label]) => (
+              <span key={k} className="shortcut-hint"><kbd>{k}</kbd> {label}</span>
+            ))}
+          </div>
         )}
         {(status === 'done' || control === 'archived' || status === 'idle' || status === 'error') && (
           <button className="detail-delete-btn" aria-label="Delete session" onClick={async () => {
