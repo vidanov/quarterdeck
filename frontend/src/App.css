@@ -8014,3 +8014,5 @@ body.resizing .detail-resize::after { background: var(--accent); }
   font-size: 12.5px;
 }
 .quick-chat-ai { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 12.5px; }
+
+.profile-pill-drift { margin-left: 4px; color: #d97706; font-size: 11px; }

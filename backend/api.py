@@ -6750,6 +6750,9 @@ def restart_visible_sessions(payload: dict):
 @app.post("/api/kiro/login")
 def kiro_login(payload: dict):
     """Trigger kiro-cli login in a terminal window."""
+    # A new login is a deliberate change of account: stop re-applying the old
+    # choice, or the next spawn would undo a login not yet saved as a profile.
+    _set_selected_profile("")
     license_type = payload.get("license", "free")  # free | pro
     identity_provider = payload.get("identity_provider", "")
     region = payload.get("region", "")
@@ -6779,6 +6782,7 @@ def kiro_logout():
         )
         if result.returncode != 0:
             return {"error": result.stderr.strip() or "logout failed"}
+        _set_selected_profile("")
         return {"ok": True, "message": result.stdout.strip() or "Logged out"}
     except Exception as e:
         return {"error": str(e)}
@@ -7637,6 +7641,20 @@ def list_profiles():
 def current_profile():
     """Return the currently active identity."""
     active_name = _fresh_active_profile()
+    selected = _selected_profile()
+    # The live login no longer matches the chosen profile (a running session of
+    # another account refreshed into it). Keep naming the choice — the next
+    # session re-applies it — and say that it drifted.
+    drift = bool(selected and active_name != selected)
+    if drift:
+        active_name = selected
+    elif not active_name:
+        # Nothing chosen through Quarterdeck yet: the subscription ARN is only
+        # written by a switch (token refreshes leave it alone), so the profile
+        # it names is the best guess at what was chosen last.
+        guess = _profile_by_state_arn()
+        if guess:
+            active_name, drift = guess, True
     info = {}
     if active_name:
         try:
@@ -7650,6 +7668,10 @@ def current_profile():
         "provider": info.get("provider", ""),
         "profile_arn": info.get("profile_arn", ""),
         "active_profile": active_name or None,
+        "drift": drift,
+        # True when the name is only a guess from the subscription ARN: nothing
+        # is re-applied until a profile is picked once.
+        "guessed": drift and not selected,
     }
 
 
@@ -7699,6 +7721,7 @@ def save_profile(payload: dict):
         "models_refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     _profile_meta_path(name).write_text(json.dumps(meta))
+    _set_selected_profile(name)  # saving the live login is choosing it
     return {"ok": True, "email": info["email"]}
 
 
@@ -7788,6 +7811,7 @@ def _switch_profile(name: str) -> dict:
 
     global _active_profile_cache, _last_profile_switch_at
     _active_profile_cache = (time.time(), name)
+    _set_selected_profile(name)
     if not unchanged:
         _last_profile_switch_at = time.time()
         _invalidate_sessions_cache()
@@ -7801,6 +7825,81 @@ def _switch_profile(name: str) -> dict:
             "email": meta.get("email", ""), "provider": meta.get("provider", ""),
             "profile_arn": profile_arn, "unchanged": unchanged,
             "state_profile_written": True}
+
+
+# The profile the user chose last. kiro-cli keeps one login for every process,
+# and a running session from another account writes its refreshed token back
+# into it — an hour after a switch the live login can be account A's tokens with
+# account B's subscription, matching no saved profile. Remembering the choice
+# lets the UI keep naming it, and lets a new session get it back.
+_SELECTED_PROFILE_FILE = STATE_DIR / "selected-profile.json"
+
+
+def _selected_profile() -> str:
+    try:
+        name = json.loads(_SELECTED_PROFILE_FILE.read_text()).get("name", "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return name if name and _profile_data_path(name).exists() else ""
+
+
+def _set_selected_profile(name: str) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _SELECTED_PROFILE_FILE.write_text(json.dumps({"name": name, "at": time.time()}))
+    except OSError:
+        pass
+
+
+def _profile_by_state_arn() -> str:
+    """The saved profile whose subscription ARN is the live one, or ''."""
+    try:
+        con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=0.5)
+        try:
+            row = con.execute(
+                "SELECT value FROM state WHERE key = 'api.codewhisperer.profile'").fetchone()
+        finally:
+            con.close()
+        arn = json.loads(row[0]).get("arn", "") if row and row[0] else ""
+    except Exception:
+        return ""
+    if not arn:
+        return ""
+    for meta_path in sorted(_PROFILES_DIR.glob("*.meta.json")):
+        name = meta_path.name.removesuffix(".meta.json")
+        if name == "_previous":
+            continue
+        try:
+            if json.loads(meta_path.read_text()).get("profile_arn") == arn:
+                return name
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
+def _ensure_selected_profile() -> None:
+    """Re-apply the chosen profile if the live login drifted away from it.
+
+    Runs before every spawn: kiro-cli reads its login once at start, so this is
+    the moment that decides which account the new session works under.
+    """
+    selected = _selected_profile()
+    if not selected:
+        return
+    try:
+        if _active_profile_name() == selected:
+            return
+    except Exception:
+        return  # DB busy — do not guess
+    if not _profile_switch_lock.acquire(blocking=False):
+        return
+    try:
+        _switch_profile(selected)
+    finally:
+        _profile_switch_lock.release()
+
+
+tmux.PRE_SPAWN_HOOKS.append(_ensure_selected_profile)
 
 
 @app.post("/api/profiles/delete")
