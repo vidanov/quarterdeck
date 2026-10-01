@@ -828,6 +828,12 @@ def _correlate(root_pid: int, claimed: set[str]) -> str | None:
 
 # --- spawning ---
 
+# Called with no arguments just before a kiro-cli process is started. The API
+# registers one that puts the user's chosen login back if a running session has
+# overwritten it; kiro-cli reads its credentials once, at start.
+PRE_SPAWN_HOOKS: list = []
+
+
 def spawn(
     cwd: str,
     task: str = "",
@@ -867,6 +873,11 @@ def spawn(
     target_cwd = _real(cwd)
     if not Path(target_cwd).is_dir():
         return {"ok": False, "error": f"Directory not found: {cwd}"}
+    for hook in PRE_SPAWN_HOOKS:
+        try:
+            hook()
+        except Exception:
+            pass  # a login check must never stop a session from starting
     if not tmux_available():
         return {"ok": False, "error": "tmux not installed — brew install tmux"}
 
