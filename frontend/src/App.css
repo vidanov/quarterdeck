@@ -7911,3 +7911,26 @@ body.resizing .detail-resize::after { background: var(--accent); }
 .composer-tools:empty { display: none; }
 .composer-tools .starter-chips { padding: 0; }
 .side-chat-tools { padding: 0 8px 6px; }
+
+/* ── Shortcut hint line at the bottom of the panel ────────────────────── */
+.shortcut-hints {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  flex: 1 1 auto;
+  gap: 4px 14px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.shortcut-hint { white-space: nowrap; }
+.shortcut-hint kbd {
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: var(--surface, #fff);
+  color: var(--text);
+}
