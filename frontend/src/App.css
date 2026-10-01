@@ -1929,18 +1929,18 @@ body {
   border-radius: 5px;
   min-width: 0;
 }
+/* Maximised fills the window edge to edge, like a maximised macOS window. */
 .detail-panel.detail-expanded {
   position: fixed;
-  top: 12px;
-  right: 12px;
-  bottom: 12px;
-  left: 12px;
-  width: auto;
+  inset: 0;
+  width: auto !important;  /* beats the inline width from the drag handle */
   max-width: none;
   height: auto;
   max-height: none;
   z-index: 110;
-  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.22);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
   overflow: hidden;  /* children (transcript, terminal) scroll themselves */
 }
 .detail-panel.detail-expanded .terminal { max-height: none; flex: 1 1 auto; }
@@ -7380,11 +7380,11 @@ body.resizing .detail-resize::after { background: var(--accent); }
   right: 0;
   height: 340px;
   background: var(--surface, #fff);
-  border-top: 2px solid var(--accent, #6366f1);
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   z-index: 50;
-  box-shadow: 0 -4px 24px rgba(0,0,0,0.10);
+  box-shadow: 0 -2px 8px rgba(15, 23, 42, 0.06);
 }
 .side-chat-header {
   display: flex;
@@ -7875,3 +7875,46 @@ body.resizing .detail-resize::after { background: var(--accent); }
 *:focus:not(:focus-visible) {
   outline: none;
 }
+
+/* ── Window controls (macOS traffic lights) ─────────────────────────────── */
+.window-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-right: 4px;
+}
+.wc {
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border-radius: 50%;
+  border: 0.5px solid rgba(0, 0, 0, 0.18);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  color: rgba(0, 0, 0, 0.55);
+}
+.wc span { opacity: 0; }
+/* Glyphs show on hover of the group, as on macOS. */
+.window-controls:hover .wc:not(:disabled) span { opacity: 1; }
+.wc-close { background: #ff5f57; }
+.wc-min { background: #febc2e; }
+.wc-max { background: #28c840; }
+.wc:disabled { background: #d1d5db; cursor: default; }
+.wc:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Composer tools bar: keys, commands, helper chips under the input ───── */
+.composer-tools {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.composer-tools:empty { display: none; }
+.composer-tools .starter-chips { padding: 0; }
+.side-chat-tools { padding: 0 8px 6px; }
