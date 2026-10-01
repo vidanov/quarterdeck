@@ -1059,7 +1059,7 @@ export default function App() {
     }
     api.dispatch(request)
       .then(d => {
-        resolveOptimistic(nonce)
+        resolveOptimistic(nonce, d.error ? {} : { nonce: d.nonce, id: d.id })
         if (d.error) {
           if (follow) setNewChat(c => c?.ghostId === nonce ? null : c)
           notify(`Dispatch failed: ${d.error}`, 'error')

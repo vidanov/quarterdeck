@@ -21,6 +21,8 @@ const ACTIVE_STATUSES = new Set(['thinking', 'running', 'awaiting-approval', 'st
 const NOTIFY_MS = 5000
 // How long an ended session stays hidden while it is still listed.
 const KILL_HIDE_MS = 60000
+// How long a dispatched ghost waits for its spawn to show up in the list.
+const GHOST_WAIT_MS = 30000
 
 export function SessionsProvider({ children }) {
   const [sessions, setSessions] = useState([])
@@ -91,7 +93,15 @@ export function SessionsProvider({ children }) {
         })
         // Pure ghosts that are still _optimistic (server not yet replied) stay
         // at the front; resolved ghosts are invisible placeholders only.
-        const visibleGhosts = activeGhosts.filter(g => g._optimistic)
+        // A dispatched ghost stays visible until the list carries its spawn:
+        // the list is served from a cache refreshed every few seconds, so the
+        // first polls after dispatch often predate the `pending:` entry, and
+        // dropping the ghost then made the card vanish and come back.
+        const listed = (g) => newSessions.some(s =>
+          s.spawn_nonce === g._spawnNonce || (g._spawnId && s.id === g._spawnId))
+        const visibleGhosts = activeGhosts.filter(g => g._optimistic ||
+          (g._spawnNonce && !listed(g) &&
+            Date.now() - new Date(g.updated_at).getTime() < GHOST_WAIT_MS))
         const next = [...visibleGhosts, ...merged]
         // Bail out: if the session list hasn't materially changed, keep the
         // same array reference to prevent downstream re-renders (DetailPanel
@@ -227,14 +237,18 @@ export function SessionsProvider({ children }) {
     setSessions(prev => [ghost, ...prev.filter(s => s.id !== ghost.id)])
   }, [])
 
-  const resolveOptimistic = useCallback((nonce) => {
+  const resolveOptimistic = useCallback((nonce, spawn = {}) => {
     // Transition the ghost from _optimistic (visible card) to _resolving
     // (invisible placeholder kept only so the merge loop can inherit the task
     // name onto the real session while it still says "Untitled").  The merge
     // loop removes _resolving entries once the real session has a proper title
-    // or after 90 s.
+    // or after 90 s. `spawn` is what the server answered ({ nonce, id }); the
+    // ghost stays on screen until the list shows that spawn.
     setSessions(prev => prev.map(s =>
-      s.id === nonce ? { ...s, _optimistic: false, _resolving: true } : s
+      s.id === nonce ? {
+        ...s, _optimistic: false, _resolving: true,
+        _spawnNonce: spawn.nonce || '', _spawnId: spawn.id || '',
+      } : s
     ))
   }, [])
 
