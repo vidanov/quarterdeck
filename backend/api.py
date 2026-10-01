@@ -27,6 +27,7 @@ from . import side_chat
 from . import corrections
 from . import delivery
 from . import duration
+from . import kiro_oidc
 from . import ownership
 from . import pastes as paste_store
 from . import screenshots
@@ -6714,6 +6715,55 @@ def _resave_rotated_tokens(name: str, meta: dict, rows: list[dict]) -> None:
         pass
 
 
+def _save_live_into_snapshot(live_rows: list[dict], exclude: str = "") -> None:
+    """Write the live login into the saved profile it belongs to.
+
+    Matched by refresh-token fingerprint only — never by start_url or ARN, which
+    a mixed login (one account's tokens, another's subscription) would satisfy
+    for the wrong profile.
+    """
+    fp = _token_fingerprint(live_rows)
+    if not fp:
+        return
+    for data_path in sorted(_PROFILES_DIR.glob("*.jsonl")):
+        name = data_path.stem
+        if name in ("_previous", exclude):
+            continue
+        try:
+            rows = [json.loads(line) for line in data_path.read_text().splitlines() if line.strip()]
+            meta = json.loads(_profile_meta_path(name).read_text())
+        except (OSError, ValueError):
+            continue
+        if _token_fingerprint(rows) == fp:
+            if rows != live_rows:
+                _resave_rotated_tokens(name, meta, live_rows)
+            return
+
+
+# Last known health of each saved login: {name: {"status", "checked_at"}}.
+# Kept apart from the profile files so a check never rewrites credentials it
+# did not refresh.
+_PROFILE_HEALTH_FILE = STATE_DIR / "profile-health.json"
+_PROFILE_CHECK_INTERVAL = 600.0
+
+
+def _profile_health() -> dict:
+    try:
+        data = json.loads(_PROFILE_HEALTH_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _record_profile_health(name: str, status: str) -> None:
+    data = _profile_health()
+    data[name] = {"status": status, "checked_at": time.time()}
+    try:
+        _atomic_write_json(_PROFILE_HEALTH_FILE, data)
+    except Exception:
+        pass
+
+
 @app.post("/api/sessions/restart-visible")
 def restart_visible_sessions(payload: dict):
     """Kill and resume all sessions whose ids are passed in the payload."""
@@ -7557,6 +7607,7 @@ def _current_profile_identity() -> dict:
 def list_profiles():
     """List all saved profiles with metadata."""
     profiles = []
+    health = _profile_health()
     for meta_path in sorted(_PROFILES_DIR.glob("*.meta.json")):
         name = meta_path.stem.removesuffix(".meta")
         data_path = _profile_data_path(name)
@@ -7583,8 +7634,52 @@ def list_profiles():
             "provider": meta.get("provider", "?"),
             "profile_arn": meta.get("profile_arn", ""),
             "saved_at": meta.get("saved_at", ""),
+            "health": health.get(name, {}).get("status", ""),
         })
     return {"profiles": profiles}
+
+
+@app.post("/api/profiles/check")
+def check_profiles(payload: dict | None = None):
+    """Check that each saved login other than the live one can still refresh.
+
+    A refresh that works is written back into the profile, so a later switch
+    starts from a fresh token. Throttled: a profile checked in the last ten
+    minutes is skipped unless `force` is set.
+    """
+    force = bool((payload or {}).get("force"))
+    if not _profile_switch_lock.acquire(blocking=False):
+        return {"health": {k: v.get("status", "") for k, v in _profile_health().items()}}
+    try:
+        try:
+            live_fp = _token_fingerprint(_dump_auth_rows())
+        except Exception:
+            live_fp = ""
+        known = _profile_health()
+        now = time.time()
+        for data_path in sorted(_PROFILES_DIR.glob("*.jsonl")):
+            name = data_path.stem
+            if name == "_previous":
+                continue
+            if not force and now - known.get(name, {}).get("checked_at", 0) < _PROFILE_CHECK_INTERVAL:
+                continue
+            try:
+                rows = [json.loads(line) for line in data_path.read_text().splitlines() if line.strip()]
+                meta = json.loads(_profile_meta_path(name).read_text())
+            except (OSError, ValueError):
+                continue
+            if live_fp and _token_fingerprint(rows) == live_fp:
+                # kiro-cli owns the live login and refreshes it itself; a
+                # refresh from here could race it. It works if it is in use.
+                _record_profile_health(name, kiro_oidc.VALID)
+                continue
+            status, refreshed = kiro_oidc.check(rows)
+            if refreshed:
+                _resave_rotated_tokens(name, meta, refreshed)
+            _record_profile_health(name, status)
+    finally:
+        _profile_switch_lock.release()
+    return {"health": {k: v.get("status", "") for k, v in _profile_health().items()}}
 
 
 @app.get("/api/profiles/current")
@@ -7672,6 +7767,7 @@ def save_profile(payload: dict):
     }
     _profile_meta_path(name).write_text(json.dumps(meta))
     _set_selected_profile(name)  # saving the live login is choosing it
+    _record_profile_health(name, kiro_oidc.VALID)  # it is the login in use
     return {"ok": True, "email": info["email"]}
 
 
@@ -7723,6 +7819,29 @@ def _switch_profile(name: str) -> dict:
     except (OSError, ValueError, TypeError, AttributeError):
         return {"error": f"Profile '{name}' is incomplete or damaged. Log in to that account and save it again. No changes were made."}
 
+    # Make sure the saved login still works before it replaces the live one.
+    # A dead refresh token is only discovered at kiro-cli's next refresh, which
+    # then drops the shared login and takes every running session down with it.
+    # The live login is kiro-cli's own and is never refreshed from here.
+    warning = ""
+    try:
+        live_fp = _token_fingerprint(_dump_auth_rows())
+    except Exception:
+        live_fp = ""
+    if _token_fingerprint(rows) != live_fp:
+        health, refreshed = kiro_oidc.check(rows)
+        _record_profile_health(name, health)
+        if health == kiro_oidc.EXPIRED:
+            return {"error": f"The login saved in '{name}' has expired. Log in to that account "
+                             "and save the profile again. No changes were made.",
+                    "expired": True}
+        if refreshed:
+            rows = refreshed
+            _resave_rotated_tokens(name, meta, rows)
+        elif health == kiro_oidc.UNKNOWN:
+            warning = (f"Could not confirm the login in '{name}' is still valid (offline?). "
+                       "If sessions lose their login, log in to that account again.")
+
     if not _KIRO_AUTH_DB.exists():
         return {"error": "Kiro login database was not found. Log in first."}
     con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=3)
@@ -7742,6 +7861,10 @@ def _switch_profile(name: str) -> dict:
         unchanged = same_tokens and current_arn == profile_arn
         if not unchanged:
             if current_rows:
+                # Keep the outgoing profile's own copy current, not only
+                # _previous: switching back then restores today's login rather
+                # than whatever was saved when the profile was created.
+                _save_live_into_snapshot(current_rows, exclude=name)
                 prev_path = _profile_data_path("_previous")
                 prev_path.write_text("\n".join(json.dumps(r) for r in current_rows) + "\n")
                 prev_path.chmod(0o600)
@@ -7774,7 +7897,7 @@ def _switch_profile(name: str) -> dict:
     return {"ok": True, "name": name, "active_profile": name,
             "email": meta.get("email", ""), "provider": meta.get("provider", ""),
             "profile_arn": profile_arn, "unchanged": unchanged,
-            "state_profile_written": True}
+            "state_profile_written": True, **({"warning": warning} if warning else {})}
 
 
 # The profile the user chose last. kiro-cli keeps one login for every process,
@@ -7835,6 +7958,12 @@ def _ensure_selected_profile() -> None:
     """
     selected = _selected_profile()
     if not selected:
+        return
+    # Known dead: re-applying it would only hand every session an unusable
+    # login. Wait for a fresh login or for the next check to clear it.
+    seen = _profile_health().get(selected, {})
+    if (seen.get("status") == kiro_oidc.EXPIRED
+            and time.time() - seen.get("checked_at", 0) < _PROFILE_CHECK_INTERVAL):
         return
     try:
         if _active_profile_name() == selected:

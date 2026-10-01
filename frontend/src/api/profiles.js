@@ -21,6 +21,8 @@ export const switchProfile = async (name) => {
     announce({ switching: '' })
   }
 }
+// Tries a refresh of each saved login other than the live one; throttled server-side.
+export const checkProfiles = (force = false) => postJSON('/api/profiles/check', { force })
 export const deleteProfile = (name) => postJSON('/api/profiles/delete', { name })
 
 export const restartVisibleSessions = (ids) => postJSON('/api/sessions/restart-visible', { ids })
