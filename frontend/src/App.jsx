@@ -74,6 +74,13 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
     return () => window.removeEventListener('quarterdeck:profile-change', changed)
   }, [onProfileSwitch])
 
+  // A saved login can die while unused (its Identity Center session ran out).
+  // Check when the list is opened so an expired one is marked before it is picked.
+  useEffect(() => {
+    if (!open) return
+    profilesApi.checkProfiles().then(load).catch(() => {})
+  }, [open, load])
+
   // Close on outside click
   useEffect(() => {
     if (!open) return
@@ -86,7 +93,7 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
     setBusy('switch-' + name)
     const d = await profilesApi.switchProfile(name).catch(() => ({ error: 'Network error' }))
     setBusy('')
-    if (d.error) { notify(d.error, 'error'); return }
+    if (d.error) { notify(d.error, 'error'); if (d.expired) load(); return }
     if (d.warning) notify(d.warning, 'error')
     else notify(d.unchanged ? `"${name}" is already active` : `"${name}" is active. Restart existing sessions to apply it there.`, 'info')
   }
@@ -164,9 +171,14 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
                 <button key={p.name}
                         className={`profile-dropdown-item ${current?.active_profile === p.name ? 'active' : ''}`}
                         disabled={!!busy || !!switching || (current?.active_profile === p.name && !current?.drift)}
-                        title={p.profile_arn || p.email}
+                        title={p.health === 'expired'
+                          ? `The login saved in "${p.name}" has expired. Log in to that account, then save it under this name again.`
+                          : (p.profile_arn || p.email)}
                         onClick={() => handleSwitch(p.name)}>
-                  <span className="profile-dropdown-name">{p.name}</span>
+                  <span className="profile-dropdown-name">
+                    {p.name}
+                    {p.health === 'expired' && <span className="profile-dropdown-expired">expired</span>}
+                  </span>
                   <span className="profile-dropdown-meta">{p.email}{p.profile_arn ? ` · ${p.profile_arn.split('/').pop()}` : ''}</span>
                   {current?.active_profile === p.name && <span className="profile-dropdown-check">✓</span>}
                   {busy === 'switch-' + p.name && <span className="profile-dropdown-check">⟳</span>}
