@@ -6881,6 +6881,12 @@ def side_chat_send(session_id: str, payload: dict):
     return side_chat.send(session_id, text)
 
 
+@app.post("/api/sessions/{session_id}/side-chat/key")
+def side_chat_key(session_id: str, payload: dict):
+    """Send a single key (esc, ctrl-c, arrows…) to the side chat."""
+    return side_chat.send_key(session_id, str(payload.get("key", "")))
+
+
 @app.get("/api/sessions/{session_id}/side-chat/poll")
 def side_chat_poll(session_id: str):
     """Poll the side chat pane state."""

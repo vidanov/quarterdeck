@@ -73,6 +73,24 @@ def _send_keys(parent_id: str, text: str) -> bool:
         return False
 
 
+# Keys the side chat's toolbar may send — the same set as the main composer.
+SIDE_KEYS = {"Escape", "C-c", "C-x", "DC", "Up", "Down", "Enter"}
+
+
+def send_key(parent_id: str, key: str) -> dict:
+    """Send one tmux key (esc, ctrl-c, arrows…) to the side chat's pane."""
+    if key not in SIDE_KEYS:
+        return {"ok": False, "error": "unsupported key"}
+    name = _tmux_name(parent_id)
+    if not tmux.session_exists(name) or tmux.pane_dead(name):
+        return {"ok": False, "error": "side chat not open"}
+    try:
+        tmux._tmux("send-keys", "-t", name, key)
+    except tmux.TmuxError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
 def _strip_ansi(text: str) -> str:
     return re.sub(r'\x1b\[[0-9;]*[mABCDEFGHJKLMSTfhilnprsu]', '', text)
 
