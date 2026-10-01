@@ -139,12 +139,18 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
       <button className={`profile-pill ${open ? 'active' : ''}`} onClick={() => setOpen(v => !v)} title={email}>
         <span className="profile-pill-icon">◉</span>
         <span className="profile-pill-label">{switching ? `Switching to ${switching}…` : label}</span>
+        {!switching && current?.drift && (
+          <span className="profile-pill-drift"
+                title={current.guessed
+                  ? `The live kiro-cli login does not match "${current.active_profile}" — a running session of another account refreshed into it. Pick the profile once below and new sessions will restore it automatically.`
+                  : `A running session of another account refreshed its login into kiro-cli. New sessions get "${current.active_profile}" back automatically; running ones keep the login they started with.`}>⚠</span>
+        )}
       </button>
 
       {open && (
         <div className="profile-dropdown">
           <div className="profile-dropdown-header">
-            <div className="profile-dropdown-email">{email || 'Not logged in'}</div>
+            <div className="profile-dropdown-email">{email || (current?.active_profile ? 'Signed in' : 'Not logged in')}</div>
             {current?.active_profile && (
               <div className="profile-dropdown-active">profile: {current.active_profile}</div>
             )}
@@ -156,7 +162,7 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
               {profiles.map(p => (
                 <button key={p.name}
                         className={`profile-dropdown-item ${current?.active_profile === p.name ? 'active' : ''}`}
-                        disabled={!!busy || !!switching || current?.active_profile === p.name}
+                        disabled={!!busy || !!switching || (current?.active_profile === p.name && !current?.drift)}
                         title={p.profile_arn || p.email}
                         onClick={() => handleSwitch(p.name)}>
                   <span className="profile-dropdown-name">{p.name}</span>
