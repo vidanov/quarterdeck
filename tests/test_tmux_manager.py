@@ -94,6 +94,47 @@ class TestCorrelate:
             assert tm._correlate(400, set()) is None
 
 
+class TestV3Correlation:
+    """V3-engine sessions live in ~/.kiro/sessions/<hash>/sess_<uuid>/, not in
+    SESSIONS_DIR. A spawn that never resolved showed up twice: once as its
+    pending card, once as the session it had started."""
+
+    SID = "sess_ea9c76fb-60dd-44b7-84ed-5dab9dc3e2e2"
+
+    def _v3_session(self, root: Path, pid: int):
+        d = root / "b6cf948ee1505b35" / self.SID
+        d.mkdir(parents=True)
+        (d / "session.json").write_text("{}")
+        (d / ".lock").write_text(json.dumps({"pid": pid, "started_at": "2026-10-02T10:40:50Z"}))
+        return d
+
+    def test_correlate_finds_v3_lock(self, tmp_path):
+        legacy = tmp_path / "cli"
+        legacy.mkdir()
+        self._v3_session(tmp_path, 500)
+        with patch.object(tm, "SESSIONS_DIR", legacy), \
+             patch.object(tm.v3, "KIRO_SESSIONS_ROOT", tmp_path), \
+             patch.object(tm, "_process_tree", return_value={500: 400, 400: 1}):
+            assert tm._correlate(400, set()) == self.SID
+
+    def test_hook_report_accepts_v3_id(self, tmp_path):
+        legacy, spawns = tmp_path / "cli", tmp_path / "spawns"
+        legacy.mkdir()
+        spawns.mkdir()
+        (spawns / "f14c0641ad57").write_text(self.SID)
+        with patch.object(tm, "SESSIONS_DIR", legacy), \
+             patch.object(tm, "SPAWNS_DIR", spawns), \
+             patch.object(tm.v3, "KIRO_SESSIONS_ROOT", tmp_path):
+            assert tm.hook_reported_session("f14c0641ad57") == ""  # no session yet
+            self._v3_session(tmp_path, 500)
+            assert tm.hook_reported_session("f14c0641ad57") == self.SID
+
+    def test_session_id_shape(self):
+        assert tm._session_id_ok(self.SID)
+        assert not tm._session_id_ok("sess_../../etc")
+        assert not tm._session_id_ok("../x")
+
+
 class TestState:
     def test_missing_file_gives_empty_state(self, tmp_path):
         with patch.object(tm, "MANAGED_FILE", tmp_path / "nope.json"):

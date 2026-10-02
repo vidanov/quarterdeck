@@ -21,6 +21,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import v3
 from .cache import LruCache
 from .config import (
     CAPTURE_LINES,
@@ -356,9 +357,26 @@ HOOK_MARKER = "deck-spawn-correlation"
 STOP_HOOK_MARKER = "deck-turn-end"
 
 
+# A legacy id is a bare UUID; the V3 engine prefixes it with `sess_`.
+_SESSION_ID_RE = re.compile(r"(?:sess_)?[0-9a-fA-F-]{8,64}")
+
+
 def _session_id_ok(session_id: str) -> bool:
     """True for something shaped like a kiro session id, used as a filename."""
-    return bool(re.fullmatch(r"[0-9a-fA-F-]{8,64}", session_id))
+    return bool(_SESSION_ID_RE.fullmatch(session_id))
+
+
+def _session_files(session_id: str) -> tuple[Path | None, Path | None]:
+    """(lock, transcript) paths for a session, in whichever layout it uses.
+
+    Legacy sessions keep `<id>.lock` and `<id>.jsonl` in SESSIONS_DIR. V3
+    sessions keep `.lock` and `messages.jsonl` in their own directory under a
+    workspace hash; both are None until that directory exists.
+    """
+    if v3.is_v3_session(session_id):
+        d = v3.session_dir(session_id)
+        return (d / ".lock", d / "messages.jsonl") if d else (None, None)
+    return SESSIONS_DIR / f"{session_id}.lock", SESSIONS_DIR / f"{session_id}.jsonl"
 
 
 def turn_ended_at(session_id: str) -> float:
@@ -680,15 +698,18 @@ def hook_reported_session(nonce: str) -> str:
         return ""
     # The hook writes whatever kiro-cli gave it, so validate before trusting it
     # as a session id: it becomes a tmux session name and a file path.
-    if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", reported):
+    if not _session_id_ok(reported):
         return ""
     # A --no-interactive run reports an id and then writes nothing, so require
     # some evidence the session is real. Any of its files will do: kiro-cli
     # writes `.lock` first and `.json` last, and demanding `.json` would hand the
     # race back to the process-tree walk, which keys on `.lock` — defeating the
     # point of asking.
-    if not any((SESSIONS_DIR / f"{reported}{ext}").exists()
-               for ext in (".lock", ".jsonl", ".history", ".json")):
+    if v3.is_v3_session(reported):
+        if not v3.session_dir(reported):
+            return ""
+    elif not any((SESSIONS_DIR / f"{reported}{ext}").exists()
+                 for ext in (".lock", ".jsonl", ".history", ".json")):
         return ""
     return reported
 
@@ -754,7 +775,9 @@ def _read_meta(session_id: str) -> dict | None:
 
 
 def _read_lock(session_id: str) -> dict | None:
-    path = SESSIONS_DIR / f"{session_id}.lock"
+    path = _session_files(session_id)[0]
+    if path is None:
+        return None
     try:
         return json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
@@ -807,8 +830,10 @@ def _correlate(root_pid: int, claimed: set[str]) -> str | None:
     """
     tree = _process_tree()
     candidates = []
-    for lock_path in SESSIONS_DIR.glob("*.lock"):
-        session_id = lock_path.stem
+    # V3-engine sessions lock inside their own directory, not SESSIONS_DIR.
+    ids = [p.stem for p in SESSIONS_DIR.glob("*.lock")]
+    ids += [sid for sid, d in v3.all_v3_sessions() if (d / ".lock").exists()]
+    for session_id in ids:
         if session_id in claimed:
             continue
         lock = _read_lock(session_id)
@@ -1337,12 +1362,12 @@ def kill(session_id: str, graceful: bool = True, timeout: float = 8.0) -> dict:
     existed = session_exists(name)
     mode = "none"
     if existed:
-        lock_path = SESSIONS_DIR / f"{session_id}.lock"
+        lock_path = _session_files(session_id)[0]
         if graceful and not pane_dead(name):
             send_text(session_id, "/quit")
             deadline = time.time() + timeout
             while time.time() < deadline:
-                if not lock_path.exists() or pane_dead(name):
+                if lock_path is None or not lock_path.exists() or pane_dead(name):
                     mode = "quit"
                     break
                 time.sleep(0.2)
@@ -1457,8 +1482,9 @@ def last_activity(session_id: str) -> float:
     ts = turn_ended_at(session_id)
     if not _session_id_ok(session_id):
         return ts
-    for path in (SESSIONS_DIR / f"{session_id}.jsonl",
-                 SESSIONS_DIR / f"{session_id}.lock"):
+    for path in _session_files(session_id):
+        if path is None:
+            continue
         try:
             ts = max(ts, path.stat().st_mtime)
         except OSError:
