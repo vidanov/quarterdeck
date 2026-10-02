@@ -271,6 +271,16 @@ const SHELL_KEYS = [
 // an interactive one that is not kiro-cli had nowhere to run.
 const SHELL_COMMANDS = ['kiro-cli login', 'kiro-cli logout', 'kiro-cli whoami']
 
+// Keys pressed while the pane has focus, as tmux names. Without this the page
+// keeps them: the arrows scroll Settings and Tab walks its buttons, so a login
+// menu could not be driven from the keyboard at all.
+const PANE_KEYS = {
+  ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  Enter: 'Enter', Escape: 'Escape', Tab: 'Tab', Backspace: 'BSpace', ' ': 'Space',
+  Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+}
+const PANE_CTRL = 'cdulaezr'
+
 function ShellSettings() {
   const notify = useToast()
   const askConfirm = useConfirm()
@@ -349,6 +359,37 @@ function ShellSettings() {
       .finally(() => setBusy(false))
   }
 
+  // Keys bypass `busy`: a second ↑ pressed before the first round trip is done
+  // must still arrive. The chain keeps them in the order they were pressed.
+  const keyChainRef = useRef(Promise.resolve())
+  const sendKey = (path, body) => {
+    keyChainRef.current = keyChainRef.current
+      .then(() => settingsApi.shellAction(path, body))
+      .then(d => {
+        const err = errorOf(d)
+        if (err) notify(err, 'error')
+        poll()
+      })
+      .catch(() => notify('Could not reach backend', 'error'))
+  }
+
+  const onPaneKey = (e) => {
+    if (e.metaKey || e.altKey) return  // ⌘ shortcuts stay with the app
+    if (e.key === 'Tab' && e.shiftKey) return  // the way back out of the pane
+    let key = null
+    if (e.ctrlKey) {
+      const k = e.key.toLowerCase()
+      if (k.length === 1 && PANE_CTRL.includes(k)) key = `C-${k}`
+    } else {
+      key = PANE_KEYS[e.key] || null
+    }
+    if (key) sendKey('key', { key })
+    else if (!e.ctrlKey && e.key.length === 1) sendKey('input', { text: e.key, submit: false })
+    else return
+    e.preventDefault()
+    e.stopPropagation()
+  }
+
   const send = (text) => {
     if (!text.trim()) return
     setCmd('')
@@ -400,7 +441,9 @@ function ShellSettings() {
       )}
       {(alive || pane) && (
         <>
-          <pre className="shell-pane" ref={paneRef}>
+          <pre className="shell-pane" ref={paneRef} tabIndex={alive ? 0 : -1}
+               onKeyDown={alive ? onPaneKey : undefined}
+               title={alive ? 'Click here and type — keys go straight to the shell' : undefined}>
             <ShellPaneText text={pane || '…'} />
           </pre>
           {/* Off-screen ruler for the column measurement above. */}
@@ -425,8 +468,11 @@ function ShellSettings() {
           </form>
           <div className="shell-keys">
             {SHELL_KEYS.map(([key, label]) => (
-              <button key={key} className="composer-key" disabled={busy}
-                      onClick={() => act('key', { key })}>{label}</button>
+              <button key={key} className="composer-key"
+                      // Keep focus off the button, so the next arrow pressed
+                      // on the keyboard goes to the pane rather than the page.
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => { sendKey('key', { key }); paneRef.current?.focus() }}>{label}</button>
             ))}
             <button className="shell-btn shell-close" onClick={closeShell} disabled={busy}>
               Close
