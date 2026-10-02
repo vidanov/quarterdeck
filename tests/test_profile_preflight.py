@@ -13,14 +13,15 @@ from backend import api, config, kiro_oidc
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def login(access, refresh, expires, secret_expires=NOW + timedelta(days=60)):
+def login(access, refresh, expires, secret_expires=NOW + timedelta(days=60), client="cid",
+          start_url="https://example.awsapps.com/start"):
     return [
         {"key": "kirocli:odic:token", "value": json.dumps({
             "access_token": access, "refresh_token": refresh, "region": "eu-central-1",
             "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "start_url": "https://example.awsapps.com/start"})},
+            "start_url": start_url})},
         {"key": "kirocli:odic:device-registration", "value": json.dumps({
-            "client_id": "cid", "client_secret": "csecret", "region": "eu-central-1",
+            "client_id": client, "client_secret": "csecret", "region": "eu-central-1",
             "client_secret_expires_at": secret_expires.strftime("%Y-%m-%dT%H:%M:%SZ")})},
     ]
 
@@ -165,3 +166,52 @@ def test_check_skips_the_live_login(store, monkeypatch):
     assert calls == ["old-r"]
     assert health == {"Live": "valid", "Stale": "expired"}
     assert {p["name"]: p["health"] for p in api.list_profiles()["profiles"]} == health
+
+
+def state(db, key):
+    with sqlite3.connect(db) as con:
+        row = con.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def test_switch_sets_the_identity_center_kiro_cli_reports(store, monkeypatch):
+    save, db, folder = store
+    with sqlite3.connect(db) as con:
+        con.execute("INSERT INTO state VALUES (?,?)",
+                    ("auth.idc.start-url", json.dumps("https://last-login.awsapps.com/start")))
+    fresh = datetime.now(timezone.utc) + timedelta(hours=1)
+    save("Other", login("o-a", "o-r", fresh, client="o-cid",
+                        start_url="https://other.awsapps.com/start"), "arn:other")
+    monkeypatch.setattr(kiro_oidc, "_post", lambda *a: pytest.fail("no call expected"))
+    assert api.switch_profile({"name": "Other"})["ok"]
+    assert state(db, "auth.idc.start-url") == "https://other.awsapps.com/start"
+    assert state(db, "auth.idc.region") == "eu-central-1"
+
+
+def test_switch_repairs_a_token_sitting_next_to_another_logins_client(store, monkeypatch):
+    save, db, folder = store
+    # The live token is Live's, but its client registration is someone else's.
+    mixed = [LIVE[0], login("x", "x", NOW, client="other-cid")[1]]
+    with sqlite3.connect(db) as con:
+        con.execute("DELETE FROM auth_kv")
+        con.executemany("INSERT INTO auth_kv VALUES (?,?)", [(r["key"], r["value"]) for r in mixed])
+    save("Live", LIVE, "arn:live")
+    monkeypatch.setattr(kiro_oidc, "_post", lambda *a: pytest.fail("no call expected"))
+    result = api.switch_profile({"name": "Live"})
+    assert result["ok"] and not result["unchanged"]
+    assert live_rows(db) == {r["key"]: r["value"] for r in LIVE}
+
+
+def test_mixed_login_is_not_saved_into_a_profile(store, monkeypatch):
+    save, db, folder = store
+    mixed = [LIVE[0], login("x", "x", NOW, client="other-cid")[1]]
+    with sqlite3.connect(db) as con:
+        con.execute("DELETE FROM auth_kv")
+        con.executemany("INSERT INTO auth_kv VALUES (?,?)", [(r["key"], r["value"]) for r in mixed])
+    save("Live", LIVE, "arn:live")
+    save("Other", login("o-a", "o-r", datetime.now(timezone.utc) + timedelta(hours=1),
+                        client="o-cid"), "arn:other")
+    before = (folder / "Live.jsonl").read_text()
+    monkeypatch.setattr(kiro_oidc, "_post", lambda *a: pytest.fail("no call expected"))
+    assert api.switch_profile({"name": "Other"})["ok"]
+    assert (folder / "Live.jsonl").read_text() == before
