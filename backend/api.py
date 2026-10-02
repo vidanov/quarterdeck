@@ -6512,8 +6512,9 @@ def dispatch_task(payload: dict):
     # session id took seconds and made the UI feel dead. Correlation continues
     # on a background thread, and the pending entry shows up in /api/sessions
     # immediately so the card appears at once.
+    spawn_kwargs = _spawn_kwargs(payload)
     result = tmux.spawn(cwd, task=" ".join(task.split()), wait=False,
-                        **_spawn_kwargs(payload))
+                        **spawn_kwargs)
     if not result.get("ok"):
         return {"error": result.get("error", "spawn failed")}
 
@@ -6579,7 +6580,8 @@ def dispatch_task(payload: dict):
     # For V3 sessions, start an ACP observation side-channel. Uses the same
     # nonce→session_id wait pattern as _tag_profile above. A failed attach is
     # non-fatal — tmux is still the source of truth; ACP is best-effort events.
-    engine = (payload.get("engine") or "").strip()
+    # The engine _spawn_kwargs resolved, so a stored v3 default attaches too.
+    engine = spawn_kwargs.get("engine", "")
     if engine == "v3":
         def _attach_observer(sid: str, nonce_: str, cwd_: str) -> None:
             if not sid:
