@@ -4124,6 +4124,7 @@ body.resizing .detail-resize::after { background: var(--accent); }
   word-break: break-word;
 }
 .shell-pane a { color: var(--accent, #2563eb); }
+.shell-pane:focus { outline: 2px solid var(--accent, #2563eb); outline-offset: 1px; }
 .shell-open-row {
   display: flex;
   gap: 7px;
