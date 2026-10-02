@@ -1316,13 +1316,12 @@ body {
 }
 .working-row:hover { background: var(--gray-bg); }
 .working-selected { border-color: var(--accent); }
+/* Static on purpose: rotating row icons pulled the eye away from the list. */
 .working-spinner {
   color: #16a34a;
-  animation: spin 1.6s linear infinite;
   display: inline-block;
   flex-shrink: 0;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
 .working-name {
   font-weight: 600;
   color: var(--text);
