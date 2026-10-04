@@ -15,11 +15,20 @@ The worker is lazy-started on first call and survives Quarterdeck's lifetime.
 If the subprocess dies or the session becomes unresponsive, ``query()`` spawns
 a fresh one automatically.
 
+A kiro-cli process keeps the login it started with and writes it back to the
+shared auth DB when it refreshes. A worker that outlived a profile switch or a
+new ``kiro-cli login`` therefore put the old account's token back under the new
+account's subscription, and every session failed with "The bearer token
+included in the request is invalid". So the worker is respawned whenever the
+login in the DB is no longer the one it started with.
+
 Thread safety: a single threading.Lock serialises queries so multiple
 _generate_summary_async threads don't interleave prompts on the same session.
 """
 
+import json
 import logging
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -28,6 +37,34 @@ log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _session: "ACPSession | None" = None  # type: ignore[name-defined]
 _session_id: str = ""
+_session_login: tuple[str, str] | None = None
+
+_KIRO_AUTH_DB = Path.home() / "Library" / "Application Support" / "kiro-cli" / "data.sqlite3"
+
+
+def _current_login() -> tuple[str, str] | None:
+    """(SSO start_url, subscription ARN) in kiro-cli's auth DB — no secrets.
+
+    None when the DB cannot be read (it is often busy); callers treat that as
+    "unknown", not as a change.
+    """
+    try:
+        con = sqlite3.connect(str(_KIRO_AUTH_DB), timeout=0.5)
+        try:
+            tok = con.execute(
+                "SELECT value FROM auth_kv WHERE key = 'kirocli:odic:token'"
+            ).fetchone()
+            prof = con.execute(
+                "SELECT value FROM state WHERE key = 'api.codewhisperer.profile'"
+            ).fetchone()
+        finally:
+            con.close()
+        start_url = json.loads(tok[0]).get("start_url", "") if tok and tok[0] else ""
+        arn = json.loads(prof[0]).get("arn", "") if prof and prof[0] else ""
+        return (start_url, arn)
+    except Exception:
+        return None
+
 
 # Keep the import lazy so this module can be imported before ACPSession's
 # dependencies are resolved (frozen bundle path setup, etc.).
@@ -70,12 +107,21 @@ def query(prompt: str, timeout: float = 40.0) -> str:
     Automatically restarts the worker if the subprocess has died.
     Serialises concurrent callers so prompts don't interleave.
     """
-    global _session, _session_id
+    global _session, _session_id, _session_login
 
     with _lock:
+        login = _current_login()
+        if _session is not None and login and _session_login and login != _session_login:
+            log.info("acp_worker: kiro-cli login changed, respawning")
+            try:
+                _session.stop()
+            except Exception:
+                pass
+            _session = None
         # (Re-)spawn if dead or not yet started
         if _session is None or not _is_alive(_session):
             try:
+                _session_login = login
                 _session, _session_id = _spawn()
             except Exception as exc:
                 log.warning("acp_worker: spawn failed: %s", exc)
@@ -93,6 +139,22 @@ def query(prompt: str, timeout: float = 40.0) -> str:
             _session = None
             _session_id = ""
             return ""
+
+
+def restart() -> None:
+    """Kill the worker so the next query starts on the current login.
+
+    Called right after a profile switch or logout: waiting for the next query
+    leaves a window in which an in-flight query refreshes and writes the old
+    login back. Does not take the lock — a query in flight just fails and
+    respawns on the next call.
+    """
+    sess = _session
+    if sess is not None:
+        try:
+            sess.stop()
+        except Exception:
+            pass
 
 
 def shutdown() -> None:
