@@ -22,6 +22,9 @@ account's subscription, and every session failed with "The bearer token
 included in the request is invalid". So the worker is respawned whenever the
 login in the DB is no longer the one it started with.
 
+With the ``internal-profile`` setting, the worker runs on its own private
+login instead (see internal_auth.py) and profile switches do not affect it.
+
 Thread safety: a single threading.Lock serialises queries so multiple
 _generate_summary_async threads don't interleave prompts on the same session.
 """
@@ -42,12 +45,27 @@ _session_login: tuple[str, str] | None = None
 _KIRO_AUTH_DB = Path.home() / "Library" / "Application Support" / "kiro-cli" / "data.sqlite3"
 
 
-def _current_login() -> tuple[str, str] | None:
-    """(SSO start_url, subscription ARN) in kiro-cli's auth DB — no secrets.
+def _internal_auth():
+    try:
+        from . import internal_auth
+    except ImportError:
+        import internal_auth  # type: ignore
+    return internal_auth
 
-    None when the DB cannot be read (it is often busy); callers treat that as
-    "unknown", not as a change.
+
+def _current_login() -> tuple[str, str] | None:
+    """Identity of the login the worker should run on — no secrets.
+
+    The configured internal profile when there is one, else (SSO start_url,
+    subscription ARN) in kiro-cli's shared auth DB. None when the DB cannot be
+    read (it is often busy); callers treat that as "unknown", not as a change.
     """
+    try:
+        key = _internal_auth().login_key()
+        if key:
+            return key
+    except Exception:
+        pass
     try:
         con = sqlite3.connect(str(_KIRO_AUTH_DB), timeout=0.5)
         try:
@@ -86,7 +104,8 @@ def _spawn() -> tuple["ACPSession", str]:  # type: ignore[name-defined]
     """Start a fresh ACP subprocess and create one session. Returns (session, sid)."""
     ACPSession = _get_acp_session_class()
     sess = ACPSession(engine="v2", model="auto",
-                      extra_args=["--trust-all-tools"], timeout=40.0)
+                      extra_args=["--trust-all-tools"], timeout=40.0,
+                      env=_internal_auth().env())
     sess.start()
     sess.initialize(client_name="quarterdeck-worker")
     sid = sess.new_session(cwd=str(Path.home()))
@@ -147,8 +166,14 @@ def restart() -> None:
     Called right after a profile switch or logout: waiting for the next query
     leaves a window in which an in-flight query refreshes and writes the old
     login back. Does not take the lock — a query in flight just fails and
-    respawns on the next call.
+    respawns on the next call. A worker on its own internal login is left
+    alone — the shared login does not reach it.
     """
+    try:
+        if _internal_auth().login_key():
+            return
+    except Exception:
+        pass
     sess = _session
     if sess is not None:
         try:

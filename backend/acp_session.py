@@ -79,6 +79,8 @@ class ACPSession:
         Additional flags for the ``kiro-cli acp`` command.
     timeout:
         Default RPC response timeout in seconds.
+    env:
+        Environment for the subprocess.  ``None`` inherits Quarterdeck's.
     """
 
     def __init__(
@@ -87,8 +89,10 @@ class ACPSession:
         model: str | None = None,
         extra_args: list[str] | None = None,
         timeout: float = DEFAULT_RPC_TIMEOUT,
+        env: dict | None = None,
     ):
         self._engine = engine
+        self._env = env
         self._model = model
         self._extra_args = extra_args or []
         self._default_timeout = timeout
@@ -154,6 +158,7 @@ class ACPSession:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=self._env,
         )
         self._alive = True
         self._stop_event.clear()

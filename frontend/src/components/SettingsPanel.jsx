@@ -1481,6 +1481,18 @@ function ProfileSettings() {
   const { profiles, current, switching, load } = useProfiles()
   const [newName, setNewName] = useState('')
   const [busy, setBusy] = useState(false)
+  const [internalProfile, setInternalProfile] = useState('')
+
+  useEffect(() => {
+    settingsApi.getSettings().then(s => setInternalProfile(s['internal-profile'] || '')).catch(() => {})
+  }, [])
+
+  const handleInternalProfile = (value) => {
+    setInternalProfile(value)
+    settingsApi.saveSettings({ 'internal-profile': value })
+      .then(() => notify(value ? `Background tasks use "${value}"` : 'Background tasks follow the active login', 'info'))
+      .catch(() => notify('Could not save', 'error'))
+  }
 
   const handleSave = async () => {
     const name = newName.trim()
@@ -1564,6 +1576,22 @@ function ProfileSettings() {
           ))}
         </div>
       )}
+
+      {profiles.length > 0 && (
+        <div className="settings-row">
+          <span className="settings-label">Background tasks</span>
+          <select className="launcher-input" value={internalProfile} disabled={busy}
+                  aria-label="Profile for Quarterdeck background tasks"
+                  onChange={e => handleInternalProfile(e.target.value)}>
+            <option value="">Follow the active login</option>
+            {profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+          </select>
+        </div>
+      )}
+      <p className="cleanup-hint">
+        Summaries and other background work run on this profile with their own copy of
+        its login, so switching profiles never disturbs them.
+      </p>
 
       <div className="profile-save-row">
         <input className="launcher-input"
