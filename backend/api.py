@@ -6789,15 +6789,105 @@ def restart_visible_sessions(payload: dict):
     return {"ok": True, "restarted": ok_count, "results": results}
 
 
+# How long a "log in again" for a saved profile waits for the login to land.
+_RELOGIN_TIMEOUT = 900.0
+
+
+def _watch_relogin(name: str, prior_fp: str, start_url: str) -> None:
+    """Wait for the new login of a profile being logged into again, then adopt it.
+
+    `kiro-cli login` runs in a terminal, so its end is only visible as new
+    tokens in the auth DB. A login to some other account is left alone.
+    """
+    deadline = time.time() + _RELOGIN_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(3)
+        try:
+            live = _dump_auth_rows()
+        except Exception:
+            continue  # DB busy
+        fp = _token_fingerprint(live)
+        if not fp or fp == prior_fp:
+            continue
+        if _token_start_url(live) != start_url:
+            return
+        try:
+            _adopt_relogin(name)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("re-login: could not save the new login into %r", name)
+        return
+
+
+def _adopt_relogin(name: str) -> None:
+    """Give the live login the profile's subscription and save it as that profile."""
+    meta = json.loads(_profile_meta_path(name).read_text())
+    state_profile = meta.get("state_profile", "")
+    if not state_profile:
+        return
+    with _profile_switch_lock:
+        con = _sqlite3.connect(str(_KIRO_AUTH_DB), timeout=5)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            rows = [{"key": k, "value": v} for k, v in
+                    con.execute("SELECT key, value FROM auth_kv").fetchall()]
+            con.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)",
+                        ("api.codewhisperer.profile", state_profile))
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+        _resave_rotated_tokens(name, dict(meta, saved_at=time.strftime("%Y-%m-%dT%H:%M:%S%z")), rows)
+        _record_profile_health(name, kiro_oidc.VALID)
+        _set_selected_profile(name)
+    global _active_profile_cache, _last_profile_switch_at
+    _active_profile_cache = (time.time(), name)
+    _last_profile_switch_at = time.time()
+    _invalidate_sessions_cache()
+    from . import acp_worker
+    acp_worker.restart()
+
+
 @app.post("/api/kiro/login")
 def kiro_login(payload: dict):
-    """Trigger kiro-cli login in a terminal window."""
+    """Trigger kiro-cli login in a terminal window.
+
+    With `profile`, logs in again to that saved profile's account and, once the
+    login lands, saves it back into the profile with its subscription — the
+    fix for a profile whose saved login expired.
+    """
     # A new login is a deliberate change of account: stop re-applying the old
     # choice, or the next spawn would undo a login not yet saved as a profile.
     _set_selected_profile("")
     license_type = payload.get("license", "free")  # free | pro
     identity_provider = payload.get("identity_provider", "")
     region = payload.get("region", "")
+
+    relogin = payload.get("profile", "")
+    if relogin:
+        if not isinstance(relogin, str) or relogin == "_previous" or any(c in relogin for c in "/\\"):
+            return {"error": "Invalid profile name"}
+        try:
+            saved_rows = [json.loads(line) for line in
+                          _profile_data_path(relogin).read_text().splitlines() if line.strip()]
+            if not json.loads(_profile_meta_path(relogin).read_text()).get("state_profile"):
+                raise ValueError("no subscription")
+        except (OSError, ValueError):
+            return {"error": f"Profile '{relogin}' is incomplete. Log in, then save it under that name."}
+        saved_login = _token_login(saved_rows)
+        start_url = saved_login.get("start_url", "")
+        if start_url and not start_url.startswith("https://view.awsapps.com"):
+            license_type = "pro"
+            identity_provider = start_url
+            region = saved_login.get("region", "") or region
+        else:
+            license_type, identity_provider, region = "free", "", ""
+        try:
+            prior_fp = _token_fingerprint(_dump_auth_rows())
+        except Exception:
+            prior_fp = ""
 
     cmd_parts = ["kiro-cli", "login", "--license", license_type]
     if identity_provider:
@@ -6811,6 +6901,9 @@ def kiro_login(payload: dict):
     if terminal not in TERMINALS:
         terminal = "terminal"
     result = _launch_in_terminal(terminal, command, str(Path.home()))
+    if relogin and not result.get("error"):
+        threading.Thread(target=_watch_relogin, args=(relogin, prior_fp, start_url),
+                         daemon=True, name=f"relogin-{relogin}").start()
     return result
 
 
