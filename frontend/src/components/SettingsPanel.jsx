@@ -1510,6 +1510,12 @@ function ProfileSettings() {
     setBusy(true)
     const d = await profilesApi.switchProfile(name).catch(() => ({ error: 'Network error' }))
     setBusy(false)
+    if (d.expired) {
+      const r = await profilesApi.kiroLogin({ profile: name }).catch(() => ({ error: 'Network error' }))
+      if (r.error) { notify(r.error, 'error'); return }
+      notify(`The login in "${name}" expired. Sign in in the Terminal window that opened; "${name}" is saved and selected automatically when you finish.`, 'info')
+      return
+    }
     if (d.error) { notify(d.error, 'error'); return }
     if (d.warning) notify(d.warning, 'error')
     else notify(d.unchanged ? `"${name}" is already active` : `"${name}" is active. Restart existing sessions to apply it there.`, 'info')

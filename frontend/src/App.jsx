@@ -92,9 +92,21 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
     setBusy('switch-' + name)
     const d = await profilesApi.switchProfile(name).catch(() => ({ error: 'Network error' }))
     setBusy('')
-    if (d.error) { notify(d.error, 'error'); if (d.expired) load(); return }
+    if (d.expired) { load(); relogin(name); return }
+    if (d.error) { notify(d.error, 'error'); return }
     if (d.warning) notify(d.warning, 'error')
     else notify(d.unchanged ? `"${name}" is already active` : `"${name}" is active. Restart existing sessions to apply it there.`, 'info')
+  }
+
+  // An expired profile is fixed by logging in to it again. Quarterdeck then
+  // saves the new login back into the profile, so there is nothing else to do.
+  const relogin = async (name) => {
+    setBusy('login')
+    const d = await profilesApi.kiroLogin({ profile: name }).catch(() => ({ error: 'Network error' }))
+    setBusy('')
+    if (d.error) { notify(d.error, 'error'); return }
+    notify(`The login in "${name}" expired. Sign in in the Terminal window that opened; "${name}" is saved and selected automatically when you finish.`, 'info')
+    setOpen(false)
   }
 
   const handleLogout = async () => {
@@ -171,7 +183,7 @@ function ProfilePill({ visibleSessionIds, onProfileSwitch, onCurrentProfile }) {
                         className={`profile-dropdown-item ${current?.active_profile === p.name ? 'active' : ''}`}
                         disabled={!!busy || !!switching || (current?.active_profile === p.name && !current?.drift)}
                         title={p.health === 'expired'
-                          ? `The login saved in "${p.name}" has expired. Log in to that account, then save it under this name again.`
+                          ? `The login saved in "${p.name}" has expired. Click to log in again; it is saved back into "${p.name}" automatically.`
                           : (p.profile_arn || p.email)}
                         onClick={() => handleSwitch(p.name)}>
                   <span className="profile-dropdown-name">
