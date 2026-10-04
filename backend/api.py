@@ -6825,6 +6825,8 @@ def kiro_logout():
         if result.returncode != 0:
             return {"error": result.stderr.strip() or "logout failed"}
         _set_selected_profile("")
+        from . import acp_worker
+        acp_worker.restart()
         return {"ok": True, "message": result.stdout.strip() or "Logged out"}
     except Exception as e:
         return {"error": str(e)}
@@ -7888,6 +7890,10 @@ def _switch_profile(name: str) -> dict:
     if not unchanged:
         _last_profile_switch_at = time.time()
         _invalidate_sessions_cache()
+        # The summary worker still holds the old login and would write it back
+        # over the one just restored on its next token refresh.
+        from . import acp_worker
+        acp_worker.restart()
     # Saved entitlements make switching immediate; options can discover models
     # lazily if this old snapshot does not contain a model list.
     from . import config as cfg
