@@ -2222,15 +2222,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
   if (!session) return null
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.done
   const title = detail?.title || session.title
-  // The tab strip renders when there is at least one managed sibling to show as
-  // a tab. When the current session is itself one of those tabs, its per-tab ×
-  // (which closes the panel on the last tab) makes the top-right × redundant,
-  // so we hide the latter to avoid two close controls. A non-managed session
-  // (foreign/archived) has no tab of its own, so it keeps the top-right ×.
-  const sessionIsTab = session.control === 'managed' || session.control === 'starting'
-  const hasTabStrip = !!(sessions && sessions.length > 0 && onSelect && sessionIsTab &&
-    sessions.some(s => s.control === 'managed' || s.control === 'starting'))
-
   return (<>
     <div className={`detail-panel ${expanded ? 'detail-expanded' : ''} ${fromWall ? 'detail-from-wall' : ''}`}
          style={expanded ? undefined : { width }}>
@@ -2413,9 +2404,10 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             )}
           </div>
           </>)}
-          {!hasTabStrip && (
-            <button className="detail-close" onClick={onClose}>✕</button>
-          )}
+          {/* Always present: a tab's × only minimizes that tab, and the strip
+              can squeeze the active tab out of view when the bar is crowded. */}
+          <button className="detail-close" onClick={onClose}
+                  title="Close panel (Esc)" aria-label="Close panel">✕</button>
         </div>
       </div>
       {showCorrections && (
