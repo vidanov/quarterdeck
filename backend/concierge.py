@@ -154,6 +154,8 @@ def _spawn() -> bool:
     while time.time() < deadline:
         time.sleep(0.5)
         pane = _capture(20)
+        if _dismiss_upgrade_prompt(pane):
+            continue
         # Look for the chat input prompt
         if "ask a question" in pane.lower() or "describe a task" in pane.lower():
             return True
@@ -162,6 +164,23 @@ def _spawn() -> bool:
 
     # Even if we can't detect the prompt, the session may still be fine
     return tmux.session_exists(name)
+
+
+def _dismiss_upgrade_prompt(pane: str) -> bool:
+    """Answer kiro-cli's "Switch to V3?" picker with "Remind me later".
+
+    The picker blocks before chat starts, so no session file or .lock is
+    written and the concierge's session id can never be found. "Remind me
+    later" is picked over "Don't ask again" so the user's kiro config stays
+    untouched. Returns True if the picker was on screen.
+    """
+    if "Remind me later" not in pane:
+        return False
+    name = _tmux_name()
+    tmux._tmux("send-keys", "-t", name, "Down", check=False)
+    time.sleep(0.3)
+    tmux._tmux("send-keys", "-t", name, "Enter", check=False)
+    return True
 
 
 def ensure_alive() -> bool:
@@ -665,9 +684,15 @@ def query(text: str) -> dict:
 
     global _session_id
     
-    # Always try to resolve session_id if we don't have it
+    # Always try to resolve session_id if we don't have it. A session spawned
+    # before the upgrade picker was handled can still be sitting on it.
     if not _session_id:
         _session_id = _find_session_id()
+    if not _session_id and _dismiss_upgrade_prompt(_capture(20)):
+        deadline = time.time() + 10.0
+        while not _session_id and time.time() < deadline:
+            time.sleep(0.5)
+            _session_id = _find_session_id()
     
     session_id = _session_id
     if not session_id:
