@@ -73,6 +73,24 @@ def _send_keys(parent_id: str, text: str) -> bool:
         return False
 
 
+# Keys the side chat's toolbar may send — the same set as the main composer.
+SIDE_KEYS = {"Escape", "C-c", "C-x", "DC", "Up", "Down", "Enter"}
+
+
+def send_key(parent_id: str, key: str) -> dict:
+    """Send one tmux key (esc, ctrl-c, arrows…) to the side chat's pane."""
+    if key not in SIDE_KEYS:
+        return {"ok": False, "error": "unsupported key"}
+    name = _tmux_name(parent_id)
+    if not tmux.session_exists(name) or tmux.pane_dead(name):
+        return {"ok": False, "error": "side chat not open"}
+    try:
+        tmux._tmux("send-keys", "-t", name, key)
+    except tmux.TmuxError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
 def _strip_ansi(text: str) -> str:
     return re.sub(r'\x1b\[[0-9;]*[mABCDEFGHJKLMSTfhilnprsu]', '', text)
 
@@ -114,11 +132,12 @@ def is_open(parent_id: str) -> bool:
     return tmux.session_exists(name) and not tmux.pane_dead(name)
 
 
-def open_session(parent_id: str, context_text: str) -> dict:
+def open_session(parent_id: str, context_text: str, intro: str | None = None) -> dict:
     """Spawn a side-chat kiro-cli session for parent_id.
 
     context_text is the frozen parent transcript excerpt injected as the
-    opening system message.
+    opening system message. `intro` replaces that opening message entirely
+    (the quick chat has no parent transcript).
     """
     with _lock:
         name = _tmux_name(parent_id)
@@ -157,7 +176,7 @@ def open_session(parent_id: str, context_text: str) -> dict:
             return {"error": "Side chat session did not become ready"}
 
         # Inject the frozen context as the first message
-        intro = (
+        intro = intro or (
             "You are a read-only assistant for a Kiro CLI session. "
             "You may read files to answer questions but must not edit files or run commands. "
             "Here is the frozen session transcript:\n\n"
@@ -241,3 +260,68 @@ def list_open() -> list[str]:
 def get_transcript(parent_id: str) -> str:
     """Return the full side chat pane content for forking."""
     return _strip_ansi(_capture_raw(parent_id, lines=200))
+
+
+# ---------------------------------------------------------------------------
+# Quick chat — one global, always-on assistant (⌘J). Same engine, no parent.
+# ---------------------------------------------------------------------------
+
+QUICK_ID = "_quick"
+QUICK_INTRO = (
+    "You are a quick assistant inside Quarterdeck, a control surface for Kiro CLI "
+    "sessions. The user asks short questions about anything. Answer briefly: a few "
+    "sentences or a short list, no preamble. You may read files when asked, but must "
+    "not edit files or run commands. Reply with just: ready"
+)
+
+
+def quick_open() -> dict:
+    return open_session(QUICK_ID, "", intro=QUICK_INTRO)
+
+
+# ---------------------------------------------------------------------------
+# Keeping side chats out of the session list
+# ---------------------------------------------------------------------------
+# Every side chat (and the quick chat) is a real kiro-cli session, so it writes
+# a .lock and a transcript like any other and would show up in the grid as a
+# foreign session titled with its hidden opening prompt. Their ids are learnt
+# from the pane's process lineage and kept on disk, so a finished side chat
+# stays out of the archive too.
+
+_IDS_FILE = SIDE_DIR / "session-ids.json"
+_correlated: dict[tuple[str, int], str] = {}   # (tmux name, pane pid) -> session id
+
+
+def _load_ids() -> set[str]:
+    try:
+        return set(json.loads(_IDS_FILE.read_text()))
+    except (OSError, ValueError):
+        return set()
+
+
+def known_session_ids() -> set[str]:
+    """Session ids that belong to side chats, past and present."""
+    ids = _load_ids()
+    found = False
+    for name in tmux.list_tmux_sessions():
+        if not name.startswith(SIDE_PREFIX):
+            continue
+        pid = tmux.pane_pid(name)
+        if not pid:
+            continue
+        sid = _correlated.get((name, pid))
+        if sid is None:
+            sid = tmux._correlate(pid, set())
+            if not sid:
+                continue   # kiro-cli has not written its lock yet
+            _correlated[(name, pid)] = sid
+        if sid not in ids:
+            ids.add(sid)
+            found = True
+    if found:
+        try:
+            SIDE_DIR.mkdir(parents=True, exist_ok=True)
+            _IDS_FILE.write_text(json.dumps(sorted(ids)))
+        except OSError:
+            pass
+    return ids
