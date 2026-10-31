@@ -46,6 +46,7 @@ import DetailPanel from './components/DetailPanel'
 import CollectionsPanel from './components/CollectionsPanel'
 import { CardReply, SessionCard, AttentionBar, ListView } from './components/SessionGrid'
 import StacksView from './components/StacksView'
+import QuickChat from './components/QuickChat'
 import { QuickCreate, CommandBar, PaletteBar, NewSessionLauncher, OrganizePanel } from './components/Launcher'
 import Markdown from './components/Markdown'
 import { PasteAttachments, PasteTileCompact } from './components/PasteAttachments'
@@ -485,6 +486,7 @@ export default function App() {
   const [wallGrouped, setWallGrouped] = useState(() => localStorage.getItem('wall-grouped') === '1')
   const [wallCollections, setWallCollections] = useState([])
   const [cmdBarOpen, setCmdBarOpen] = useState(false)
+  const [quickChatOpen, setQuickChatOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [organizeOpen, setOrganizeOpen] = useState(false)
   const [controlFilter, setControlFilter] = useState(() => localStorage.getItem('control-filter') || 'all')
@@ -646,6 +648,25 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [selected, confirmPending])
 
+  // Esc closes the open panel — only when nothing else wants the key: not while
+  // typing, and not while a dialog, menu, palette or the quick chat is up (their
+  // own Esc handlers close them first).
+  useEffect(() => {
+    if (!selected) return
+    const onKey = (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return
+      if (confirmPending || cmdBarOpen || paletteOpen || launcherOpen || quickChatOpen) return
+      const el = e.target
+      if (el?.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el?.tagName)) return
+      if (document.querySelector('[role="dialog"], .modal-overlay, .cmdbar-backdrop, .detail-overflow-menu, .side-chat-panel, .sat-overlay')) return
+      e.preventDefault()
+      selectSession(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selected, confirmPending, cmdBarOpen, paletteOpen, launcherOpen, quickChatOpen])
+
   // ⌘K opens the command bar (concierge assistant).
   // ⌘Enter opens the launcher — also fired by the native Session menu via custom event.
   // Guard: ⌘Enter is also "send" in textareas, so skip if an input has focus.
@@ -655,9 +676,12 @@ export default function App() {
         e.preventDefault()
         setPaletteOpen(v => !v)
       }
-      if (e.key === 'j' && e.metaKey && !e.shiftKey && !e.altKey) {
+      // ⌘J: the always-on quick chat. ⇧⌘J: the app concierge it replaced
+      // ("what's running?", "start fixing auth in …").
+      if ((e.key === 'j' || e.key === 'J') && e.metaKey && !e.altKey) {
         e.preventDefault()
-        setCmdBarOpen(v => !v)
+        if (e.shiftKey) setCmdBarOpen(v => !v)
+        else setQuickChatOpen(v => !v)
       }
       if (e.key === 'Enter' && e.metaKey && !e.shiftKey && !e.altKey) {
         const el = e.target
@@ -2444,6 +2468,7 @@ export default function App() {
           onClose={() => setOrganizeOpen(false)}
           onArchived={() => refreshBurst([800, 2500, 5000])}
         />
+        <QuickChat open={quickChatOpen} onClose={() => setQuickChatOpen(false)} notify={notify} />
         <CommandBar open={cmdBarOpen} onClose={() => setCmdBarOpen(false)} onAction={handleCmdBarAction} onOpenSession={(id) => {
           // Find the session and open it in the detail panel
           const session = sessions.find(s => s.id === id)

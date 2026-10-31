@@ -280,10 +280,13 @@ class TestComponentPropsConsistency:
         return set(re.findall(r"(\w+)=", attr_block))
 
     def test_sidechat_receives_required_props(self):
-        """DetailPanel must pass the four props SideChat's signature requires."""
+        """DetailPanel must pass every prop SideChat's signature takes without a default."""
         detail_text = (COMPONENTS_DIR / "DetailPanel.jsx").read_text()
         passed = self._props_passed_to("SideChat", detail_text)
-        required = {"sessionId", "notify", "respond", "runCommand", "options"}
+        sig = re.search(r"function SideChat\(\{([^}]*)\}", self.SIDE_CHAT.read_text())
+        assert sig, "SideChat signature not found"
+        required = {p.strip() for p in sig.group(1).split(",") if p.strip() and "=" not in p}
+        assert {"sessionId", "notify", "options"} <= required
         missing = required - passed
         assert not missing, (
             f"DetailPanel does not pass required props to <SideChat>: {missing}"

@@ -8,16 +8,15 @@ import { PasteAttachments } from './PasteAttachments'
  * Props:
  *   sessionId  — kiro session uuid
  *   notify     — (msg, level) toast function from parent
- *   respond    — (choice) send a key/command to the main session
- *   runCommand — (cmd) run a slash command on the main session
- *   options    — session options (commands list etc.)
+ *   options    — session options (commands, models, efforts)
+ *   chips      — helper chips (same list as the main composer)
  *
  * Ref methods (exposed via forwardRef):
  *   open()     — open (or toggle closed) the panel
  *   isOpen     — boolean (read via ref.current.isOpen)
  *   isOpening  — boolean
  */
-const SideChat = forwardRef(function SideChat({ sessionId, notify, respond, runCommand, options }, ref) {
+const SideChat = forwardRef(function SideChat({ sessionId, notify, options, chips = [] }, ref) {
   const [open, setOpen] = useState(false)
   const [opening, setOpening] = useState(false)
   const [lines, setLines] = useState([])
@@ -33,6 +32,7 @@ const SideChat = forwardRef(function SideChat({ sessionId, notify, respond, runC
   const [historyIdx, setHistoryIdx] = useState(-1)
 
   const pollRef = useRef(null)
+  const inputRef = useRef(null)
   const bottomRef = useRef(null)
 
   const {
@@ -95,6 +95,23 @@ const SideChat = forwardRef(function SideChat({ sessionId, notify, respond, runC
     fetch(`/api/sessions/${sessionId}/side-chat/close`, { method: 'POST' }).catch(() => {})
   }
 
+  // Everything the toolbar does goes to the side chat's own kiro-cli, never to
+  // the main session — the point of a side chat is to leave that one alone.
+  const post = (path, body) => fetch(`/api/sessions/${sessionId}/side-chat/${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(r => r.json()).then(d => { if (d.error) notify(`Side chat: ${d.error}`, 'error') })
+    .catch(() => notify('Side chat unavailable', 'error'))
+  const sendKey = (key) => post('key', { key })
+  const sendLine = (text) => { setThinking(true); post('send', { text }) }
+  const putDraft = (text) => { setDraft(text); setTimeout(() => inputRef.current?.focus(), 0) }
+  const runSideCommand = (c) => c.needs_arg ? putDraft(c.cmd) : sendLine(c.cmd)
+  const applyChip = (c) => {
+    if (c.mode === 'send') sendLine(c.prompt)
+    else putDraft(draft ? `${draft} ${c.prompt}` : c.prompt)
+  }
+
   const handleSend = (e) => {
     e.preventDefault()
     const typedText = draft.trim()
@@ -110,23 +127,18 @@ const SideChat = forwardRef(function SideChat({ sessionId, notify, respond, runC
     const newHistory = [text, ...history.filter(h => h !== text)].slice(0, 50)
     setHistory(newHistory)
     try { localStorage.setItem(`side-chat-history:${sessionId}`, JSON.stringify(newHistory)) } catch {}
-    setThinking(true)
-    fetch(`/api/sessions/${sessionId}/side-chat/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    }).catch(() => {})
+    sendLine(text)
   }
 
   // The toggle button — rendered inline where the caller wants it
   const toggleButton = (
     <button
-      className={`detail-switch detail-side-btn${open ? ' active' : ''}`}
+      className={`detail-icon detail-side-btn${open ? ' active' : ''}`}
       title={open ? 'Close side chat' : 'Open side chat — ask questions about this session without polluting its context'}
       onClick={handleToggle}
       disabled={opening}
     >
-      {opening ? '…' : '◎ Side'}
+      {opening ? '…' : '◎'}
     </button>
   )
 
@@ -174,26 +186,6 @@ const SideChat = forwardRef(function SideChat({ sessionId, notify, respond, runC
         </div>
 
         <div className="side-chat-compose-wrap">
-          {chipsOpen && (
-            <div className="side-chat-chips">
-              <button type="button" className="composer-chip composer-key"
-                title="Send Escape"
-                onClick={() => { respond('Escape'); setChipsOpen(false) }}>esc</button>
-              <button type="button" className="composer-chip composer-key"
-                title="Send Ctrl+C"
-                onClick={() => { respond('C-c'); setChipsOpen(false) }}>ctrl-c</button>
-              <button type="button" className="composer-chip composer-key"
-                title="Send Enter"
-                onClick={() => { respond('Enter'); setChipsOpen(false) }}>↵</button>
-              {(options?.commands || []).map(c => (
-                <button key={c.cmd} type="button" className="composer-chip"
-                  title={c.hint}
-                  onClick={() => { runCommand(c); setChipsOpen(false) }}>
-                  {c.label}{c.needs_arg ? '…' : ''}
-                </button>
-              ))}
-            </div>
-          )}
           <form className="side-chat-compose" onSubmit={handleSend}>
             {attachments.length > 0 && (
               <PasteAttachments attachments={attachments} onRemove={removeAttachment} />
@@ -201,8 +193,9 @@ const SideChat = forwardRef(function SideChat({ sessionId, notify, respond, runC
             <button type="button"
               className={`side-chat-chips-toggle${chipsOpen ? ' active' : ''}`}
               title={chipsOpen ? 'Hide controls' : 'Show controls & commands'}
-              onClick={() => setChipsOpen(v => !v)}>⌃</button>
+              onClick={() => setChipsOpen(v => !v)}>{chipsOpen ? '⌃' : '⌄'}</button>
             <input
+              ref={inputRef}
               className="side-chat-input"
               value={draft}
               spellCheck={false}
@@ -232,6 +225,51 @@ const SideChat = forwardRef(function SideChat({ sessionId, notify, respond, runC
             <button className="side-chat-send" type="submit"
               disabled={!draft.trim() || thinking}>↗</button>
           </form>
+          {chipsOpen && (
+            <div className="composer-tools side-chat-tools">
+              <div className="composer-commands">
+                {/* Keys stay usable while it is thinking: esc is how you stop it. */}
+                {[['Escape', 'esc', 'Send Escape — cancel the turn or close a menu'],
+                  ['C-c', 'ctrl-c', 'Send Ctrl+C — interrupt'],
+                  ['C-x', 'ctrl-x', 'Send Ctrl+X'],
+                  ['DC', 'del', 'Send Delete'],
+                  ['Up', '↑', 'Send Up'],
+                  ['Down', '↓', 'Send Down'],
+                  ['Enter', '↵', 'Send Enter on its own']].map(([key, label, title]) => (
+                  <button key={key} type="button" className="composer-chip composer-key"
+                          title={title} onClick={() => sendKey(key)}>{label}</button>
+                ))}
+                {(options?.commands || []).map(c => (
+                  <button key={c.cmd} type="button" className="composer-chip"
+                          title={c.hint} disabled={thinking && !c.needs_arg}
+                          onClick={() => runSideCommand(c)}>
+                    {c.label}{c.needs_arg ? '…' : ''}
+                  </button>
+                ))}
+                <select className="composer-select" value="" disabled={thinking}
+                        onChange={e => e.target.value && sendLine(`/model ${e.target.value}`)}
+                        title="Switch the side chat's model">
+                  <option value="">model…</option>
+                  {(options?.models || []).map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <select className="composer-select" value="" disabled={thinking}
+                        onChange={e => e.target.value && sendLine(`/effort ${e.target.value}`)}
+                        title="Switch the side chat's thinking effort">
+                  <option value="">effort…</option>
+                  {(options?.efforts || []).map(x => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </div>
+              {chips.length > 0 && (
+                <div className="starter-chips">
+                  {chips.map((c, i) => (
+                    <button key={i} type="button" className="starter-chip" title={c.prompt}
+                            disabled={thinking && c.mode === 'send'}
+                            onClick={() => applyChip(c)}>{c.label}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </>

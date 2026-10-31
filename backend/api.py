@@ -2218,7 +2218,12 @@ def _sorted_json_files() -> list:
 def _do_sessions_scan() -> dict:
     """Execute the full sessions scan and return {"sessions": [...]}."""
     sessions = []
-    seen_ids = set()
+    # Side chats and the quick chat are kiro-cli sessions of our own making;
+    # marking them seen keeps every pass below from listing them.
+    try:
+        seen_ids = set(side_chat.known_session_ids())
+    except Exception:
+        seen_ids = set()
     now = time.time()
 
     managed = tmux.managed_sessions()
@@ -2248,6 +2253,9 @@ def _do_sessions_scan() -> dict:
         
         # Skip the concierge session — it's internal to Quarterdeck
         if session_id == concierge_session_id:
+            continue
+        # …and side chats / the quick chat, seeded into seen_ids above.
+        if session_id in seen_ids:
             continue
         
         seen_ids.add(session_id)
@@ -6678,7 +6686,8 @@ def _active_profile_name() -> str:
             return name
     live_url = _token_start_url(live_rows)
     if live_url:
-        same_login = [s for s in arn_matches if _token_start_url(s[2]) == live_url]
+        same_login = [s for s in arn_matches if _token_start_url(s[2]) == live_url
+                      and _client_id(s[2]) == _client_id(live_rows)]
         if len(same_login) == 1:
             name = same_login[0][0]
             _resave_rotated_tokens(name, same_login[0][1], live_rows)
@@ -6718,12 +6727,11 @@ def _resave_rotated_tokens(name: str, meta: dict, rows: list[dict]) -> None:
 def _save_live_into_snapshot(live_rows: list[dict], exclude: str = "") -> None:
     """Write the live login into the saved profile it belongs to.
 
-    Matched by refresh-token fingerprint only — never by start_url or ARN, which
-    a mixed login (one account's tokens, another's subscription) would satisfy
-    for the wrong profile.
+    Matched by refresh token and client — never by start_url or ARN, which a
+    mixed login (one account's tokens, another's subscription or client) would
+    satisfy for the wrong profile.
     """
-    fp = _token_fingerprint(live_rows)
-    if not fp:
+    if not _token_fingerprint(live_rows):
         return
     for data_path in sorted(_PROFILES_DIR.glob("*.jsonl")):
         name = data_path.stem
@@ -6734,7 +6742,7 @@ def _save_live_into_snapshot(live_rows: list[dict], exclude: str = "") -> None:
             meta = json.loads(_profile_meta_path(name).read_text())
         except (OSError, ValueError):
             continue
-        if _token_fingerprint(rows) == fp:
+        if _same_login(rows, live_rows):
             if rows != live_rows:
                 _resave_rotated_tokens(name, meta, live_rows)
             return
@@ -7001,6 +7009,42 @@ def assist_status():
     return concierge.status()
 
 
+# --- Quick chat (⌘J) ---
+# A global, always-on assistant on the side-chat engine. It survives the dock
+# being hidden; only "new chat" or a backend restart ends it.
+
+@app.post("/api/quick-chat/open")
+def quick_chat_open():
+    return side_chat.quick_open()
+
+
+@app.post("/api/quick-chat/send")
+def quick_chat_send(payload: dict):
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        return {"error": "empty message"}
+    if not side_chat.is_open(side_chat.QUICK_ID):
+        opened = side_chat.quick_open()
+        if opened.get("error"):
+            return opened
+    return side_chat.send(side_chat.QUICK_ID, text)
+
+
+@app.post("/api/quick-chat/key")
+def quick_chat_key(payload: dict):
+    return side_chat.send_key(side_chat.QUICK_ID, str(payload.get("key", "")))
+
+
+@app.get("/api/quick-chat/poll")
+def quick_chat_poll():
+    return side_chat.poll(side_chat.QUICK_ID)
+
+
+@app.post("/api/quick-chat/close")
+def quick_chat_close():
+    return side_chat.close(side_chat.QUICK_ID)
+
+
 # --- Side chat ---
 
 @app.post("/api/sessions/{session_id}/side-chat/open")
@@ -7028,6 +7072,12 @@ def side_chat_send(session_id: str, payload: dict):
     if not text:
         return {"error": "empty message"}
     return side_chat.send(session_id, text)
+
+
+@app.post("/api/sessions/{session_id}/side-chat/key")
+def side_chat_key(session_id: str, payload: dict):
+    """Send a single key (esc, ctrl-c, arrows…) to the side chat."""
+    return side_chat.send_key(session_id, str(payload.get("key", "")))
 
 
 @app.get("/api/sessions/{session_id}/side-chat/poll")
@@ -7677,6 +7727,34 @@ def _token_fingerprint(rows: list[dict]) -> str:
         return ""
 
 
+def _client_id(rows: list[dict]) -> str:
+    """The kirocli OIDC client a login was issued to.
+
+    Every `kiro-cli login` registers its own client, and a refresh token only
+    works with the client that issued it. A refresh keeps the client, so this
+    stays put while the tokens change.
+    """
+    for r in rows:
+        if r.get("key") == "kirocli:odic:device-registration":
+            try:
+                return json.loads(r.get("value", "")).get("client_id", "") or ""
+            except (ValueError, AttributeError):
+                return ""
+    return ""
+
+
+def _same_login(a: list[dict], b: list[dict]) -> bool:
+    """Same refresh token and same client: one login, not a mix of two.
+
+    A running session of another account can write its own refreshed token
+    back next to a different login's client registration. Matching by token
+    alone would call that pair "the same", keep it, and kiro-cli's next
+    refresh then fails with InvalidGrantException for every session.
+    """
+    fp = _token_fingerprint(a)
+    return bool(fp) and fp == _token_fingerprint(b) and _client_id(a) == _client_id(b)
+
+
 def _current_profile_identity() -> dict:
     """Run kiro-cli whoami and parse the output."""
     try:
@@ -7952,7 +8030,7 @@ def _switch_profile(name: str) -> dict:
             current_arn = json.loads(current_state).get("arn", "")
         except (ValueError, AttributeError):
             current_arn = ""
-        same_tokens = _token_fingerprint(rows) == _token_fingerprint(current_rows)
+        same_tokens = _same_login(rows, current_rows)
         unchanged = same_tokens and current_arn == profile_arn
         if not unchanged:
             if current_rows:
@@ -7970,6 +8048,15 @@ def _switch_profile(name: str) -> dict:
                                 [(r["key"], r["value"]) for r in rows])
             con.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)",
                         ("api.codewhisperer.profile", state_profile))
+        # kiro-cli also records which Identity Center it logged in to. Left
+        # alone, it keeps naming the last `kiro-cli login` (whoami shows that
+        # account) while the tokens belong to the restored one.
+        login = _token_login(rows)
+        for key, value in (("auth.idc.start-url", login.get("start_url")),
+                           ("auth.idc.region", login.get("region"))):
+            if value:
+                con.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)",
+                            (key, json.dumps(value)))
         con.commit()
     except Exception:
         con.rollback()

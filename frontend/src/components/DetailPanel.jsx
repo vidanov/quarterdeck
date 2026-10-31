@@ -941,6 +941,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
 
   const sideChatRef = useRef(null)
   const [overflowOpen, setOverflowOpen] = useState(false)
+  // Drives the shortcut hint line: reply-box keys while typing, app keys otherwise.
+  const [composerFocused, setComposerFocused] = useState(false)
   const [secretsModalOpen, setSecretsModalOpen] = useState(false)
   const [chipsModalOpen, setChipsModalOpen] = useState(false)
   // Merged starter chips shown above composer: project chips (+ global if includeGlobal), or global only
@@ -2281,11 +2283,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </button>
             )
           })()}
-          {/* Expand/fullscreen — always present */}
-          <button className="detail-icon detail-icon-expand" onClick={onToggleExpand}
-                  title={expanded ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}>
-            {expanded ? '⤡' : '⤢'}
-          </button>
           {/* Items below hidden for foreign/archived sessions — no input possible */}
           {control !== 'foreign' && control !== 'archived' && (<>
           {/* Side chat — keep label, it's a mode */}
@@ -2293,9 +2290,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             ref={sideChatRef}
             sessionId={session.id}
             notify={notify}
-            respond={respond}
-            runCommand={runCommand}
             options={options}
+            chips={starterChips}
           />
           {/* CLI binding chip — only for foreign sessions (manually started kiro-cli).
               Managed sessions already accept input directly via the composer. */}
@@ -2404,10 +2400,28 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
             )}
           </div>
           </>)}
-          {/* Always present: a tab's × only minimizes that tab, and the strip
-              can squeeze the active tab out of view when the bar is crowded. */}
-          <button className="detail-close" onClick={onClose}
-                  title="Close panel (Esc)" aria-label="Close panel">✕</button>
+          {/* Window controls, VS Code style: flat icons at the far right,
+              close last. Maximise toggles back to the side panel. */}
+          <div className="window-controls">
+            <button className="wc" onClick={onToggleExpand}
+                    title={expanded ? 'Restore to side panel (F)' : 'Maximise (F)'}
+                    aria-label={expanded ? 'Restore to side panel' : 'Maximise'}>
+              {expanded ? (
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                  <path d="M3.5 12h9" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                  <rect x="3.5" y="3.5" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                </svg>
+              )}
+            </button>
+            <button className="wc wc-close" onClick={onClose} title="Close panel" aria-label="Close panel">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
       {showCorrections && (
@@ -3139,55 +3153,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
       <div className="composer">
         {canSend && effectiveView !== 'shell' ? (
           <>
-            {chipsOpen && (
-              <div className="composer-commands-wrap">
-                <button className="composer-commands-arrow composer-commands-arrow-left"
-                        onClick={() => { const el = document.querySelector('.composer-commands'); if (el) el.scrollBy({ left: -120, behavior: 'smooth' }) }}
-                        tabIndex={-1} aria-hidden="true">‹</button>
-                <div className="composer-commands">
-                <button className="composer-chip composer-key" title="Send Escape — cancels the current turn or closes a menu"
-                        onClick={() => respond('Escape')}>esc</button>
-                <button className="composer-chip composer-key" title="Send Ctrl+C — interrupt"
-                        onClick={() => respond('C-c')}>ctrl-c</button>
-                <button className="composer-chip composer-key" title="Send Ctrl+X — kiro-cli shortcut"
-                        onClick={() => respond('C-x')}>ctrl-x</button>
-                <button className="composer-chip composer-key" title="Send Delete key"
-                        onClick={() => respond('DC')}>del</button>
-                <button className="composer-chip composer-key" title="Previous message (history ↑)"
-                        onClick={() => recallByButton(1)}>↑</button>
-                <button className="composer-chip composer-key" title="Next message (history ↓)"
-                        onClick={() => recallByButton(-1)}>↓</button>
-                <button className="composer-chip composer-key" title="Send Enter on its own"
-                        onClick={() => respond('Enter')}>↵</button>
-                {(options.commands || []).map(c => (
-                  <button key={c.cmd} className="composer-chip" title={c.hint} onClick={() => runCommand(c)}>
-                    {c.label}{c.needs_arg ? '…' : ''}
-                  </button>
-                ))}
-                <select
-                  className="composer-select"
-                  value={session?.model || ""}
-                  onChange={(e) => changeModel(e.target.value)}
-                  title={session?.model ? `Active model: ${session.model} — switch for this session` : "Switch model for this session"}
-                >
-                  {!session?.model && <option value="">model…</option>}
-                  {(options.models || []).map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-                <select
-                  className="composer-select"
-                  value={session?.effort || ""}
-                  onChange={(e) => changeEffort(e.target.value)}
-                  title={session?.effort ? `Active effort: ${session.effort} — switch for this session` : "Switch thinking effort"}
-                >
-                  {!session?.effort && <option value="">effort…</option>}
-                  {(options.efforts || []).map(x => <option key={x} value={x}>{x}</option>)}
-                </select>
-              </div>
-                <button className="composer-commands-arrow composer-commands-arrow-right"
-                        onClick={() => { const el = document.querySelector('.composer-commands'); if (el) el.scrollBy({ left: 120, behavior: 'smooth' }) }}
-                        tabIndex={-1} aria-hidden="true">›</button>
-              </div>
-            )}
             {pendingScreenshots.length > 0 && (
               <div className="screenshot-pending-bar">
                 {pendingScreenshots.slice(-5).map((s) => (
@@ -3233,29 +3198,6 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               </div>,
               document.body
             )}
-            {starterChips.length > 0 && (
-              <div className="starter-chips">
-                {starterChips.map((c, i) => (
-                  <button key={i} type="button" className="starter-chip"
-                    title={c.prompt}
-                    onClick={() => {
-                      if (c.mode === 'send') {
-                        if (draftRef.current) draftRef.current.value = c.prompt
-                        setDraft(c.prompt)
-                        setTimeout(() => submitDraft(null), 0)
-                      } else {
-                        const cur = draftRef.current?.value || draft
-                        const next = cur ? `${cur}\n${c.prompt}` : c.prompt
-                        if (draftRef.current) draftRef.current.value = next
-                        setDraft(next)
-                        draftRef.current?.focus()
-                      }
-                    }}>
-                    {c.label}
-                  </button>
-                ))}
-              </div>
-            )}
             <form className="composer-row" onSubmit={submitDraft}>
               {attachments.length > 0 && (
                 <PasteAttachments attachments={attachments} onRemove={removeAttachment} />
@@ -3263,7 +3205,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <button type="button" className="composer-chips-toggle"
                       title={chipsOpen ? 'Hide controls' : 'Show controls (keys, model, effort)'}
                       onClick={() => setChipsOpen(v => { const next = !v; localStorage.setItem('detail-chips-open', next ? '1' : '0'); settingsApi.saveSettings({ 'detail-chips-open': next }).catch(() => {}); return next })}>
-                {chipsOpen ? '⌄' : '⌃'}
+                {chipsOpen ? '⌃' : '⌄'}
               </button>
               <textarea
                 ref={draftRef}
@@ -3281,6 +3223,8 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                   if (empty !== wasEmpty) setDraft(e.target.value)
                 }}
                 onPaste={onPasteAttachment}
+                onFocus={() => setComposerFocused(true)}
+                onBlur={() => setComposerFocused(false)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) submitDraft(e)
                   if (e.key === 'ArrowUp') recallHistory(e, 1)
@@ -3353,6 +3297,82 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
                     </li>
                   ))}
                 </ul>
+              )}
+            </div>
+            {/* Keys, commands and helper chips sit below the input, at the
+                bottom of the window, so the reply box stays next to the transcript. */}
+            <div className="composer-tools">
+              {chipsOpen && (
+                <div className="composer-commands-wrap">
+                  <button className="composer-commands-arrow composer-commands-arrow-left"
+                          onClick={() => { const el = document.querySelector('.composer-commands'); if (el) el.scrollBy({ left: -120, behavior: 'smooth' }) }}
+                          tabIndex={-1} aria-hidden="true">‹</button>
+                  <div className="composer-commands">
+                  <button className="composer-chip composer-key" title="Send Escape — cancels the current turn or closes a menu"
+                          onClick={() => respond('Escape')}>esc</button>
+                  <button className="composer-chip composer-key" title="Send Ctrl+C — interrupt"
+                          onClick={() => respond('C-c')}>ctrl-c</button>
+                  <button className="composer-chip composer-key" title="Send Ctrl+X — kiro-cli shortcut"
+                          onClick={() => respond('C-x')}>ctrl-x</button>
+                  <button className="composer-chip composer-key" title="Send Delete key"
+                          onClick={() => respond('DC')}>del</button>
+                  <button className="composer-chip composer-key" title="Previous message (history ↑)"
+                          onClick={() => recallByButton(1)}>↑</button>
+                  <button className="composer-chip composer-key" title="Next message (history ↓)"
+                          onClick={() => recallByButton(-1)}>↓</button>
+                  <button className="composer-chip composer-key" title="Send Enter on its own"
+                          onClick={() => respond('Enter')}>↵</button>
+                  {(options.commands || []).map(c => (
+                    <button key={c.cmd} className="composer-chip" title={c.hint} onClick={() => runCommand(c)}>
+                      {c.label}{c.needs_arg ? '…' : ''}
+                    </button>
+                  ))}
+                  <select
+                    className="composer-select"
+                    value={session?.model || ""}
+                    onChange={(e) => changeModel(e.target.value)}
+                    title={session?.model ? `Active model: ${session.model} — switch for this session` : "Switch model for this session"}
+                  >
+                    {!session?.model && <option value="">model…</option>}
+                    {(options.models || []).map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                  <select
+                    className="composer-select"
+                    value={session?.effort || ""}
+                    onChange={(e) => changeEffort(e.target.value)}
+                    title={session?.effort ? `Active effort: ${session.effort} — switch for this session` : "Switch thinking effort"}
+                  >
+                    {!session?.effort && <option value="">effort…</option>}
+                    {(options.efforts || []).map(x => <option key={x} value={x}>{x}</option>)}
+                  </select>
+                </div>
+                  <button className="composer-commands-arrow composer-commands-arrow-right"
+                          onClick={() => { const el = document.querySelector('.composer-commands'); if (el) el.scrollBy({ left: 120, behavior: 'smooth' }) }}
+                          tabIndex={-1} aria-hidden="true">›</button>
+                </div>
+              )}
+              {starterChips.length > 0 && (
+                <div className="starter-chips">
+                  {starterChips.map((c, i) => (
+                    <button key={i} type="button" className="starter-chip"
+                      title={c.prompt}
+                      onClick={() => {
+                        if (c.mode === 'send') {
+                          if (draftRef.current) draftRef.current.value = c.prompt
+                          setDraft(c.prompt)
+                          setTimeout(() => submitDraft(null), 0)
+                        } else {
+                          const cur = draftRef.current?.value || draft
+                          const next = cur ? `${cur}\n${c.prompt}` : c.prompt
+                          if (draftRef.current) draftRef.current.value = next
+                          setDraft(next)
+                          draftRef.current?.focus()
+                        }
+                      }}>
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
           </>
@@ -3449,7 +3469,7 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
           ⌥ {detail?.agent || session.agent}
         </div>
       )}
-      {/* Profile · duration · delete — one compact line on both desktop and mobile */}
+      {/* Profile · duration · shortcut hints · delete — one compact line */}
       <div className="detail-meta-strip">
         {(detail?.kiro_profile || session.kiro_profile) && (
           <span className="detail-meta-strip-profile" title="Kiro profile used for this session">
@@ -3464,6 +3484,20 @@ function DetailPanel({ session, onClose, onTakeover, onResume, onRefresh, onSele
               <> · {durationRecord.outcome.tool_calls_total} calls</>
             )}
           </span>
+        )}
+        {!isMobileBrowser && (
+          <div className="shortcut-hints" aria-label="Keyboard shortcuts">
+            {(composerFocused && canSend ? [
+              ['↵', 'send'], ['⇧↵', 'new line'], ['↑ ↓', 'history'],
+              ['esc', draft ? 'clear' : (isWorking ? 'cancel turn' : 'clear')],
+              ['⌃X', 'to kiro'],
+            ] : [
+              ['F', expanded ? 'minimise' : 'maximise'], ['esc', 'close'],
+              ['⌘J', 'quick chat'], ['⌘K', 'palette'], ['⌘↩', 'new session'],
+            ]).map(([k, label]) => (
+              <span key={k} className="shortcut-hint"><kbd>{k}</kbd> {label}</span>
+            ))}
+          </div>
         )}
         {(status === 'done' || control === 'archived' || status === 'idle' || status === 'error') && (
           <button className="detail-delete-btn" aria-label="Delete session" onClick={async () => {
