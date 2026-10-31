@@ -1323,6 +1323,8 @@ body {
   flex-shrink: 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Review rows are finished — their ✓ shares the spinner slot but stays still. */
+.working-row-review .working-spinner { animation: none; }
 .working-name {
   font-weight: 600;
   color: var(--text);
